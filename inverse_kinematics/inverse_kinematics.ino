@@ -18,9 +18,20 @@
 
 #define GRIPPER_LENGTH 100.0
 
-AccelStepper stepperZ (TODO);
-AccelStepper stepperJ1(TODO);
-AccelStepper stepperJ2(TODO);
+// Define pin connections
+const int dirPinZ = 7;
+const int dirPinY = 6;
+const int dirPinX = 5;
+const int stepPinZ = 4;
+const int stepPinY = 3;
+const int stepPinX = 2;
+
+// Define motor interface type
+#define motorInterfaceType 1
+
+AccelStepper stepperZ (motorInterfaceType, stepPinX, dirPinX);
+AccelStepper stepperJ1(motorInterfaceType, stepPinY, dirPinY);
+AccelStepper stepperJ2(motorInterfaceType, stepPinZ, dirPinZ);
 
 Servo gripper;
 
