@@ -3,14 +3,14 @@
 
 // Steps per revolution for NEMA 17 (200 steps * microstepping)
 // Adjust MICROSTEP to match the driver (pins)
-#define MICROSTEP TODO
+#define MICROSTEP 16
 #define STEPS_PER_REV (200 * MICROSTEP)
 
 // Degrees per step
 #define DEG_PER_STEP (360.0 / STEPS_PER_REV)
 
 // Z-axis: steps per mm (depends on the lead screw pitch)
-#define Z_STEPS_PER_MM TODO
+#define Z_STEPS_PER_MM 800
 
 #define j1 287.5
 #define j2 250.0
@@ -18,7 +18,7 @@
 
 #define GRIPPER_LENGTH 100.0
 
-AccelStepper stepperZ (TODO);
+AccelStepper stepperZ(TODO);
 AccelStepper stepperJ1(TODO);
 AccelStepper stepperJ2(TODO);
 
@@ -149,5 +149,31 @@ void parseSerial() {
     } else {
         Serial.println("Unknown command.");
     }
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    stepperZ.setMaxSpeed(TODO);
+    stepperZ.setAcceleration(TODO);
+
+    stepperJ1.setMaxSpeed(TODO);
+    stepperJ1.setAcceleration(TODO);
+
+    stepperJ2.setMaxSpeed(TODO);
+    stepperJ2.setAcceleration(TODO);
+
+    gripper.attach(SERVO_PIN);
+    openGripper();
+}
+
+void loop() {
+     // Handle serial commands
+    parseSerial();
+
+    // Keep motors running (non-blocking)
+    stepperZ.run();
+    stepperJ1.run();
+    stepperJ2.run();
 }
 
