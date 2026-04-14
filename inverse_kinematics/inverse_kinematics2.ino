@@ -1,4 +1,3 @@
-#include <AccelStepper.h>
 #include <Servo.h>
 
 #define MICROSTEP 16
@@ -20,18 +19,17 @@
 #define j3 290.0
 #define GRIPPER_LENGTH 100.0
 
-const int dirPinZ = 7;
-const int dirPinY = 6;
-const int dirPinX = 5;
-const int stepPinZ = 4;
-const int stepPinY = 3;
-const int stepPinX = 2;
+const int DirZ = 7;
+const int DirY = 6;
+const int DirX = 5;
+const int StepZ = 4;
+const int StepY = 3;
+const int StepX = 2;
 
-#define motorInterfaceType 1
+const int EnablePin = 8;   // ENABLE (LOW = ON)
 
-AccelStepper stepperZ(motorInterfaceType, stepPinX, dirPinX);
-AccelStepper stepperJ1(motorInterfaceType, stepPinY, dirPinY);
-AccelStepper stepperJ2(motorInterfaceType, stepPinZ, dirPinZ);
+// speed tuning for Y / Z (bit-banged)
+unsigned int pulseDelay = 1500;   // microseconds HIGH
 
 Servo gripper;
 
@@ -84,29 +82,88 @@ float stepsToDegreesJ2(long steps) {
 
 void moveZ(float z_mm) {
   float carriageZ = z_mm + GRIPPER_LENGTH;
-  stepperZ.moveTo(mmToSteps(carriageZ));
+
+  if (carriageZ > j3)
+    return;
+
+  long stepsZ = mmToSteps(carriageZ);
+
+  Serial.print("Moving Z ");
+  Serial.print(stepsZ);
+  Serial.println(" steps");
+
+  long countZ = labs(stepsZ);
+
+  if (stepsZ > 0) digitalWrite(DirZ, HIGH);
+  else           digitalWrite(DirZ, LOW);
+
+  Serial.print("Z count is");
+  Serial.println(countZ);
+
+  for (long i = 0; i < countZ; i++) {
+    digitalWrite(StepZ, HIGH);
+    delayMicroseconds(pulseDelay);
+    digitalWrite(StepZ, LOW);
+    delayMicroseconds(pulseDelay);
+  }
+
   currentZ = z_mm;
 }
 
 void moveXY(float x, float y) {
   inverseKinematics(x, y);
-  stepperJ1.moveTo(degreesToStepsJ1(currentTheta1));
-  stepperJ2.moveTo(degreesToStepsJ2(currentTheta2));
+
+  long stepsJ1 = degreesToStepsJ1(currentTheta1);
+  long stepsJ2 = degreesToStepsJ1(currentTheta2);
+
+  Serial.print("Moving X ");
+  Serial.print(stepsJ1);
+  Serial.println(" steps");
+
+  Serial.print("Moving Y ");
+  Serial.print(stepsJ2);
+  Serial.println(" steps");
+
+  long countJ1 = labs(stepsJ1);
+  long countJ2 = labs(stepsJ2);
+
+  if (stepsJ1 > 0) digitalWrite(DirX, LOW);
+  else           digitalWrite(DirX, HIGH);
+
+  if (stepsJ2 > 0) digitalWrite(DirY, LOW);
+  else           digitalWrite(DirY, HIGH);
+
+  Serial.print("X Count is");
+  Serial.println(countJ1);
+
+  Serial.print("Y Count is");
+  Serial.println(countJ2);
+
+  for (long i = 0; i < countJ1; i++) {
+    digitalWrite(StepX, HIGH);
+    delayMicroseconds(pulseDelay);
+    digitalWrite(StepX, LOW);
+    delayMicroseconds(pulseDelay);
+  }
+
+  for (long i = 0; i < countJ2; i++) {
+    digitalWrite(StepY, HIGH);
+    delayMicroseconds(pulseDelay);
+    digitalWrite(StepY, LOW);
+    delayMicroseconds(pulseDelay);
+  }
 }
 
 void moveTo(float x, float y, float z_mm) {
-  moveZ(z_mm);
-  moveXY(x, y);
-}
+  if (currentZ != z_mm){
+    moveZ(z_mm);
+  } 
 
-void waitForMotors() {
-  while (stepperZ.distanceToGo() != 0 ||
-         stepperJ1.distanceToGo() != 0 ||
-         stepperJ2.distanceToGo() != 0) {
-    stepperZ.run();
-    stepperJ1.run();
-    stepperJ2.run();
+  if (currentX != x || currentY != y){
+    moveXY(x, y);
   }
+  
+  
 }
 
 void openGripper() {
@@ -138,8 +195,7 @@ void parseSerial() {
     if (zi >= 0) z = cmd.substring(zi + 1).toFloat();
 
     moveTo(x, y, z);
-    waitForMotors();
-
+  
   } else if (cmd == "OG") {
     openGripper();
 
@@ -151,19 +207,21 @@ void parseSerial() {
 void setup() {
   Serial.begin(115200);
 
-  stepperZ.setMaxSpeed(TODO);
-  stepperZ.setAcceleration(TODO);
+  pinMode(StepX, OUTPUT);
+  pinMode(DirX,  OUTPUT);
 
-  stepperJ1.setMaxSpeed(TODO);
-  stepperJ1.setAcceleration(TODO);
+  pinMode(StepY, OUTPUT);
+  pinMode(DirY,  OUTPUT);
 
-  stepperJ2.setMaxSpeed(TODO);
-  stepperJ2.setAcceleration(TODO);
+  pinMode(StepZ, OUTPUT);
+  pinMode(DirZ,  OUTPUT);
+
+  pinMode(EnablePin, OUTPUT);
+  digitalWrite(EnablePin, LOW);
+
+  Serial.println("ready");
 }
 
 void loop() {
   parseSerial();
-  stepperZ.run();
-  stepperJ1.run();
-  stepperJ2.run();
 }
