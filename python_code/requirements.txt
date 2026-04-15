@@ -1,0 +1,5 @@
+opencv-python
+numpy
+python-chess
+stockfish
+pyserial
