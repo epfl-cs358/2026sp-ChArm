@@ -15,6 +15,8 @@ public:
     // Solve for joint angles that place the end effector at (x, y).
     // If the target is out of reach the call is a no-op (state is unchanged).
     void inverseKinematics(float x, float y);
+    // Calculate where the end effector actually is
+    void forwardKinematics(float theta1Deg, float theta2Deg);
 
     float theta1() const { return currentTheta1; }
     float theta2() const { return currentTheta2; }
