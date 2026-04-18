@@ -10,3 +10,7 @@ void ScaraArm::moveXY(float x, float y) {
     joint1.moveTo(ik.theta1());
     joint2.moveTo(ik.theta2());
 }
+
+void ScaraArm::sync() {
+    ik.forwardKinematics(joint1.angle(), joint2.angle());
+}

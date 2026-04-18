@@ -3,6 +3,7 @@
 
 #include "scaraJoint.h"
 #include "scaraKinematics.h"
+#include <Arduino.h>
 
 // Ties two ScaraJoints together with a ScaraKinematics solver.
 // Lets the caller move the end effector in Cartesian (x, y) space.
@@ -17,8 +18,15 @@ public:
     // No-op if the target is out of reach.
     void moveXY(float x, float y);
 
+    void sync();
+
     float theta1() const { return ik.theta1(); }
     float theta2() const { return ik.theta2(); }
+
+    float x() const { return ik.x(); }
+    float y() const { return ik.y(); }
+
+    void sync();
 
 private:
     ScaraJoint& joint1;

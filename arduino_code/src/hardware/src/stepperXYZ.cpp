@@ -38,7 +38,7 @@ void StepperXYZ::step() {
 void StepperXYZ::step(long steps) {
     if (steps == 0) return;
     setDirection(steps > 0);
-    long count = steps > 0 ? steps : -steps;
+    long count = labs(steps);
     for (long i = 0; i < count; ++i) {
         step();
     }

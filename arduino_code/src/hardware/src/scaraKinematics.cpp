@@ -35,3 +35,14 @@ void ScaraKinematics::inverseKinematics(float x, float y) {
     currentTheta1 = theta1;
     currentTheta2 = theta2;
 }
+
+void ScaraKinematics::forwardKinematics(float theta1Deg, float theta2Deg) {
+    float t1 = theta1Deg * PI / 180.0f;
+    float t2 = theta2Deg * PI / 180.0f;
+
+    currentTheta1 = theta1Deg;
+    currentTheta2 = theta2Deg;
+
+    currentX = j1 * cos(t1) + j2 * cos(t1 + t2);
+    currentY = j1 * sin(t1) + j2 * sin(t1 + t2);
+}

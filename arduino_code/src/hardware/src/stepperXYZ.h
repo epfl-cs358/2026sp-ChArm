@@ -7,7 +7,7 @@
 // The shared CNC shield ENABLE pin is handled separately (see pins.h).
 class StepperXYZ {
 public:
-    StepperXYZ(uint8_t stepPin, uint8_t dirPin, uint8_t microstep = 1);
+    StepperXYZ(uint8_t stepPin, uint8_t dirPin, uint8_t microstep);
 
     void begin();
 
