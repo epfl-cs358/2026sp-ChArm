@@ -7,7 +7,10 @@
 class LeadScrew {
 public:
     LeadScrew(StepperXYZ& stepper, 
-            uint8_t bottomLimitPin);
+            uint8_t bottomLimitPin,
+            float StepsPerMM,
+            float maxTravel_mm,
+            float gripperLength);
 
     void home(float backoff_mm = 1.0f);
 
@@ -20,7 +23,8 @@ private:
     StepperXYZ& stepper;
     uint8_t     bottomLimitPin;
     float       stepsPerMM;
-    float       maxTravel_mm;
+    float maxTravel_mm;
+    float gripperLength;
 
     bool bottomHit() const;
     bool wouldExceedTop(float mm) const;
