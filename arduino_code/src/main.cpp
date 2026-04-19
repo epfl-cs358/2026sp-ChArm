@@ -13,7 +13,7 @@ StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1, MICROSTEPS);
 ScaraJoint joint1(xStepper, X_LIMIT_MIN_PIN, X_LIMIT_MAX_PIN, STEPS_PER_REV, GEAR_RATIO_J1);
 ScaraJoint joint2(yStepper, Y_LIMIT_MIN_PIN, Y_LIMIT_MAX_PIN, STEPS_PER_REV, GEAR_RATIO_J2);
 
-LeadScrew leadScrew(zStepper, Z_LIMIT_BOTTOM_PIN);
+LeadScrew leadScrew(zStepper, Z_LIMIT_BOTTOM_PIN, Z_MM_PER_REV, Z_MAX_MM, GRIPPER_LENGTH);
 
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
 

@@ -2,7 +2,7 @@
 #define CONFIG_H
 
 // Motor
-const int   MICROSTEPS = 16;
+const int MICROSTEPS = 16;
 const float STEPS_PER_REV  = 200.0f;
 
 // Gear ratios
@@ -22,6 +22,7 @@ const float LINK3_LENGTH = 290.0f;  // lead screw / Z
 // Lead screw
 const float Z_MAX_MM = LINK3_LENGTH;
 const float Z_MM_PER_REV = 8.0f;
+const float GRIPPER_LENGTH  = 100.0f;
 
 #endif
 
