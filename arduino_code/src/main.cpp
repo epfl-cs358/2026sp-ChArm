@@ -37,17 +37,19 @@ void setup() {
   yStepper.begin();
   zStepper.begin();
 
+  Serial.begin(9600);
+  Serial.println("ChArm starting — homing all axes...");
+
   homeAll();
 
-  Serial.begin(9600);
   Serial.println("f = 1 forward step in X | b = 1 backward step in X");
   Serial.println("w = 1 forward step in Y | s = 1 backward step in Y");
-  Serial.println("u = 1 forward step in Y | d = 1 backward step in Y");
-  Serial.println("home = home all axes");
-  Serial.println("moveXY = move end effector to X Y (mm)");
-  Serial.println("moveZ = move Z to z (mm)");
+  Serial.println("u = 1 forward step in Z | d = 1 backward step in Z");
+  Serial.println("home    = home all axes");
+  Serial.println("moveXY  = move end effector to X Y (mm)");
+  Serial.println("moveZ   = move Z to z (mm)");
   Serial.println("moveXYZ = move to (X, Y, Z) (mm)");
-  Serial.println("pos = print all positions");
+  Serial.println("pos     = print all positions and homing status");
 }
  
 void loop() {
@@ -130,18 +132,21 @@ void loop() {
         arm.moveXY(x, y);
     
       } else if (cmd == "pos") {
-        Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println("°");
-        Serial.print("Joint2: "); Serial.print(joint2.angle()); Serial.println("°");
+        Serial.print("Homed:  J1="); Serial.print(joint1.isHomed() ? "Yes" : "No");
+        Serial.print("  J2=");       Serial.print(joint2.isHomed() ? "Yes" : "No");
+        Serial.print("  Z=");        Serial.println(leadScrew.isHomed() ? "Yes" : "No");
+        Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println(" deg");
+        Serial.print("Joint2: "); Serial.print(joint2.angle()); Serial.println(" deg");
         Serial.print("Position: ("); 
         Serial.print(arm.x()); Serial.print(", ");
         Serial.print(arm.y()); Serial.print(", ");
-        Serial.print(leadScrew.position_mm()); Serial.print(")");
+        Serial.print(leadScrew.position_mm()); Serial.println(") mm");
       }
 
       Serial.print("Position: ("); 
       Serial.print(arm.x()); Serial.print(", ");
       Serial.print(arm.y()); Serial.print(", ");
-      Serial.print(leadScrew.position_mm()); Serial.print(")");
+      Serial.print(leadScrew.position_mm()); Serial.println(") mm");
     } 
   }
 }

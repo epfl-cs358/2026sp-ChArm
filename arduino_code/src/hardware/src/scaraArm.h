@@ -18,6 +18,7 @@ public:
     // No-op if the target is out of reach.
     void moveXY(float x, float y);
 
+    // Update the kinematics solver from the joints' current angles.
     void sync();
 
     float theta1() const { return ik.theta1(); }
@@ -25,8 +26,6 @@ public:
 
     float x() const { return ik.x(); }
     float y() const { return ik.y(); }
-
-    void sync();
 
 private:
     ScaraJoint& joint1;

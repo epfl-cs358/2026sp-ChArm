@@ -1,9 +1,14 @@
 #include "leadScrew.h"
 #include "config.h"
+#include <math.h>
 
 LeadScrew::LeadScrew(StepperXYZ& stepper, uint8_t bottomLimitPin) 
     : stepper(stepper) {
     this->bottomLimitPin = bottomLimitPin;
+    // steps/mm = (native steps/rev × microstep factor) / (mm/rev lead-screw pitch)
+    this->stepsPerMM  = (STEPS_PER_REV * stepper.microstep()) / Z_MM_PER_REV;
+    this->maxTravel_mm = Z_MAX_MM;
+    this->homed = false;
     pinMode(bottomLimitPin, INPUT_PULLUP);
 }
 
@@ -12,14 +17,14 @@ bool LeadScrew::bottomHit() const {
 }
 
 bool LeadScrew::wouldExceedTop(float mm) const {
-    return mm > Z_MAX_MM;
+    return mm > maxTravel_mm;
 }
 
 void LeadScrew::home(float backoff_mm) {
-    Serial.println("Z: moving to bottom");
+    homed = false;
 
-    // Stop the program and flip
-    // if motor goes wrong way
+    Serial.println("Z: homing — seeking bottom limit switch");
+
     stepper.setDirection(false);
     stepper.setStepDelay(800);
 
@@ -27,31 +32,42 @@ void LeadScrew::home(float backoff_mm) {
         stepper.step();
     }
 
+    // Back off from the bottom switch so it is not held pressed during travel.
+    long backoffSteps = lroundf(backoff_mm * stepsPerMM);
     stepper.resetPosition();
-    moveBy_mm(backoff_mm);
+    stepper.setDirection(true);
+    for (long i = 0; i < backoffSteps; i++) {
+        stepper.step();
+    }
     stepper.resetPosition();
 
     stepper.setStepDelay(200);
-    Serial.println("Z: home done.");
+    homed = true;
+    Serial.println("Z: homed. Position reset to 0 mm.");
 }
 
 void LeadScrew::moveTo_mm(float mm) {
+    if (!homed) {
+        Serial.println("Z: not homed yet — run home() first.");
+        return;
+    }
+
+    if (mm < 0.0f) {
+        Serial.println("Z: target below 0 mm — move cancelled.");
+        return;
+    }
+
     if (wouldExceedTop(mm)) {
+        Serial.print("Z: target ");
         Serial.print(mm);
         Serial.print(" mm exceeds max travel ");
-        Serial.print(Z_MAX_MM);
-        Serial.println("; Move cancelled");
-        
+        Serial.print(maxTravel_mm);
+        Serial.println(" mm — move cancelled.");
         return;
     }
 
-    if (mm < 0) {
-        Serial.println("Z: target below 0,; Move cancelled");
-        return;
-    }
-
-    long target  = (long)(mm * Z_MM_PER_REV);
-    long steps   = target - stepper.position();
+    long target = lroundf(mm * stepsPerMM);
+    long steps  = target - stepper.position();
     stepper.step(steps);
 }
 
@@ -60,5 +76,5 @@ void LeadScrew::moveBy_mm(float mm) {
 }
 
 float LeadScrew::position_mm() const {
-    return stepper.position() / Z_MM_PER_REV;
+    return stepper.position() / stepsPerMM;
 }

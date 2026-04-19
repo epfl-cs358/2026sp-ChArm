@@ -26,7 +26,15 @@ public:
 
     float stepsPerDegree() const;
 
+    // Home the joint using its two limit switches.
+    // Moves to the MIN switch to establish the zero position, then sweeps to
+    // the MAX switch to record the full travel range.
+    // backoffDeg: degrees to retreat from each switch so the switch is not
+    //             held pressed during normal operation.
     void home(float backoffDeg = 5.0f);
+
+    // Returns true after a successful home() sequence.
+    bool isHomed() const { return homed; }
 
     void checkLimits();
 
@@ -38,6 +46,7 @@ private:
     float gearRatio;
     float min_Angle;
     float max_Angle;
+    bool  homed;
 };
 
 #endif

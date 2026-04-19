@@ -8,6 +8,9 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper, uint8_t minPin, uint8_t maxPin,
     this->maxPin = maxPin;
     this->stepsPerRev = stepsPerRev;
     this->gearRatio = gearRatio;
+    this->min_Angle = 0.0f;
+    this->max_Angle = 0.0f;
+    this->homed = false;
     pinMode(minPin, INPUT_PULLUP);
     pinMode(maxPin, INPUT_PULLUP);
 }
@@ -23,14 +26,19 @@ float ScaraJoint::angle() const {
 }
 
 void ScaraJoint::moveTo(float angleDeg) {
-    if (max_Angle == 0.0f) {
-        Serial.println("Joint: not homed yet!");
+    if (!homed) {
+        Serial.println("Joint: not homed yet — run home() first.");
         return;
     }
 
     if (angleDeg < min_Angle || angleDeg > max_Angle) {
-        Serial.print("Joint: out of bound position; ");
-        Serial.println("Move cancelled.");
+        Serial.print("Joint: target ");
+        Serial.print(angleDeg);
+        Serial.print(" deg out of range [");
+        Serial.print(min_Angle);
+        Serial.print(", ");
+        Serial.print(max_Angle);
+        Serial.println("] — move cancelled.");
         return;
     }
 
@@ -44,47 +52,55 @@ void ScaraJoint::moveBy(float deltaDeg) {
 }
 
 void ScaraJoint::home(float backoffDeg) {
-    Serial.println("Joint: homing to MIN switch");
+    homed = false;
 
-    bool dirMin = false;
-    bool dirMax = true;
+    Serial.println("Joint: homing — seeking MIN limit switch");
 
-    // Go toward min switch
-    stepper.setDirection(dirMin);
+    long backoffSteps = lroundf(backoffDeg * stepsPerDegree());
+
+    // ── Phase 1: move toward MIN limit switch ──────────────────────────────
+    // Direction convention: false = toward min, true = toward max.
+    // If the MAX switch is hit before the MIN switch the motor is wired in
+    // reverse; print an error and abort so the operator can fix the wiring.
+    stepper.setDirection(false);
     while (digitalRead(minPin) == HIGH) {
-
-        // checking if wrong direction
         if (digitalRead(maxPin) == LOW) {
-            Serial.println("Joint: wrong direction, reversing");
-            dirMin = true;
-            dirMax = false;
-            stepper.setDirection(dirMin);  // flip
+            Serial.println("Joint: ERROR — hit MAX switch while seeking MIN.");
+            Serial.println("Joint: Reverse motor wiring or swap MIN/MAX switch pins, then retry homing.");
+            return;
         }
-
         stepper.step();
     }
 
+    // Back off from MIN switch so the switch is released during normal travel.
     stepper.resetPosition();
-    stepper.setDirection(dirMax);
-    moveBy(backoffDeg);
+    stepper.setDirection(true);
+    for (long i = 0; i < backoffSteps; i++) {
+        stepper.step();
+    }
     stepper.resetPosition();
     min_Angle = 0.0f;
 
-    Serial.println("Joint: homing to MAX switch");
+    // ── Phase 2: sweep to MAX limit switch to measure full range ───────────
+    Serial.println("Joint: seeking MAX limit switch");
 
-    // Go toward max switch
-    stepper.setDirection(dirMax);
+    stepper.setDirection(true);
     while (digitalRead(maxPin) == HIGH) {
         stepper.step();
     }
 
-    stepper.setDirection(dirMin);
-    moveBy(backoffDeg);
+    // Back off from MAX switch.
+    stepper.setDirection(false);
+    for (long i = 0; i < backoffSteps; i++) {
+        stepper.step();
+    }
 
     max_Angle = angle();
+    homed = true;
 
-    stepper.setStepDelay(200);
-    Serial.println("Joint: home done.");
+    Serial.print("Joint: homed. Range [0, ");
+    Serial.print(max_Angle);
+    Serial.println("] deg");
 }
 
 void ScaraJoint::checkLimits() {
@@ -96,5 +112,4 @@ void ScaraJoint::checkLimits() {
         Serial.println("Joint: MAX limit hit!");
     }
 }
-
 

@@ -12,13 +12,13 @@ const int Z_DIR_IN1 = 7;
 
 const int ENABLE_PIN = 8;
 
-// still have to change
-const int X_LIMIT_MIN_PIN; // todo
-const int X_LIMIT_MAX_PIN; // todo
+// Limit switch pins (Arduino Mega 2560)
+const int X_LIMIT_MIN_PIN  = 9;
+const int X_LIMIT_MAX_PIN  = 10;
 
-const int Y_LIMIT_MIN_PIN; // todo
-const int Y_LIMIT_MAX_PIN; // todo
+const int Y_LIMIT_MIN_PIN  = 11;
+const int Y_LIMIT_MAX_PIN  = 12;
 
-const int Z_LIMIT_BOTTOM_PIN; // todo
+const int Z_LIMIT_BOTTOM_PIN = 13;
 
 #endif
