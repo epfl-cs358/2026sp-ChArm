@@ -5,6 +5,7 @@
 #include "hardware/src/leadScrew.h"
 #include "hardware/src/scaraArm.h"
 #include "hardware/src/config.h"
+#include "hardware/src/gripper.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1, MICROSTEPS);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1, MICROSTEPS);
@@ -16,6 +17,8 @@ ScaraJoint joint2(yStepper, Y_LIMIT_MIN_PIN, Y_LIMIT_MAX_PIN, STEPS_PER_REV, GEA
 LeadScrew leadScrew(zStepper, Z_LIMIT_BOTTOM_PIN, Z_MM_PER_REV, Z_MAX_MM, GRIPPER_LENGTH);
 
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
+
+Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
 
 void homeAll() {
     Serial.println("Homing all axes");
@@ -33,6 +36,8 @@ void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
 
+  gripper.begin();
+
   xStepper.begin();
   yStepper.begin();
   zStepper.begin();
@@ -43,11 +48,16 @@ void setup() {
   Serial.println("f = 1 forward step in X | b = 1 backward step in X");
   Serial.println("w = 1 forward step in Y | s = 1 backward step in Y");
   Serial.println("u = 1 forward step in Y | d = 1 backward step in Y");
+  Serial.println("");
   Serial.println("home = home all axes");
   Serial.println("moveXY = move end effector to X Y (mm)");
   Serial.println("moveZ = move Z to z (mm)");
   Serial.println("moveXYZ = move to (X, Y, Z) (mm)");
   Serial.println("pos = print all positions");
+  Serial.println("");
+  Serial.println("OG = open gripper");
+  Serial.println("CG = close gripper");
+  Serial.println("GS = gripper status");
 }
  
 void loop() {
@@ -92,6 +102,15 @@ void loop() {
       Serial.print("Position: ");
       Serial.print(stepCount);
       Serial.println(" steps");
+    
+    } else if (cmd.length() == 2) {
+
+      } else if (cmd == "OG") {
+        gripper.open();
+      } else if (cmd == "CG") {
+        gripper.close();
+      } else if (cmd == "GS") {
+        Serial.println(gripper.isOpen() ? "Gripper: open" : "Gripper: closed");
 
     } else {
 

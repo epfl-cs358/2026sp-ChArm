@@ -24,5 +24,9 @@ const float Z_MAX_MM = LINK3_LENGTH;
 const float Z_MM_PER_REV = 8.0f;
 const float GRIPPER_LENGTH  = 100.0f;
 
+// Gripper
+const int OPEN_ANGLE = 0;
+const int CLOSED_ANGLE = 90;
+
 #endif
 
