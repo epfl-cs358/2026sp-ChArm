@@ -1,5 +1,4 @@
 #include "leadScrew.h"
-#include "config.h"
 
 LeadScrew::LeadScrew(StepperXYZ& stepper, uint8_t bottomLimitPin, float stepsPerMM, 
                     float maxTravel_mm, float gripperLength) 
