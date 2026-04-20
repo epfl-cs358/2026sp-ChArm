@@ -1,5 +1,5 @@
-opencv-python
-numpy
-python-chess
+numpy<2
+opencv-python==4.9.0.80
+python-chess>=1.999
 stockfish
 pyserial
