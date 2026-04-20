@@ -2,12 +2,13 @@
 #define LEAD_SCREW_H
 
 #include "stepperXYZ.h"
+#include "limitSwitch.h"
 #include <Arduino.h>
 
 class LeadScrew {
 public:
     LeadScrew(StepperXYZ& stepper, 
-            uint8_t bottomLimitPin,
+            LimitSwitch& bottomSwitch,
             float StepsPerMM,
             float maxTravel_mm,
             float gripperLength);
@@ -21,12 +22,11 @@ public:
 
 private:
     StepperXYZ& stepper;
-    uint8_t     bottomLimitPin;
-    float       stepsPerMM;
+    LimitSwitch& bottomSwitch;
+    float stepsPerMM;
     float maxTravel_mm;
     float gripperLength;
 
-    bool bottomHit() const;
     bool wouldExceedTop(float mm) const;
 };
 

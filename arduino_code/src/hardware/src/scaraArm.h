@@ -18,13 +18,10 @@ public:
     // No-op if the target is out of reach.
     void moveXY(float x, float y);
 
-    void sync();
-
-    float theta1() const { return ik.theta1(); }
-    float theta2() const { return ik.theta2(); }
-
-    float x() const { return ik.x(); }
-    float y() const { return ik.y(); }
+    float theta1() const { return currentTheta1; }
+    float theta2() const { return currentTheta2; }
+    float x()      const { return currentX; }
+    float y()      const { return currentY; }
 
     void sync();
 
@@ -32,6 +29,10 @@ private:
     ScaraJoint& joint1;
     ScaraJoint& joint2;
     ScaraKinematics ik;
+    float currentX;
+    float currentY;
+    float currentTheta1;
+    float currentTheta2;
 };
 
 #endif
