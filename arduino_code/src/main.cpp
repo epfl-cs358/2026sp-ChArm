@@ -6,15 +6,22 @@
 #include "hardware/src/scaraArm.h"
 #include "hardware/src/config.h"
 #include "hardware/src/gripper.h"
+#include "hardware/src/limitSwitch.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1, MICROSTEPS);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1, MICROSTEPS);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1, MICROSTEPS);
 
-ScaraJoint joint1(xStepper, X_LIMIT_MIN_PIN, X_LIMIT_MAX_PIN, STEPS_PER_REV, GEAR_RATIO_J1);
-ScaraJoint joint2(yStepper, Y_LIMIT_MIN_PIN, Y_LIMIT_MAX_PIN, STEPS_PER_REV, GEAR_RATIO_J2);
+LimitSwitch j1Min(X_LIMIT_MIN_PIN, true);  
+LimitSwitch j1Max(X_LIMIT_MAX_PIN, true);
+LimitSwitch j2Min(Y_LIMIT_MIN_PIN, true);  
+LimitSwitch j2Max(Y_LIMIT_MAX_PIN, true);
+LimitSwitch zBottom(Z_LIMIT_BOTTOM_PIN, true);
 
-LeadScrew leadScrew(zStepper, Z_LIMIT_BOTTOM_PIN, Z_MM_PER_REV, Z_MAX_MM, GRIPPER_LENGTH);
+ScaraJoint joint1(xStepper, j1Min, j1Max, STEPS_PER_REV, GEAR_RATIO_J1);
+ScaraJoint joint2(yStepper, j2Min, j1Min, STEPS_PER_REV, GEAR_RATIO_J2);
+
+LeadScrew leadScrew(zStepper, zBottom, Z_MM_PER_REV, Z_MAX_MM, GRIPPER_LENGTH);
 
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
 
@@ -36,28 +43,27 @@ void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
 
+  j1Min.begin();  
+  j1Max.begin();
+
+  j2Min.begin();  
+  j2Max.begin();
+
+  zBottom.begin();
+
   gripper.begin();
 
   xStepper.begin();
   yStepper.begin();
   zStepper.begin();
 
+  Serial.begin(9600);
+
   homeAll();
 
-  Serial.begin(9600);
-  Serial.println("f = 1 forward step in X | b = 1 backward step in X");
-  Serial.println("w = 1 forward step in Y | s = 1 backward step in Y");
-  Serial.println("u = 1 forward step in Y | d = 1 backward step in Y");
-  Serial.println("");
-  Serial.println("home = home all axes");
-  Serial.println("moveXY = move end effector to X Y (mm)");
-  Serial.println("moveZ = move Z to z (mm)");
-  Serial.println("moveXYZ = move to (X, Y, Z) (mm)");
-  Serial.println("pos = print all positions");
-  Serial.println("");
-  Serial.println("OG = open gripper");
-  Serial.println("CG = close gripper");
-  Serial.println("GS = gripper status");
+  Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
+  Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
+  Serial.println("OG = open gripper | CG = close gripper | GS = gripper status");
 }
  
 void loop() {
@@ -105,12 +111,13 @@ void loop() {
     
     } else if (cmd.length() == 2) {
 
-      } else if (cmd == "OG") {
+      if (cmd == "OG") {
         gripper.open();
       } else if (cmd == "CG") {
         gripper.close();
       } else if (cmd == "GS") {
         Serial.println(gripper.isOpen() ? "Gripper: open" : "Gripper: closed");
+      }
 
     } else {
 

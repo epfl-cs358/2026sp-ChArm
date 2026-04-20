@@ -1,15 +1,13 @@
 #include "scaraJoint.h"
 #include <math.h>
 
-ScaraJoint::ScaraJoint(StepperXYZ& stepper, uint8_t minPin, uint8_t maxPin,
+ScaraJoint::ScaraJoint(StepperXYZ& stepper, LimitSwitch& minSwitch, LimitSwitch& maxSwitch, 
                         float stepsPerRev, float gearRatio)
-    : stepper(stepper) {
-    this->minPin = minPin;
-    this->maxPin = maxPin;
+    : stepper(stepper), minSwitch(minSwitch), maxSwitch(maxSwitch) {
     this->stepsPerRev = stepsPerRev;
     this->gearRatio = gearRatio;
-    pinMode(minPin, INPUT_PULLUP);
-    pinMode(maxPin, INPUT_PULLUP);
+    this->max_Angle = 0.0f;
+    this->min_Angle = 0.0f;
 }
 
 float ScaraJoint::stepsPerDegree() const {
@@ -51,10 +49,10 @@ void ScaraJoint::home(float backoffDeg) {
 
     // Go toward min switch
     stepper.setDirection(dirMin);
-    while (digitalRead(minPin) == HIGH) {
+    while (!minSwitch.isTriggered()) {
 
         // checking if wrong direction
-        if (digitalRead(maxPin) == LOW) {
+        if (maxSwitch.isTriggered()) {
             Serial.println("Joint: wrong direction, reversing");
             dirMin = true;
             dirMax = false;
@@ -74,7 +72,7 @@ void ScaraJoint::home(float backoffDeg) {
 
     // Go toward max switch
     stepper.setDirection(dirMax);
-    while (digitalRead(maxPin) == HIGH) {
+    while (!maxSwitch.isTriggered()) {
         stepper.step();
     }
 
@@ -85,16 +83,6 @@ void ScaraJoint::home(float backoffDeg) {
 
     stepper.setStepDelay(200);
     Serial.println("Joint: home done.");
-}
-
-void ScaraJoint::checkLimits() {
-    if (digitalRead(minPin) == LOW && !stepper.direction()) {
-        Serial.println("Joint: MIN limit hit!");
-    }
-
-    if (digitalRead(maxPin) == LOW && stepper.direction()) {
-        Serial.println("Joint: MAX limit hit!");
-    }
 }
 
 

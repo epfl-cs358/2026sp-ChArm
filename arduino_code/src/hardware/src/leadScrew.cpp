@@ -1,17 +1,11 @@
 #include "leadScrew.h"
 
-LeadScrew::LeadScrew(StepperXYZ& stepper, uint8_t bottomLimitPin, float stepsPerMM, 
+LeadScrew::LeadScrew(StepperXYZ& stepper, LimitSwitch& bottomSwitch, float stepsPerMM, 
                     float maxTravel_mm, float gripperLength) 
-    : stepper(stepper) {
-    this->bottomLimitPin = bottomLimitPin;
+    : stepper(stepper), bottomSwitch(bottomSwitch) {
     this->stepsPerMM = stepsPerMM;
     this->maxTravel_mm = maxTravel_mm;
     this->gripperLength = gripperLength;
-    pinMode(bottomLimitPin, INPUT_PULLUP);
-}
-
-bool LeadScrew::bottomHit() const {
-    return digitalRead(bottomLimitPin) == LOW;
 }
 
 bool LeadScrew::wouldExceedTop(float mm) const {
@@ -26,9 +20,7 @@ void LeadScrew::home(float backoff_mm) {
     stepper.setDirection(false);
     stepper.setStepDelay(800);
 
-    while (!bottomHit()) {
-        stepper.step();
-    }
+    while (!bottomSwitch.isTriggered()) { stepper.step(); }
 
     stepper.resetPosition();
     moveBy_mm(backoff_mm);
