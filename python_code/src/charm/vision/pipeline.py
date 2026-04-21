@@ -69,7 +69,7 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     color_results = detect_piece_colors(
         cells,
         occupancy_results,
-        white_threshold=150.0,
+        white_threshold=125.0,
         black_threshold=110.0,
     )
     piece_color_debug = draw_piece_color_debug(warped_board, cells, color_results)
