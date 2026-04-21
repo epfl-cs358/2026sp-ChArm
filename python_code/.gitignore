@@ -1,0 +1,15 @@
+.DS_Store
+**/.DS_Store
+
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+.pytest_cache/
+**/.pytest_cache/
+
+python_code/output_*.jpg
+python_code/output_*.png
+
+python_code/test_images/step*.png
