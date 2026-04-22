@@ -8,25 +8,35 @@
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
 
-StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1, MICROSTEPS);
-StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1, MICROSTEPS);
-StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1, MICROSTEPS);
+StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1, 0);
+StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1, 0);
+StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1, 0);
 
+/*
 LimitSwitch j1Min(X_LIMIT_MIN_PIN, true);  
 LimitSwitch j1Max(X_LIMIT_MAX_PIN, true);
 LimitSwitch j2Min(Y_LIMIT_MIN_PIN, true);  
 LimitSwitch j2Max(Y_LIMIT_MAX_PIN, true);
 LimitSwitch zBottom(Z_LIMIT_BOTTOM_PIN, true);
+*/
 
+/*
 ScaraJoint joint1(xStepper, j1Min, j1Max, STEPS_PER_REV, GEAR_RATIO_J1);
 ScaraJoint joint2(yStepper, j2Min, j1Min, STEPS_PER_REV, GEAR_RATIO_J2);
 
 LeadScrew leadScrew(zStepper, zBottom, Z_MM_PER_REV, Z_MAX_MM, GRIPPER_LENGTH);
+*/
+
+ScaraJoint joint1(xStepper, STEPS_PER_REV, GEAR_RATIO_J1);
+ScaraJoint joint2(yStepper, STEPS_PER_REV, GEAR_RATIO_J2);
+
+LeadScrew leadScrew(zStepper, Z_MM_PER_REV, GRIPPER_LENGTH);
 
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
 
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
 
+/*
 void homeAll() {
     Serial.println("Homing all axes");
 
@@ -36,6 +46,7 @@ void homeAll() {
 
     arm.sync();
 }
+    */
 
 int stepCount = 0;
 
@@ -43,23 +54,24 @@ void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
 
-  j1Min.begin();  
-  j1Max.begin();
+  //j1Min.begin();  
+  //j1Max.begin();
 
-  j2Min.begin();  
-  j2Max.begin();
+  //j2Min.begin();  
+  //j2Max.begin();
 
-  zBottom.begin();
+  //zBottom.begin();
 
-  gripper.begin();
+  //gripper.begin();
 
   xStepper.begin();
   yStepper.begin();
   zStepper.begin();
 
   Serial.begin(9600);
+  Serial.setTimeout(60000);
 
-  homeAll();
+  //homeAll();
 
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
@@ -68,8 +80,10 @@ void setup() {
  
 void loop() {
   if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');;
+    String cmd = Serial.readStringUntil('\n');
     cmd.trim();
+
+    while(Serial.available()) Serial.read();
 
     if (cmd.length() == 1) {
 
@@ -122,15 +136,28 @@ void loop() {
     } else {
 
       if (cmd == "home") {
-        homeAll();
+        //homeAll();
+
+      } else if (cmd.startsWith("angleX ")) {
+        String vals = cmd.substring(7);
+        int space   = vals.indexOf(' ');
+        float a = vals.substring(0, space).toFloat();
+        Serial.println(a);
+        joint1.moveTo(a);
       
+        } else if (cmd.startsWith("angleY ")) {
+        String vals = cmd.substring(7);
+        int space   = vals.indexOf(' ');
+        float a = vals.substring(0, space).toFloat();
+        joint2.moveTo(a);          
+                      
       } else if (cmd.startsWith("moveXY ")) {
         String vals = cmd.substring(7);
         int space   = vals.indexOf(' ');
         float x     = vals.substring(0, space).toFloat();
         float y     = vals.substring(space + 1).toFloat();
         Serial.print("Moving to X: "); Serial.print(x);
-        Serial.print(", Y: ");          Serial.println(y);
+        Serial.print(", Y: "); Serial.println(y);
         arm.moveXY(x, y);
 
       } else if (cmd.startsWith("moveZ ")) {
@@ -148,8 +175,8 @@ void loop() {
         float z = vals.substring(space2 + 1).toFloat();
 
         Serial.print("Moving to X: "); Serial.print(x);
-        Serial.print(", Y: ");          Serial.print(y);
-        Serial.print(", Z: ");          Serial.println(z);
+        Serial.print(", Y: "); Serial.print(y);
+        Serial.print(", Z: "); Serial.println(z);
 
         // Move Z first — bring arm to height before rotating
         leadScrew.moveTo_mm(z);
@@ -161,13 +188,13 @@ void loop() {
         Serial.print("Position: ("); 
         Serial.print(arm.x()); Serial.print(", ");
         Serial.print(arm.y()); Serial.print(", ");
-        Serial.print(leadScrew.position_mm()); Serial.print(")");
+        Serial.print(leadScrew.position_mm()); Serial.println(")");
       }
 
       Serial.print("Position: ("); 
       Serial.print(arm.x()); Serial.print(", ");
       Serial.print(arm.y()); Serial.print(", ");
-      Serial.print(leadScrew.position_mm()); Serial.print(")");
+      Serial.print(leadScrew.position_mm()); Serial.println(")");
     } 
   }
 }

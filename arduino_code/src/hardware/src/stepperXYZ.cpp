@@ -1,13 +1,13 @@
 #include "stepperXYZ.h"
 
-static const unsigned int DEFAULT_STEP_DELAY_US = 200;
+static const unsigned int DEFAULT_STEP_DELAY_US = 800;
 
 StepperXYZ::StepperXYZ(uint8_t stepPin, uint8_t dirPin, uint8_t microstep) {
     this->stepPin = stepPin;
     this->dirPin = dirPin;
     this->microstepValue = (microstep == 0) ? 1 : microstep;
     this->stepDelayUs = DEFAULT_STEP_DELAY_US;
-    this->positionSteps = 0;
+    this->positionSteps = 0; // don't need to use it just for calibration purposes PLEASE
     this->forward = true;
 }
 
@@ -37,7 +37,7 @@ void StepperXYZ::step() {
 
 void StepperXYZ::step(long steps) {
     if (steps == 0) return;
-    setDirection(steps > 0);
+    setDirection(steps > 0); //todo may need to change
     long count = labs(steps);
     for (long i = 0; i < count; ++i) {
         step();

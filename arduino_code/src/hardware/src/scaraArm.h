@@ -20,8 +20,8 @@ public:
 
     float theta1() const { return currentTheta1; }
     float theta2() const { return currentTheta2; }
-    float x()      const { return currentX; }
-    float y()      const { return currentY; }
+    float x() const { return currentX; }
+    float y() const { return currentY; }
 
     void sync();
 
