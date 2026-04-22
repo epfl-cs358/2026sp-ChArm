@@ -20,7 +20,7 @@ void ScaraArm::moveXY(float x, float y) {
 
 void ScaraArm::sync() {
     FKResult pos = ik.forwardKinematics(joint1.angle(), joint2.angle());
-    
+
     currentX = pos.x; 
     currentY = pos.y;
     currentTheta1 = joint1.angle(); 

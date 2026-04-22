@@ -7,13 +7,18 @@
 
 class LeadScrew {
 public:
-    LeadScrew(StepperXYZ& stepper, 
+    /*LeadScrew(StepperXYZ& stepper, 
             LimitSwitch& bottomSwitch,
             float StepsPerMM,
             float maxTravel_mm,
             float gripperLength);
+            */
+    
+    LeadScrew(StepperXYZ& stepper,
+            float StepsPerMM,
+            float gripperLength);
 
-    void home(float backoff_mm = 1.0f);
+    //void home(float backoff_mm = 1.0f);
 
     void moveTo_mm(float mm);
     void moveBy_mm(float mm);
@@ -22,12 +27,12 @@ public:
 
 private:
     StepperXYZ& stepper;
-    LimitSwitch& bottomSwitch;
+    //LimitSwitch& bottomSwitch;
     float stepsPerMM;
     float maxTravel_mm;
     float gripperLength;
 
-    bool wouldExceedTop(float mm) const;
+    //bool wouldExceedTop(float mm) const;
 };
 
 #endif

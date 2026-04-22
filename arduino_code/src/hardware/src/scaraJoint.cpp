@@ -1,7 +1,7 @@
 #include "scaraJoint.h"
 #include <math.h>
 
-ScaraJoint::ScaraJoint(StepperXYZ& stepper, LimitSwitch& minSwitch, LimitSwitch& maxSwitch, 
+/*ScaraJoint::ScaraJoint(StepperXYZ& stepper, LimitSwitch& minSwitch, LimitSwitch& maxSwitch, 
                         float stepsPerRev, float gearRatio)
     : stepper(stepper), minSwitch(minSwitch), maxSwitch(maxSwitch) {
     this->stepsPerRev = stepsPerRev;
@@ -9,39 +9,53 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper, LimitSwitch& minSwitch, LimitSwitch&
     this->max_Angle = 0.0f;
     this->min_Angle = 0.0f;
 }
+    */
 
-float ScaraJoint::stepsPerDegree() const {
-    return (stepsPerRev * stepper.microstep() * gearRatio) / 360.0f;
+ScaraJoint::ScaraJoint(StepperXYZ& stepper, 
+                        float stepsPerRev, float gearRatio)
+                        : stepper(stepper) {
+    this->stepsPerRev = stepsPerRev;
+    this->gearRatio = gearRatio;
+    this->currentAngle = 0;
 }
 
+float ScaraJoint::stepsPerDegree() const {
+    return (stepsPerRev * stepper.microstep()) / (360.0f * gearRatio);
+}
 float ScaraJoint::angle() const {
-    float spd = stepsPerDegree();
-    if (spd == 0.0f) return 0.0f;
-    return stepper.position() / spd;
+    return currentAngle;
+}
+void ScaraJoint::setCurrentAngle(float deg){
+    currentAngle = deg;
 }
 
 void ScaraJoint::moveTo(float angleDeg) {
-    if (max_Angle == 0.0f) {
+    
+    /*if (max_Angle == 0.0f) {
         Serial.println("Joint: not homed yet!");
         return;
     }
+        */
 
-    if (angleDeg < min_Angle || angleDeg > max_Angle) {
+    /*if (angleDeg < min_Angle || angleDeg > max_Angle) {
         Serial.print("Joint: out of bound position; ");
         Serial.println("Move cancelled.");
         return;
     }
+        */
+    float deltaAngle = angleDeg - currentAngle;
+   
+    float nbrOfSteps = lround(deltaAngle * stepsPerDegree());
+    stepper.step(nbrOfSteps);
 
-    long targetSteps = lroundf(angleDeg * stepsPerDegree());
-    long steps = targetSteps - stepper.position();
-    stepper.step(steps);
+    setCurrentAngle(angleDeg);
 }
 
 void ScaraJoint::moveBy(float deltaDeg) {
     moveTo(angle() + deltaDeg);
 }
 
-void ScaraJoint::home(float backoffDeg) {
+/*void ScaraJoint::home(float backoffDeg) {
     Serial.println("Joint: homing to MIN switch");
 
     bool dirMin = false;
@@ -84,5 +98,6 @@ void ScaraJoint::home(float backoffDeg) {
     stepper.setStepDelay(200);
     Serial.println("Joint: home done.");
 }
+    */
 
 

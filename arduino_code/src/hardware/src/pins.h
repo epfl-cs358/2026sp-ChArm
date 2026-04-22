@@ -12,6 +12,8 @@ const int Z_DIR_IN1 = 7;
 
 const int ENABLE_PIN = 8;
 
+
+/*
 // still have to change
 const int X_LIMIT_MIN_PIN; // todo
 const int X_LIMIT_MAX_PIN; // todo
@@ -20,6 +22,7 @@ const int Y_LIMIT_MIN_PIN; // todo
 const int Y_LIMIT_MAX_PIN; // todo
 
 const int Z_LIMIT_BOTTOM_PIN; // todo
+*/
 
 const int GRIPPER_PIN; // todo
 
