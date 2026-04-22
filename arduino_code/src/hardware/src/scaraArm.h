@@ -16,7 +16,7 @@ public:
 
     // Solve IK for (x, y) and drive both joints to the resulting angles.
     // No-op if the target is out of reach.
-    void moveXY(float x, float y);
+    bool moveXY(float x, float y);
 
     float theta1() const { return currentTheta1; }
     float theta2() const { return currentTheta2; }

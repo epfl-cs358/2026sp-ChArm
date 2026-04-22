@@ -1,12 +1,14 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+const unsigned int DEFAULT_STEP_DELAY_US = 800;
+
 // Motor
 const int MICROSTEPS = 16;
 const float STEPS_PER_REV  = 200.0f;
 
 // Gear ratios
-const int   DRIVING_TEETH_j1 = 18; // TODO: recheck
+const int   DRIVING_TEETH_j1 = 18;
 const int   DRIVING_TEETH_j2 = 20;
 const int   JOINT_TEETH = 105;
 const int   BASE_TEETH = 160;

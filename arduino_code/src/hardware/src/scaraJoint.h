@@ -17,31 +17,32 @@ public:
                float gearRatio);
     */
 
-    ScaraJoint(StepperXYZ&  stepper,
+    ScaraJoint(StepperXYZ& stepper,
                float stepsPerRev,
+               int microstep,
                float gearRatio);
-
+ 
     void moveTo(float angleDeg);
     void moveBy(float deltaDeg);
-    void setCurrentAngle(float deg);
-
-    float angle() const;
-    //float minAngle() const { return min_Angle; }
-    //float maxAngle() const { return max_Angle; }
-
-    void setZero() { stepper.resetPosition(); }
-
+ 
+    float angle() const { return currentAngle; }
+ 
+    // Zero out the tracked angle (does NOT move the motor).
+    void setZero() { currentAngle = 0.0f; stepResidual = 0.0f; }
+ 
     float stepsPerDegree() const;
-
+ 
     //void home(float backoffDeg = 5.0f);
-
+ 
 private:
     StepperXYZ&  stepper;
     //LimitSwitch& minSwitch;
     //LimitSwitch& maxSwitch;
     float stepsPerRev;
+    int microstep;
     float gearRatio;
     float currentAngle;
+    float stepResidual; // carries sub-step rounding leftover between moves
     //float min_Angle;
     //float max_Angle;
 };
