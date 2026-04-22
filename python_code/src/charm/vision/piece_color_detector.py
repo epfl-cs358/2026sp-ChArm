@@ -45,7 +45,7 @@ def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
 def detect_piece_colors(
     cells: list[SquareCell],
     occupancy_results: list[OccupancyResult],
-    white_threshold: float = 150.0,
+    white_threshold: float = 125.0,
     black_threshold: float = 110.0,
 ) -> list[PieceColorResult]:
     """
