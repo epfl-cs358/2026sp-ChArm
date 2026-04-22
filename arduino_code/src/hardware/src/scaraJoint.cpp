@@ -11,48 +11,38 @@
 }
     */
 
-ScaraJoint::ScaraJoint(StepperXYZ& stepper, 
-                        float stepsPerRev, float gearRatio)
-                        : stepper(stepper) {
+ScaraJoint::ScaraJoint(StepperXYZ& stepper,
+                       float stepsPerRev,
+                       int microstep,
+                       float gearRatio)
+    : stepper(stepper) {
     this->stepsPerRev = stepsPerRev;
+    this->microstep = microstep;
     this->gearRatio = gearRatio;
-    this->currentAngle = 0;
+    this->currentAngle = 0.0f;
+    this->stepResidual = 0.0f;
 }
-
+ 
 float ScaraJoint::stepsPerDegree() const {
-    return (stepsPerRev * stepper.microstep()) / (360.0f * gearRatio);
+    // Uses stored microstep (not read from stepper) so it's always correct.
+    return (stepsPerRev * microstep * gearRatio) / 360.0f;
 }
-float ScaraJoint::angle() const {
-    return currentAngle;
-}
-void ScaraJoint::setCurrentAngle(float deg){
-    currentAngle = deg;
-}
-
-void ScaraJoint::moveTo(float angleDeg) {
-    
-    /*if (max_Angle == 0.0f) {
-        Serial.println("Joint: not homed yet!");
-        return;
-    }
-        */
-
-    /*if (angleDeg < min_Angle || angleDeg > max_Angle) {
-        Serial.print("Joint: out of bound position; ");
-        Serial.println("Move cancelled.");
-        return;
-    }
-        */
-    float deltaAngle = angleDeg - currentAngle;
-   
-    float nbrOfSteps = lround(deltaAngle * stepsPerDegree());
-    stepper.step(nbrOfSteps);
-
-    setCurrentAngle(angleDeg);
-}
-
+ 
 void ScaraJoint::moveBy(float deltaDeg) {
-    moveTo(angle() + deltaDeg);
+    float spd = stepsPerDegree();
+    if (spd == 0.0f) return;
+ 
+    // Carry rounding leftover from previous move to avoid drift.
+    float desiredSteps = deltaDeg * spd + stepResidual;
+    long stepsToEmit = lroundf(desiredSteps);
+ 
+    stepper.step(stepsToEmit);
+    stepResidual = desiredSteps - stepsToEmit;
+    currentAngle += deltaDeg;
+}
+ 
+void ScaraJoint::moveTo(float angleDeg) {
+    moveBy(angleDeg - currentAngle);
 }
 
 /*void ScaraJoint::home(float backoffDeg) {

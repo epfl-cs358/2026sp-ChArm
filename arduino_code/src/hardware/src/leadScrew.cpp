@@ -1,55 +1,33 @@
 #include "leadScrew.h"
 
-/*LeadScrew::LeadScrew(StepperXYZ& stepper, LimitSwitch& bottomSwitch, float stepsPerMM, 
-                    float maxTravel_mm, float gripperLength) 
-    : stepper(stepper), bottomSwitch(bottomSwitch) {
-    this->stepsPerMM = stepsPerMM;
-    this->maxTravel_mm = maxTravel_mm;
-    this->gripperLength = gripperLength;
-}
-    */
-
-LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, 
-                     float gripperLength ) 
+LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, float gripperLength)
     : stepper(stepper) {
     this->stepsPerMM = stepsPerMM;
     this->gripperLength = gripperLength;
+    this->currentMm = 0.0f;
+    this->stepResidual = 0.0f;
 }
-
+ 
+void LeadScrew::moveBy_mm(float deltaMm) {
+    float spm = stepsPerMM;
+    if (spm == 0.0f) return;
+ 
+    if (currentMm + deltaMm < 0) {
+        Serial.println("Z: target below 0; Move cancelled");
+        return;
+    }
+ 
+    // Carry rounding leftover from previous move to avoid drift.
+    float desiredSteps = deltaMm * spm + stepResidual;
+    long stepsToEmit = lroundf(desiredSteps);
+ 
+    stepper.step(stepsToEmit);
+    stepResidual = desiredSteps - stepsToEmit;
+    currentMm += deltaMm;
+}
+ 
 void LeadScrew::moveTo_mm(float mm) {
-    float carriageZ = mm; //+ gripperLength;
-
-    /*
-    if (wouldExceedTop(carriageZ)) {
-        Serial.print(mm);
-        Serial.print(" mm exceeds max travel ");
-        Serial.print(maxTravel_mm);
-        Serial.println("; Move cancelled");
-        
-        return;
-    }
-        */
-
-    if (carriageZ < 0) {
-        Serial.println("Z: target below 0,; Move cancelled");
-        return;
-    }
-
-    long target  = (long)(carriageZ * stepsPerMM);
-    stepper.step(target);
-}
-
-
-
-void LeadScrew::moveBy_mm(float mm) {
-
-    return 
-    // TODO need to check this seems wrong at first glance 
-    moveTo_mm(position_mm() + mm);
-}
-
-float LeadScrew::position_mm() const {
-    return (stepper.position() / stepsPerMM); // - gripperLength;
+    moveBy_mm(mm - currentMm);
 }
 
 /*bool LeadScrew::wouldExceedTop(float mm) const {
