@@ -11,7 +11,7 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper,
     this->gearRatio = gearRatio;
     this->currentAngle = 0.0f;
     this->stepResidual = 0.0f;
-    this->maxAngle = maxAngle;
+    this->maxAngle = 360.0f;
 }
  
 float ScaraJoint::stepsPerDegree() const {
