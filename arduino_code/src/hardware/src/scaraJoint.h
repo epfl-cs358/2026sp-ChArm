@@ -26,7 +26,6 @@ public:
     void setMaxAngle(float deg) { maxAngle = deg; }
  
     float stepsPerDegree() const;
-    StepperXYZ& stepper() { return stepper_; }
 
 private:
     StepperXYZ&  stepper_;

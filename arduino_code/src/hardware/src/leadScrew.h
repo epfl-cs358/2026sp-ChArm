@@ -18,8 +18,6 @@ public:
     float position_mm() const { return currentMm; }
     void setZero() { currentMm = 0.0f; stepResidual = 0.0f; }
  
-    StepperXYZ& stepper() { return stepper_; }
- 
 private:
     StepperXYZ& stepper_;
     float stepsPerMM;
