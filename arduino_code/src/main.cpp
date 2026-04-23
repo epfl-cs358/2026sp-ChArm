@@ -14,10 +14,8 @@ StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1);
  
 /*
-LimitSwitch j1Min(X_LIMIT_MIN_PIN, true);  
-LimitSwitch j1Max(X_LIMIT_MAX_PIN, true);
-LimitSwitch j2Min(Y_LIMIT_MIN_PIN, true);  
-LimitSwitch j2Max(Y_LIMIT_MAX_PIN, true);
+LimitSwitch j1(X_LIMIT_PIN, true);
+LimitSwitch j2(Y_LIMIT_PIN, true);
 LimitSwitch zBottom(Z_LIMIT_BOTTOM_PIN, true);
 */
  
