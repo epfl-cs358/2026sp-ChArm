@@ -7,51 +7,57 @@
 #include "hardware/src/config.h"
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
+#include "hardware/src/limitAxis.h"
  
-// StepperXYZ no longer takes microstep — it's passed to ScaraJoint/LeadScrew directly.
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1);
  
-/*
-LimitSwitch j1Min(X_LIMIT_MIN_PIN, true);  
-LimitSwitch j1Max(X_LIMIT_MAX_PIN, true);
-LimitSwitch j2Min(Y_LIMIT_MIN_PIN, true);  
-LimitSwitch j2Max(Y_LIMIT_MAX_PIN, true);
-LimitSwitch zBottom(Z_LIMIT_BOTTOM_PIN, true);
-*/
+LimitSwitch j1Lim(X_LIMIT_PIN, true);
+LimitSwitch j2Lim(Y_LIMIT_PIN, true);
+LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
  
-/*
-ScaraJoint joint1(xStepper, j1Min, j1Max, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1);
-ScaraJoint joint2(yStepper, j2Min, j1Min, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2);
-LeadScrew leadScrew(zStepper, zBottom, Z_MM_PER_REV, STEPS_PER_REV, MICROSTEPS, GRIPPER_LENGTH);
-*/
- 
-// MICROSTEPS is now passed explicitly so stepsPerDegree() is always correct.
 ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1);
 ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2);
  
-LeadScrew leadScrew(zStepper, Z_MM_PER_REV, GRIPPER_LENGTH);
+LeadScrew leadScrew(zStepper, Z_MAX_MM, LINK3_LENGTH, GRIPPER_LENGTH);
  
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
  
-/*
-void homeAll() {
-    Serial.println("Homing all axes");
+void calibrate() {
+    Serial.println("Calibrating");
  
-    leadScrew.home();
-    joint1.home();
-    joint2.home();
+    // Z: drive to bottom switch, set zero, max is constant
+    Serial.println("Z: finding bottom");
+    findLimit(zStepper, zLim, false);
+    leadScrew.setZero();
+    Serial.println("Z: done");
+ 
+    // Joint1: same pin, two switches differentiated by direction
+    // false = min switch -> set zero
+    // true = max switch -> record max angle
+    Serial.println("J1: finding min");
+    findLimit(xStepper, j1Lim, false);
+    joint1.setZero();
+    Serial.println("J1: finding max");
+    findLimit(xStepper, j1Lim, true);
+    joint1.setMaxAngle(joint1.angle());
+    Serial.print("J1: max = "); Serial.print(joint1.angle()); Serial.println(" deg");
+ 
+    // Joint2: one switch, max is constant 360
+    Serial.println("J2: finding limit");
+    findLimit(yStepper, j2Lim, false);
+    joint2.setZero();
+    joint2.setMaxAngle(360.0f);
+    Serial.println("J2: done");
  
     arm.sync();
+    Serial.println("Calibration done");
 }
-*/
  
 int stepCount = 0;
- 
-// Reads one character at a time so loop() never blocks during a long move.
 static String cmdBuffer = "";
  
 static void handleCommand(String cmd) {
@@ -70,7 +76,6 @@ static void handleCommand(String cmd) {
       xStepper.step();
       arm.sync();
       stepCount--;
- 
     } else if (cmd == "w") {
       yStepper.setDirection(true);
       yStepper.step();
@@ -81,7 +86,6 @@ static void handleCommand(String cmd) {
       yStepper.step();
       arm.sync();
       stepCount--;
- 
     } else if (cmd == "u") {
       zStepper.setDirection(true);
       zStepper.step();
@@ -109,7 +113,7 @@ static void handleCommand(String cmd) {
   } else {
  
     if (cmd == "home") {
-      //homeAll();
+      calibrate();
  
     } else if (cmd.startsWith("angleX ")) {
       float a = cmd.substring(7).toFloat();
@@ -138,30 +142,26 @@ static void handleCommand(String cmd) {
       String vals  = cmd.substring(8);
       int space1   = vals.indexOf(' ');
       int space2   = vals.indexOf(' ', space1 + 1);
- 
       float x = vals.substring(0, space1).toFloat();
       float y = vals.substring(space1 + 1, space2).toFloat();
       float z = vals.substring(space2 + 1).toFloat();
- 
       Serial.print("Moving to X: "); Serial.print(x);
       Serial.print(", Y: "); Serial.print(y);
       Serial.print(", Z: "); Serial.println(z);
- 
-      // Move Z first — bring arm to height before rotating
       leadScrew.moveTo_mm(z);
       arm.moveXY(x, y);
  
     } else if (cmd == "pos") {
       Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println("°");
       Serial.print("Joint2: "); Serial.print(joint2.angle()); Serial.println("°");
-      Serial.print("Position: ("); 
+      Serial.print("Position: (");
       Serial.print(arm.x()); Serial.print(", ");
       Serial.print(arm.y()); Serial.print(", ");
       Serial.print(leadScrew.position_mm()); Serial.println(")");
-      return; // already printed, skip duplicate below
+      return;
     }
  
-    Serial.print("Position: ("); 
+    Serial.print("Position: (");
     Serial.print(arm.x()); Serial.print(", ");
     Serial.print(arm.y()); Serial.print(", ");
     Serial.print(leadScrew.position_mm()); Serial.println(")");
@@ -172,15 +172,9 @@ void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
  
-  //j1Min.begin();  
-  //j1Max.begin();
- 
-  //j2Min.begin();  
-  //j2Max.begin();
- 
-  //zBottom.begin();
- 
-  //gripper.begin();
+  j1Lim.begin();
+  j2Lim.begin();
+  zLim.begin();
  
   xStepper.begin();
   yStepper.begin();
@@ -188,7 +182,7 @@ void setup() {
  
   Serial.begin(9600);
  
-  //homeAll();
+  calibrate();
  
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
@@ -196,7 +190,6 @@ void setup() {
 }
  
 void loop() {
-  // Read one character at a time — never blocks, works during long moves.
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
@@ -208,4 +201,3 @@ void loop() {
     }
   }
 }
- 

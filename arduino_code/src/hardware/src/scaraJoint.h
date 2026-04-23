@@ -10,13 +10,6 @@
 // its microstep setting, and any mechanical gear reduction.
 class ScaraJoint {
 public:
-    /*ScaraJoint(StepperXYZ&  stepper,
-               LimitSwitch& minSwitch,
-               LimitSwitch& maxSwitch,
-               float stepsPerRev,
-               float gearRatio);
-    */
-
     ScaraJoint(StepperXYZ& stepper,
                float stepsPerRev,
                int microstep,
@@ -26,25 +19,23 @@ public:
     void moveBy(float deltaDeg);
  
     float angle() const { return currentAngle; }
+    
  
-    // Zero out the tracked angle (does NOT move the motor).
+    // Called by calibration after homing to set the soft limit
     void setZero() { currentAngle = 0.0f; stepResidual = 0.0f; }
+    void setMaxAngle(float deg) { maxAngle = deg; }
  
     float stepsPerDegree() const;
- 
-    //void home(float backoffDeg = 5.0f);
- 
+    StepperXYZ& stepper() { return stepper_; }
+
 private:
-    StepperXYZ&  stepper;
-    //LimitSwitch& minSwitch;
-    //LimitSwitch& maxSwitch;
+    StepperXYZ&  stepper_;
     float stepsPerRev;
     int microstep;
     float gearRatio;
     float currentAngle;
     float stepResidual; // carries sub-step rounding leftover between moves
-    //float min_Angle;
-    //float max_Angle;
+    float maxAngle;
 };
 
 #endif
