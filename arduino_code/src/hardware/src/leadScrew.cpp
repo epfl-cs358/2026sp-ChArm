@@ -1,19 +1,32 @@
 #include "leadScrew.h"
 
-LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, float gripperLength)
-    : stepper(stepper) {
+LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, float gripperLength, float maxTravel_mm)
+    : stepper_(stepper) {
     this->stepsPerMM = stepsPerMM;
     this->gripperLength = gripperLength;
+    this->maxTravel_mm = maxTravel_mm; 
     this->currentMm = 0.0f;
-    this->stepResidual = 0.0f;
-}
+    this->stepResidual = 0.0f; 
+    }
  
 void LeadScrew::moveBy_mm(float deltaMm) {
     float spm = stepsPerMM;
     if (spm == 0.0f) return;
  
-    if (currentMm + deltaMm < 0) {
-        Serial.println("Z: target below 0; Move cancelled");
+    float target = currentMm + deltaMm;
+ 
+    if (target < 0.0f) {
+        Serial.print("Z: target ");
+        Serial.print(target);
+        Serial.println(" below 0; move cancelled");
+        return;
+    }
+    if (target > maxTravel_mm) {
+        Serial.print("Z: target ");
+        Serial.print(target);
+        Serial.print(" exceeds max ");
+        Serial.print(maxTravel_mm);
+        Serial.println(" mm; move cancelled");
         return;
     }
  
@@ -21,7 +34,7 @@ void LeadScrew::moveBy_mm(float deltaMm) {
     float desiredSteps = deltaMm * spm + stepResidual;
     long stepsToEmit = lroundf(desiredSteps);
  
-    stepper.step(stepsToEmit);
+    stepper_.step(stepsToEmit);
     stepResidual = desiredSteps - stepsToEmit;
     currentMm += deltaMm;
 }
@@ -30,26 +43,5 @@ void LeadScrew::moveTo_mm(float mm) {
     moveBy_mm(mm - currentMm);
 }
 
-/*bool LeadScrew::wouldExceedTop(float mm) const {
-    return mm > maxTravel_mm;
-}
-*/
 
-/*void LeadScrew::home(float backoff_mm) {
-    Serial.println("Z: moving to bottom");
 
-    // Stop the program and flip
-    // if motor goes wrong way
-    stepper.setDirection(false);
-    stepper.setStepDelay(800);
-
-    while (!bottomSwitch.isTriggered()) { stepper.step(); }
-
-    stepper.resetPosition();
-    moveBy_mm(backoff_mm);
-    stepper.resetPosition();
-
-    stepper.setStepDelay(200);
-    Serial.println("Z: home done.");
-}
-    */
