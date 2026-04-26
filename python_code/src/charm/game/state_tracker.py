@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import chess
 
 Bitmap = list[list[int]]
+TrackerStatus = Literal[
+    "accepted_legal_move",
+    "unchanged_position",
+    "invalid_observation",
+    "ambiguous_observation",
+]
 
 
 def empty_bitmap() -> Bitmap:
@@ -63,6 +69,8 @@ def compare_board_to_bitmaps(
 class MoveInferenceResult:
     move: Optional[chess.Move]
     mismatch_count: int
+    status: TrackerStatus
+    matching_move_count: int = 0
 
 
 def infer_move_from_bitmaps(
@@ -81,9 +89,19 @@ def infer_move_from_bitmaps(
         observed_black_bitmap,
     )
 
+    if current_mismatch_count == 0:
+        return MoveInferenceResult(
+            move=None,
+            mismatch_count=0,
+            status="unchanged_position",
+            matching_move_count=0,
+        )
+
     best_result = MoveInferenceResult(
         move=None,
         mismatch_count=current_mismatch_count,
+        status="invalid_observation",
+        matching_move_count=0,
     )
 
     for move in board.legal_moves:
@@ -100,7 +118,11 @@ def infer_move_from_bitmaps(
             best_result = MoveInferenceResult(
                 move=move,
                 mismatch_count=mismatch_count,
+                status="accepted_legal_move",
+                matching_move_count=1,
             )
+        elif mismatch_count == best_result.mismatch_count and best_result.move is not None:
+            best_result.matching_move_count += 1
 
     return best_result
 
@@ -134,14 +156,29 @@ class BoardStateTracker:
             observed_black_bitmap,
         )
 
-        if result.move is None:
+        if result.status == "unchanged_position":
             return result
 
-        if result.mismatch_count > max_mismatches:
+        if result.move is None or result.mismatch_count > max_mismatches:
             return MoveInferenceResult(
                 move=None,
                 mismatch_count=result.mismatch_count,
+                status="invalid_observation",
+                matching_move_count=result.matching_move_count,
+            )
+
+        if result.matching_move_count > 1:
+            return MoveInferenceResult(
+                move=None,
+                mismatch_count=result.mismatch_count,
+                status="ambiguous_observation",
+                matching_move_count=result.matching_move_count,
             )
 
         self.board.push(result.move)
-        return result
+        return MoveInferenceResult(
+            move=result.move,
+            mismatch_count=result.mismatch_count,
+            status="accepted_legal_move",
+            matching_move_count=result.matching_move_count,
+        )

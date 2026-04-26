@@ -105,11 +105,14 @@ def main() -> None:
         print("Move inference skipped.")
         print("Pass --before-moves with the known board history to infer the next move.")
     elif inference_result.move is None:
-        print(f"No accepted move inferred. mismatch_count={inference_result.mismatch_count}")
+        print(
+            "No accepted move inferred. "
+            f"status={inference_result.status}, mismatch_count={inference_result.mismatch_count}"
+        )
     else:
         print(
             f"Inferred move: {inference_result.move.uci()} "
-            f"(mismatch_count={inference_result.mismatch_count})"
+            f"(status={inference_result.status}, mismatch_count={inference_result.mismatch_count})"
         )
 
     print_saved_outputs()
