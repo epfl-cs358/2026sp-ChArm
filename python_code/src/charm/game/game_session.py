@@ -8,6 +8,7 @@ import chess
 from charm.game.state_tracker import BoardStateTracker, board_to_bitmaps, compare_board_to_bitmaps
 from charm.game.vision_integration import update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
+from charm.arduino.arduino_bridge import execute_move
 
 
 @dataclass
@@ -83,6 +84,7 @@ class GameSession:
             )
 
         move_uci = inference_result.move.uci()
+        execute_move(move_uci)
 
         return SessionResult(
             success=True,
