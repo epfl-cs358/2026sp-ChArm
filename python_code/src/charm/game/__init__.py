@@ -10,7 +10,7 @@ from charm.game.vision_integration import (
     infer_move_from_image,
     update_tracker_from_image,
 )
-from charm.game.game_session import GameSession, SessionResult
+from charm.game.game_session import GameSession, SessionResult, SessionStep
 
 __all__ = [
     "BoardStateTracker",
@@ -23,5 +23,5 @@ __all__ = [
     "update_tracker_from_image",
     "GameSession",
     "SessionResult",
+    "SessionStep",
 ]
-
