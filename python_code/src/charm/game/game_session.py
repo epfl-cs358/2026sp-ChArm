@@ -8,7 +8,8 @@ import chess
 from charm.game.state_tracker import BoardStateTracker, board_to_bitmaps, compare_board_to_bitmaps
 from charm.game.vision_integration import update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
-from charm.arduino.arduino_bridge import execute_move
+# Remove this after adding the actual implementation of execute_move in the arduino_bridge module
+# from charm.arduino.arduino_bridge import execute_move
 
 
 @dataclass
@@ -112,7 +113,7 @@ class GameSession:
         is_castling = self.tracker.board.is_castling(move)
         is_promotion = len(move_uci) == 5
 
-        execute_move(move_uci, is_capture, is_castling, is_promotion)
+        # execute_move(move_uci, is_capture, is_castling, is_promotion)
 
         result = SessionResult(
             success=True,
