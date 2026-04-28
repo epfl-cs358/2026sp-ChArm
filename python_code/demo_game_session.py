@@ -43,6 +43,9 @@ def main() -> None:
     step_result3 = session.process_next_image(str(after_g1f3_image), max_mismatches=0)
     print_result("Next move", step_result3)
 
+    print("Recognized move history:", session.get_move_history())
+    session.print_steps()
+
 
 
 
