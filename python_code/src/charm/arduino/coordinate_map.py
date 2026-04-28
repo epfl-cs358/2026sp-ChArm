@@ -9,7 +9,9 @@ H_X = TODO
 H_Y = TODO
 H_Z = TODO
 
-TRASH = TODO
+T_X = TODO
+T_Y = TODO
+T_Z = TODO
 
 def get_square_position(move):
     col = ord(move[0]) - ord('a')

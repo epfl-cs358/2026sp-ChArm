@@ -84,7 +84,12 @@ class GameSession:
             )
 
         move_uci = inference_result.move.uci()
-        execute_move(move_uci)
+        move = chess.Move.from_uci(move_uci)
+        is_capture = self.tracker.board.is_capture(move)
+        is_castling = self.tracker.board.is_castling(move)
+        is_promotion = len(move_uci) == 5
+
+        execute_move(move_uci, is_capture, is_castling, is_promotion)
 
         return SessionResult(
             success=True,
