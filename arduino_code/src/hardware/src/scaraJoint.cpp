@@ -16,7 +16,7 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper,
  
 float ScaraJoint::stepsPerDegree() const {
     // Uses stored microstep (not read from stepper) so it's always correct.
-    return (stepsPerRev * microstep * gearRatio) / 360.0f;
+    return (stepsPerRev * microstep) / (gearRatio * 360.0f);
 }
  
 void ScaraJoint::moveBy(float deltaDeg) {
@@ -25,6 +25,7 @@ void ScaraJoint::moveBy(float deltaDeg) {
 
     float target = currentAngle + deltaDeg;
 
+    /*
     if (target < 0.0f) {
         Serial.print("Joint: target ");
         Serial.print(target);
@@ -38,7 +39,8 @@ void ScaraJoint::moveBy(float deltaDeg) {
         Serial.print(maxAngle);
         Serial.println("; move cancelled");
         return;
-    }                    
+    }
+        */                 
  
     // Carry rounding leftover from previous move to avoid drift.
     float desiredSteps = deltaDeg * spd + stepResidual;

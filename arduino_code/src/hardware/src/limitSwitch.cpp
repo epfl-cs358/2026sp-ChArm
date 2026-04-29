@@ -7,7 +7,7 @@ void LimitSwitch::begin() {
     pinMode(pin, activeLow ? INPUT_PULLUP : INPUT);
 }
  
-bool LimitSwitch::isTriggered() const {
+bool LimitSwitch::isNotTriggered() const {
     return activeLow ? (digitalRead(pin) == LOW)
                      : (digitalRead(pin) == HIGH);
 }

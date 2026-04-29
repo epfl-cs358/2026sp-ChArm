@@ -1,10 +1,10 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const unsigned int DEFAULT_STEP_DELAY_US = 800;
+const unsigned int DEFAULT_STEP_DELAY_US = 500;
 
 // Motor
-const int MICROSTEPS = 16;
+const int MICROSTEPS = 8;
 const float STEPS_PER_REV  = 200.0f;
 
 // Gear ratios
@@ -27,8 +27,8 @@ const float Z_MM_PER_REV = 15.0f;
 const float GRIPPER_LENGTH  = 100.0f;
 
 // Gripper
-const int OPEN_ANGLE = 0;
-const int CLOSED_ANGLE = 90;
+const int OPEN_ANGLE = 70;
+const int CLOSED_ANGLE = 0;
 
 #endif
 
