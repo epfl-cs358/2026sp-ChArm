@@ -8,7 +8,7 @@
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
 #include "hardware/src/limitAxis.h"
- 
+
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1);
@@ -25,13 +25,14 @@ LeadScrew leadScrew(zStepper, Z_MAX_MM, LINK3_LENGTH, GRIPPER_LENGTH);
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
- 
+
 void calibrate() {
     Serial.println("Calibrating");
  
     // Z: drive to bottom switch, set zero, max is constant
     Serial.println("Z: finding bottom");
     findLimit(zStepper, zLim, false);
+    backOff(zStepper, zLim, true);
     leadScrew.setZero();
     Serial.println("Z: done");
  
@@ -40,30 +41,35 @@ void calibrate() {
     // true = max switch -> record max angle
     Serial.println("J1: finding min");
     findLimit(xStepper, j1Lim, false);
+    backOff(xStepper, j1Lim, true);
     joint1.setZero();
     Serial.println("J1: finding max");
-    findLimit(xStepper, j1Lim, true);
-    joint1.setMaxAngle(joint1.angle());
-    Serial.print("J1: max = "); Serial.print(joint1.angle()); Serial.println(" deg");
+    long steps = findLimit(xStepper, j1Lim, true);
+    long stepsB = backOff(xStepper, j1Lim, false);
+    float maxAngleDeg = (steps - stepsB) / joint1.stepsPerDegree();
+    joint1.setMaxAngle(maxAngleDeg);
+    Serial.print("J1: steps = "); Serial.println(steps);
+    Serial.print("J1: max = "); Serial.print(maxAngleDeg); Serial.println(" deg");
  
     // Joint2: one switch, max is constant 360
     Serial.println("J2: finding limit");
     findLimit(yStepper, j2Lim, false);
+    backOff(xStepper, j1Lim, true);
     joint2.setZero();
-    joint2.setMaxAngle(360.0f);
+    joint2.setMaxAngle(180.0f);
     Serial.println("J2: done");
  
     arm.sync();
     Serial.println("Calibration done");
 }
- 
+
 int stepCount = 0;
 static String cmdBuffer = "";
  
 static void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
- 
+
   if (cmd.length() == 1) {
  
     if (cmd == "f") {
@@ -99,8 +105,8 @@ static void handleCommand(String cmd) {
     Serial.print("Position: ");
     Serial.print(stepCount);
     Serial.println(" steps");
- 
-  } else if (cmd.length() == 2) {
+
+  } else {
  
     if (cmd == "OG") {
       gripper.open();
@@ -108,12 +114,9 @@ static void handleCommand(String cmd) {
       gripper.close();
     } else if (cmd == "GS") {
       Serial.println(gripper.isOpen() ? "Gripper: open" : "Gripper: closed");
-    }
- 
-  } else {
- 
-    if (cmd == "home") {
-      calibrate();
+    } else if (cmd == "GA ") {
+      float angle = cmd.substring(3).toFloat();
+      gripper.goToAngle(angle);
  
     } else if (cmd.startsWith("angleX ")) {
       float a = cmd.substring(7).toFloat();
@@ -150,6 +153,9 @@ static void handleCommand(String cmd) {
       Serial.print(", Z: "); Serial.println(z);
       leadScrew.moveTo_mm(z);
       arm.moveXY(x, y);
+
+    } else if (cmd == "calibrate") {
+      calibrate();
  
     } else if (cmd == "pos") {
       Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println("°");
@@ -165,13 +171,14 @@ static void handleCommand(String cmd) {
     Serial.print(arm.x()); Serial.print(", ");
     Serial.print(arm.y()); Serial.print(", ");
     Serial.print(leadScrew.position_mm()); Serial.println(")");
+    
   }
 }
  
 void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
- 
+
   j1Lim.begin();
   j2Lim.begin();
   zLim.begin();
@@ -181,8 +188,8 @@ void setup() {
   zStepper.begin();
  
   Serial.begin(9600);
- 
-  calibrate();
+
+  gripper.begin();
  
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
