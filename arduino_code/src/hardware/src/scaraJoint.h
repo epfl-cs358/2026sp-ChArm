@@ -24,6 +24,7 @@ public:
     // Called by calibration after homing to set the soft limit
     void setZero() { currentAngle = 0.0f; stepResidual = 0.0f; }
     void setAngle(float deg) { currentAngle = deg; stepResidual = 0.0f; }
+    void setMinAngle(float deg) { minAngle = deg; }
     void setMaxAngle(float deg) { maxAngle = deg; }
  
     float stepsPerDegree() const;
@@ -35,6 +36,7 @@ private:
     float gearRatio;
     float currentAngle;
     float stepResidual; // carries sub-step rounding leftover between moves
+    float minAngle;
     float maxAngle;
 };
 

@@ -11,6 +11,7 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper,
     this->gearRatio = gearRatio;
     this->currentAngle = 0.0f;
     this->stepResidual = 0.0f;
+    this->minAngle = 0.0f;
     this->maxAngle = 360.0f;
 }
  
@@ -25,10 +26,12 @@ void ScaraJoint::moveBy(float deltaDeg) {
 
     float target = currentAngle + deltaDeg;
     
-    if (target < 0.0f) {
+    if (target < minAngle) {
         Serial.print("Joint: target ");
         Serial.print(target);
-        Serial.println(" below 0; move cancelled");
+        Serial.print(" below min ");
+        Serial.print(minAngle);
+        Serial.println("; move cancelled");
         return;
     }
     if (target > maxAngle) {
