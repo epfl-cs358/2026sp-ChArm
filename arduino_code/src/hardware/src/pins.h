@@ -14,9 +14,7 @@ const int ENABLE_PIN = 8;
 
 
 const int X_LIMIT_PIN = 9;
-
 const int Y_LIMIT_PIN = 10;
-
 const int Z_LIMIT_BOTTOM_PIN = 11; 
 
 

@@ -12,7 +12,7 @@
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1);
- 
+
 LimitSwitch j1Lim(X_LIMIT_PIN, true);
 LimitSwitch j2Lim(Y_LIMIT_PIN, true);
 LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
@@ -20,7 +20,7 @@ LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
 ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1);
 ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2);
  
-LeadScrew leadScrew(zStepper, Z_MAX_MM, LINK3_LENGTH, GRIPPER_LENGTH);
+LeadScrew leadScrew(zStepper, STEPS_PER_MM, GRIPPER_LENGTH, Z_MAX_MM);
  
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
@@ -31,34 +31,48 @@ void calibrate() {
  
     // Z: drive to bottom switch, set zero, max is constant
     Serial.println("Z: finding bottom");
-    findLimit(zStepper, zLim, false);
-    backOff(zStepper, zLim, true);
+    findLimit(zStepper, zLim, false, 50);
+    backOff(zStepper, zLim, true, 200);
     leadScrew.setZero();
     Serial.println("Z: done");
- 
-    // Joint1: same pin, two switches differentiated by direction
-    // false = min switch -> set zero
-    // true = max switch -> record max angle
-    Serial.println("J1: finding min");
-    findLimit(xStepper, j1Lim, false);
-    backOff(xStepper, j1Lim, true);
+
+    // J1: one switch, zero is 90deg away from limit (straight = 0 in IK)
+    Serial.println("J1: finding limit");
+    findLimit(xStepper, j1Lim, false, 50);
+    backOff(xStepper, j1Lim, true, 50);
     joint1.setZero();
-    Serial.println("J1: finding max");
-    long steps = findLimit(xStepper, j1Lim, true);
-    long stepsB = backOff(xStepper, j1Lim, false);
-    float maxAngleDeg = (steps - stepsB) / joint1.stepsPerDegree();
-    joint1.setMaxAngle(maxAngleDeg);
-    Serial.print("J1: steps = "); Serial.println(steps);
-    Serial.print("J1: max = "); Serial.print(maxAngleDeg); Serial.println(" deg");
- 
-    // Joint2: one switch, max is constant 360
-    Serial.println("J2: finding limit");
-    findLimit(yStepper, j2Lim, false);
-    backOff(xStepper, j1Lim, true);
+    joint1.setMaxAngle(270.0f);  // temp max to allow 90deg move
+    joint1.moveTo(78.0f);        // 90deg away from limit = IK zero
+    joint1.setZero();
+    joint1.setMinAngle(-78.0f);  // limit switch is 90deg in this direction
+    joint1.setMaxAngle(202.0f);
+    Serial.println("J1: done");
+
+    // J2: two switches, zero is center of range (straight = 0 in IK)
+    Serial.println("J2: finding min");
+    findLimit(yStepper, j2Lim, false, 100);
+    backOff(yStepper, j2Lim, true, 200);
     joint2.setZero();
-    joint2.setMaxAngle(180.0f);
-    Serial.println("J2: done");
- 
+    joint2.setMaxAngle(360.0f);  // temp max to allow full range move
+    Serial.println("J2: finding max");
+    long steps = findLimit(yStepper, j2Lim, true, 100);
+    long stepsB = backOff(yStepper, j2Lim, false, 50);
+
+    float maxAngleDeg = (steps - stepsB) / joint2.stepsPerDegree();
+    joint2.setMaxAngle(maxAngleDeg);
+    joint2.setAngle(maxAngleDeg);
+    Serial.print("J2: steps = "); Serial.println(steps);
+    Serial.print("J2: max = "); Serial.print(maxAngleDeg); Serial.println(" deg");
+
+    // move to center of range, declare as IK zero
+    float halfRange = maxAngleDeg / 2.0f;
+    joint2.moveTo(halfRange);
+    joint2.setZero();
+    joint2.setMinAngle(-halfRange);
+    joint2.setMaxAngle(halfRange);
+    Serial.print("J2: center = "); Serial.print(halfRange); Serial.println(" deg");
+    
+
     arm.sync();
     Serial.println("Calibration done");
 }
@@ -122,10 +136,12 @@ static void handleCommand(String cmd) {
       float a = cmd.substring(7).toFloat();
       Serial.println(a);
       joint1.moveTo(a);
+      arm.sync();
  
     } else if (cmd.startsWith("angleY ")) {
       float a = cmd.substring(7).toFloat();
       joint2.moveTo(a);
+      arm.sync();
  
     } else if (cmd.startsWith("moveXY ")) {
       String vals = cmd.substring(7);
