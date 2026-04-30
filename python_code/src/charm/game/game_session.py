@@ -113,6 +113,7 @@ class GameSession:
         is_castling = self.tracker.board.is_castling(move)
         is_promotion = len(move_uci) == 5
 
+        # TODO: Implement the actual move execution logic in the arduino_bridge module and call it here
         # execute_move(move_uci, is_capture, is_castling, is_promotion)
 
         result = SessionResult(
