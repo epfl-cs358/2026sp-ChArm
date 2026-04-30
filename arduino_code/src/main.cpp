@@ -20,7 +20,7 @@ LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
 ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1);
 ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2);
  
-LeadScrew leadScrew(zStepper, Z_MAX_MM, LINK3_LENGTH, GRIPPER_LENGTH);
+LeadScrew leadScrew(zStepper, STEPS_PER_MM, GRIPPER_LENGTH, Z_MAX_MM);
  
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
@@ -48,13 +48,14 @@ void calibrate() {
     long stepsB = backOff(xStepper, j1Lim, false);
     float maxAngleDeg = (steps - stepsB) / joint1.stepsPerDegree();
     joint1.setMaxAngle(maxAngleDeg);
+    joint1.setAngle(maxAngleDeg);
     Serial.print("J1: steps = "); Serial.println(steps);
     Serial.print("J1: max = "); Serial.print(maxAngleDeg); Serial.println(" deg");
  
     // Joint2: one switch, max is constant 360
     Serial.println("J2: finding limit");
     findLimit(yStepper, j2Lim, false);
-    backOff(xStepper, j1Lim, true);
+    backOff(yStepper, j2Lim, true);
     joint2.setZero();
     joint2.setMaxAngle(180.0f);
     Serial.println("J2: done");

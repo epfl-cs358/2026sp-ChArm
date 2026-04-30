@@ -1,10 +1,10 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const unsigned int DEFAULT_STEP_DELAY_US = 500;
+const unsigned int DEFAULT_STEP_DELAY_US = 300;
 
 // Motor
-const int MICROSTEPS = 8;
+const int MICROSTEPS = 16;
 const float STEPS_PER_REV  = 200.0f;
 
 // Gear ratios
@@ -23,7 +23,10 @@ const float LINK3_LENGTH = 290.0f;  // lead screw / Z
 
 // Lead screw
 const float Z_MAX_MM = LINK3_LENGTH;
-const float Z_MM_PER_REV = 15.0f;
+const float STARTS = 4.0f;
+const float PITCH = 2.0f;
+const float LEAD = STARTS * PITCH;
+const float STEPS_PER_MM = STEPS_PER_REV * MICROSTEPS / LEAD;
 const float GRIPPER_LENGTH  = 100.0f;
 
 // Gripper

@@ -23,6 +23,7 @@ public:
  
     // Called by calibration after homing to set the soft limit
     void setZero() { currentAngle = 0.0f; stepResidual = 0.0f; }
+    void setAngle(float deg) { currentAngle = deg; stepResidual = 0.0f; }
     void setMaxAngle(float deg) { maxAngle = deg; }
  
     float stepsPerDegree() const;
