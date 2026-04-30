@@ -11,8 +11,6 @@ LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, float gripperLength,
     }
  
 void LeadScrew::moveBy_mm(float deltaMm) {
-    float spm = stepsPerMM;
-    if (spm == 0.0f) return;
  
     float target = currentMm + deltaMm;
  
@@ -32,7 +30,7 @@ void LeadScrew::moveBy_mm(float deltaMm) {
     }
  
     // Carry rounding leftover from previous move to avoid drift.
-    float desiredSteps = deltaMm * spm + stepResidual;
+    float desiredSteps = deltaMm * stepsPerMM + stepResidual;
     long stepsToEmit = lroundf(desiredSteps);
  
     stepper_.step(stepsToEmit);
