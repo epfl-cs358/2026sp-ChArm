@@ -70,8 +70,13 @@ public:
     // Difficulty navigation and setting
     void difficultyNext();
     void difficultyPrev();
-    void setDifficulty(Difficulty diff);
     Difficulty getDifficulty() const;
+
+     // temporary Difficulty
+    void enterDifficulty();
+    void commitDifficulty();
+    void cancelDifficulty();
+    Difficulty getTempDifficulty() const;
 
     // ControlTarget navigation and setting
     void controlNext();
@@ -83,7 +88,6 @@ public:
     // Gripper action in MANUAL_ACTIVE
     void gripperNext();
     void gripperPrev();
-    void setGripperAction(GripperAction action);
     GripperAction getGripperAction() const;
   
     void setTurn(PlayerTurn turn);
@@ -100,6 +104,7 @@ private:
     UIMode currentMode;
     MenuItem selectedMenuItem;
     Difficulty currentDifficulty;
+    Difficulty tempDifficulty;
     ControlTarget selectedControlTarget;
     GripperAction gripperAction;
     PlayerTurn currentTurn;

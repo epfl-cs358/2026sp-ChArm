@@ -8,6 +8,10 @@
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
 #include "hardware/src/limitAxis.h"
+#include "hardware/src/buttonInput.h"
+#include "hardware/src/uiState.h"
+#include "hardware/src/lcdDisplay.h"
+#include "hardware/src/uiController.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
@@ -25,6 +29,11 @@ LeadScrew leadScrew(zStepper, STEPS_PER_MM, GRIPPER_LENGTH, Z_MAX_MM);
 ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
+
+UIState uiState;
+ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
+LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
+UIController uiController(buttonInput, uiState, lcd, Serial1);
 
 void calibrate() {
     Serial.println("Calibrating");
@@ -202,10 +211,13 @@ void setup() {
   xStepper.begin();
   yStepper.begin();
   zStepper.begin();
- 
-  Serial.begin(9600);
 
   gripper.begin();
+ 
+  Serial.begin(9600);
+  Serial1.begin(115200);
+
+  uiController.begin();
  
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
@@ -223,4 +235,6 @@ void loop() {
       cmdBuffer += c;
     }
   }
+
+  uiController.loop();
 }
