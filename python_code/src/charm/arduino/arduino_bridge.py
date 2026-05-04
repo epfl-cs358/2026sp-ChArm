@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import serial
-arduino = serial.Serial('/dev/cu.usbmodem1401', 9600, timeout=2)
+manual_serial = serial.Serial('/dev/cu.usbmodem1401', 9600, timeout=2)
 
 from charm.arduino.coordinate_map import get_square_position, T_X, T_Y, T_Z, Z_HOVER, Z_DOWN, H_X, H_Y, H_Z
 
@@ -76,6 +76,6 @@ def execute_move(uci_move: str, is_capture: bool, is_castling: bool, is_promotio
 
 
 def send_command(command):
-    arduino.write(f"{command}\n".encode())
-    response = arduino.readline().decode().strip()
+    manual_serial.write(f"{command}\n".encode())
+    response = manual_serial.readline().decode().strip()
     return response

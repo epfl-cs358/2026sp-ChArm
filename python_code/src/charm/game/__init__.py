@@ -11,6 +11,7 @@ from charm.game.vision_integration import (
     update_tracker_from_image,
 )
 from charm.game.game_session import GameSession, SessionResult, SessionStep
+from charm.game.game_controller import GameController, GameControllerConfig
 
 __all__ = [
     "BoardStateTracker",
@@ -22,6 +23,8 @@ __all__ = [
     "infer_move_from_image",
     "update_tracker_from_image",
     "GameSession",
+    "GameController",
+    "GameControllerConfig",
     "SessionResult",
     "SessionStep",
 ]

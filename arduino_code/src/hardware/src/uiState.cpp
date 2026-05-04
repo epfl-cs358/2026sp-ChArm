@@ -1,13 +1,14 @@
 #include "uiState.h"
 
 UIState::UIState() {
-    currentMode = BOOT;
-    selectedMenuItem = START_GAME;
-    currentDifficulty = MEDIUM;
-    selectedControlTarget = JOINT1;
-    gripperAction = GRIPPER_OPEN;
-    currentTurn = WHITE;
-    gameStatus = WAITING_PLAYER;
+    this->currentMode = BOOT;
+    this->selectedMenuItem = START_GAME;
+    this->currentDifficulty = MEDIUM;
+    this->tempDifficulty = currentDifficulty;
+    this->selectedControlTarget = JOINT1;
+    this->gripperAction = GRIPPER_OPEN;
+    this->currentTurn = WHITE;
+    this->gameStatus = WAITING_PLAYER;
 }
 
 void UIState::setMode(UIMode mode) {
@@ -21,7 +22,7 @@ UIMode UIState::getMode() const {
 void UIState::back() {
     switch (currentMode) {
         case DIFFICULTY:
-            setMode(MENU);
+            cancelDifficulty();
             break;
         case CALIBRATION:
             setMode(MENU);
@@ -57,7 +58,7 @@ void UIState::selectCurrentMenuItem() {
             setMode(GAME);
             break;
         case DIFFICULTY_ITEM:
-            setMode(DIFFICULTY);
+            enterDifficulty();
             break;
         case CALIBRATION_ITEM:
             setMode(CALIBRATION);
@@ -73,19 +74,35 @@ MenuItem UIState::getSelectedMenuItem() const {
 }
 
 void UIState::difficultyNext() {
-    currentDifficulty = (Difficulty)((currentDifficulty + 1) % DIFFICULTY_COUNT);
+    tempDifficulty = (Difficulty)((tempDifficulty + 1) % DIFFICULTY_COUNT);
 }
 
 void UIState::difficultyPrev() {
-    currentDifficulty = (Difficulty)((currentDifficulty + DIFFICULTY_COUNT - 1) % DIFFICULTY_COUNT);
-}
-
-void UIState::setDifficulty(Difficulty diff) {
-    currentDifficulty = diff;
+    tempDifficulty = (Difficulty)((tempDifficulty + DIFFICULTY_COUNT - 1) % DIFFICULTY_COUNT);
 }
 
 Difficulty UIState::getDifficulty() const {
     return currentDifficulty;
+}
+
+void UIState::enterDifficulty() {
+    tempDifficulty = currentDifficulty;
+    setMode(DIFFICULTY);
+}
+
+void UIState::commitDifficulty() {
+    currentDifficulty = tempDifficulty;
+    setMode(MENU);
+}
+
+void UIState::cancelDifficulty() {
+    // discard temp and return to menu
+    tempDifficulty = currentDifficulty;
+    setMode(MENU);
+}
+
+Difficulty UIState::getTempDifficulty() const {
+    return tempDifficulty;
 }
 
 void UIState::controlNext() {
@@ -116,14 +133,9 @@ void UIState::gripperPrev() {
     gripperAction = (GripperAction)((gripperAction + GRIPPER_CONTROL_COUNT - 1) % GRIPPER_CONTROL_COUNT);
 }
 
-void UIState::setGripperAction(GripperAction action) {
-    gripperAction = action;
-}
-
 GripperAction UIState::getGripperAction() const {
     return gripperAction;
 }
-
 
 void UIState::setTurn(PlayerTurn turn) {
     currentTurn = turn;
@@ -197,7 +209,7 @@ String UIState::getLine2() const {
             return "?";
 
         case DIFFICULTY:
-            switch (currentDifficulty) {
+            switch (tempDifficulty) {
                 case EASY: return "> Easy";
                 case MEDIUM: return "> Medium";
                 case HARD: return "> Hard";
