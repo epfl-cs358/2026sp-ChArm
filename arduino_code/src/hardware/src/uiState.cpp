@@ -191,6 +191,8 @@ String UIState::getLine1() const {
                     return "Control Z";
                 case GRIPPER:   
                     return "Control Gripper";
+                case BACK_TO_MENU:
+                    return "Return to Menu";
             }
             return "?";
 

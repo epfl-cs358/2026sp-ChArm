@@ -30,10 +30,12 @@ ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
  
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
 
+
 UIState uiState;
 ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
 LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
 UIController uiController(buttonInput, uiState, lcd, Serial1);
+
 
 void calibrate() {
     Serial.println("Calibrating");
@@ -43,6 +45,8 @@ void calibrate() {
     findLimit(zStepper, zLim, false, 50);
     backOff(zStepper, zLim, true, 200);
     leadScrew.setZero();
+    leadScrew.moveTo_mm(30);
+    leadScrew.setZero();
     Serial.println("Z: done");
 
     // J1: one switch, zero is 90deg away from limit (straight = 0 in IK)
@@ -51,10 +55,10 @@ void calibrate() {
     backOff(xStepper, j1Lim, true, 50);
     joint1.setZero();
     joint1.setMaxAngle(270.0f);  // temp max to allow 90deg move
-    joint1.moveTo(78.0f);        // 90deg away from limit = IK zero
+    joint1.moveTo(137.0f);        // 90deg away from limit = IK zero
     joint1.setZero();
-    joint1.setMinAngle(-78.0f);  // limit switch is 90deg in this direction
-    joint1.setMaxAngle(202.0f);
+    joint1.setMinAngle(-137.0f);  // limit switch is 90deg in this direction
+    joint1.setMaxAngle(133.0f);
     Serial.println("J1: done");
 
     // J2: two switches, zero is center of range (straight = 0 in IK)
@@ -130,7 +134,6 @@ static void handleCommand(String cmd) {
     Serial.println(" steps");
 
   } else {
- 
     if (cmd == "OG") {
       gripper.open();
     } else if (cmd == "CG") {
@@ -146,6 +149,7 @@ static void handleCommand(String cmd) {
       Serial.println(a);
       joint1.moveTo(a);
       arm.sync();
+      
  
     } else if (cmd.startsWith("angleY ")) {
       float a = cmd.substring(7).toFloat();
@@ -212,12 +216,12 @@ void setup() {
   yStepper.begin();
   zStepper.begin();
 
-  gripper.begin();
+  //gripper.begin();
  
   Serial.begin(9600);
-  Serial1.begin(115200);
+  //Serial1.begin(115200);
 
-  uiController.begin();
+  //uiController.begin();
  
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
@@ -236,5 +240,5 @@ void loop() {
     }
   }
 
-  uiController.loop();
+  //uiController.loop();
 }
