@@ -30,6 +30,7 @@ private:
     bool waitingForBoard = false;
     unsigned long boardRequestTs = 0;
     const unsigned long boardTimeoutMs = 3000;
+    UIMode lastMode;
 
     void processLine(const String& line);
     void handleHostCommand(const String& cmd);

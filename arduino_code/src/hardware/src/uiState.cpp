@@ -9,9 +9,13 @@ UIState::UIState() {
     this->gripperAction = GRIPPER_OPEN;
     this->currentTurn = WHITE;
     this->gameStatus = WAITING_PLAYER;
+    this->modeBeforeError = MENU;
 }
 
 void UIState::setMode(UIMode mode) {
+    if (mode == ERROR && currentMode != ERROR) {
+        modeBeforeError = currentMode;
+    }
     currentMode = mode;
 }
 
@@ -34,7 +38,7 @@ void UIState::back() {
             setMode(MENU);
             break;
         case ERROR:
-            setMode(MENU);
+            clearError();
             break;
         case MANUAL_ACTIVE:
             setMode(MANUAL_CONTROL);
@@ -122,7 +126,11 @@ ControlTarget UIState::getSelectedControlTarget() const {
 }
 
 void UIState::enterSelectedControlTarget() {
-    setMode(MANUAL_ACTIVE);
+    if (selectedControlTarget == BACK_TO_MENU) {
+        setMode(MENU);
+    } else {
+        setMode(MANUAL_ACTIVE);
+    }
 }
 
 void UIState::gripperNext() {
@@ -151,6 +159,12 @@ void UIState::setGameStatus(GameStatus status) {
 
 GameStatus UIState::getGameStatus() const {
     return gameStatus;
+}
+
+void UIState::clearError() {
+    if (currentMode == ERROR) {
+        currentMode = modeBeforeError;
+    }
 }
 
 String UIState::getLine1() const {
@@ -187,7 +201,7 @@ String UIState::getLine1() const {
             return currentTurn == WHITE ? "White Turn" : "Black Turn";
 
         case ERROR:
-            return "ERROR";
+            return "ERR: check board";
 
         default:
             return "?";
@@ -222,6 +236,7 @@ String UIState::getLine2() const {
                 case JOINT2: return "> Joint2";
                 case LEADSCREW: return "> LeadScrew";
                 case GRIPPER: return "> Gripper";
+                case BACK_TO_MENU: return "> Back";
             }
             return "?";
 
@@ -229,7 +244,7 @@ String UIState::getLine2() const {
             if (selectedControlTarget == GRIPPER) {
                 return gripperAction == GRIPPER_OPEN ? "> Open" : "> Close";
             }
-            return "Rotate to move";
+            return "Press to go Back";
 
         case CALIBRATION:
             return "Running...";

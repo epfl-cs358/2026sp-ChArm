@@ -20,6 +20,7 @@ UIController::UIController(ButtonInput& buttonInput, UIState& uiState, LCDDispla
     : buttonInput(buttonInput), uiState(uiState), lcd(lcd), serial(serial), rxBuffer() {
     this->waitingForBoard = false; 
     this->boardRequestTs = 0;
+    this->lastMode = uiState.getMode();
 }
 
 void UIController::begin(unsigned long baud) {
@@ -30,6 +31,20 @@ void UIController::begin(unsigned long baud) {
 }
 
 void UIController::loop() {
+    // detect mode entry for one-shot actions (e.g., auto-start calibration)
+    UIMode currentMode = uiState.getMode();
+    if (currentMode != lastMode) {
+        if (currentMode == CALIBRATION) {
+            // auto-start calibration immediately on entering CALIBRATION
+            sendMessage("CALIBRATE_START");
+            calibrate();
+            sendMessage("CALIBRATE_DONE");
+            uiState.setMode(MENU);
+            currentMode = uiState.getMode();
+        }
+        lastMode = currentMode;
+    }
+
     // handle incoming serial lines
     while (serial.available()) {
         char c = (char)serial.read();
@@ -47,21 +62,6 @@ void UIController::loop() {
     // handle one button event per loop
     InputEvent ev = buttonInput.readEvent();
     if (ev != INPUT_NONE) {
-        if (ev == INPUT_BACK) {
-            // Sync arm position if exiting manual control
-            if (uiState.getMode() == MANUAL_ACTIVE) {
-                arm.sync();
-                serial.print("Position: (");
-                serial.print(arm.x()); Serial.print(", ");
-                serial.print(arm.y()); Serial.print(", ");
-                serial.print(leadScrew.position_mm()); serial.println(")");
-            }
-            waitingForBoard = false;
-            uiState.back();
-            lcd.update(uiState.getLine1(), uiState.getLine2());
-            return;
-        }
-
         UIMode mode = uiState.getMode();
         switch (mode) {
             case MENU:
@@ -88,13 +88,7 @@ void UIController::loop() {
                 break;
 
             case CALIBRATION:
-                if (ev == INPUT_SELECT) {
-                    // call the global calibration routine
-                    sendMessage("CALIBRATE_START");
-                    calibrate();
-                    sendMessage("CALIBRATE_DONE");
-                    uiState.setMode(MENU);
-                }
+                // Calibration is started automatically on mode entry
                 break;
 
             case MANUAL_CONTROL:
@@ -107,12 +101,24 @@ void UIController::loop() {
                 if (uiState.getSelectedControlTarget() == JOINT1) {
                     if (ev == INPUT_NEXT) joint1.moveBy(MANUAL_JOINT_STEP_DEG);
                     else if (ev == INPUT_PREV) joint1.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    else if (ev == INPUT_SELECT) {
+                        arm.sync();
+                        uiState.setMode(MANUAL_CONTROL);
+                    }
                 } else if (uiState.getSelectedControlTarget() == JOINT2) {
                     if (ev == INPUT_NEXT) joint2.moveBy(MANUAL_JOINT_STEP_DEG);
                     else if (ev == INPUT_PREV) joint2.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    else if (ev == INPUT_SELECT) {
+                        arm.sync();
+                        uiState.setMode(MANUAL_CONTROL);
+                    }
                 } else if (uiState.getSelectedControlTarget() == LEADSCREW) {
                     if (ev == INPUT_NEXT) leadScrew.moveBy_mm(MANUAL_Z_STEP_MM);
                     else if (ev == INPUT_PREV) leadScrew.moveBy_mm(-MANUAL_Z_STEP_MM);
+                    else if (ev == INPUT_SELECT) {
+                        arm.sync();
+                        uiState.setMode(MANUAL_CONTROL);
+                    }
                 } else if (uiState.getSelectedControlTarget() == GRIPPER) {
                     if (ev == INPUT_NEXT) {
                         uiState.gripperNext();
@@ -124,6 +130,7 @@ void UIController::loop() {
                         } else {
                             gripper.close();
                         }
+                        uiState.setMode(MANUAL_CONTROL);
                     }
                 }
                 break;
@@ -131,6 +138,12 @@ void UIController::loop() {
             case GAME:
                 if (ev == INPUT_SELECT && uiState.getGameStatus() == WAITING_PLAYER) {
                     sendMessage("PLAYER_DONE");
+                }
+                break;
+
+            case ERROR:
+                if (ev == INPUT_SELECT) {
+                    uiState.clearError();
                 }
                 break;
 
@@ -170,6 +183,8 @@ void UIController::processLine(const String& line) {
             uiState.setMode(ERROR);
             sendMessage("BOARD_FAIL_ACK");
         }
+    } else if (line.equalsIgnoreCase("ERROR_CLEAR")) {
+        uiState.clearError();
     } else if (line.equalsIgnoreCase("BOT_THINKING")) {
         uiState.setGameStatus(THINKING);
     } else if (line.equalsIgnoreCase("BOT_MOVING")) {

@@ -8,7 +8,6 @@ ButtonInput::ButtonInput(int pinCLK, int pinDT, int pinSW) {
     this->lastButtonState = HIGH;
     this->buttonPressStartMs = 0;
     this->debounceMs = 20;
-    this->longPressMs = 1000;
     this->lastButtonChangeMs = 0;
 }
 
@@ -47,9 +46,7 @@ InputEvent ButtonInput::readEvent() {
             buttonPressStartMs = now;
         } else {  // Release
             unsigned long pressDuration = now - buttonPressStartMs;
-            if (pressDuration >= longPressMs) {
-                return INPUT_BACK;
-            } else if (pressDuration >= debounceMs) {
+            if (pressDuration >= debounceMs) {
                 return INPUT_SELECT;
             }
         }

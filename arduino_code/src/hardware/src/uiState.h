@@ -32,7 +32,8 @@ enum ControlTarget {
     JOINT1,
     JOINT2,
     LEADSCREW,
-    GRIPPER
+    GRIPPER,
+    BACK_TO_MENU
 };
 
 enum GripperAction {
@@ -96,6 +97,8 @@ public:
     void setGameStatus(GameStatus status);
     GameStatus getGameStatus() const;
 
+    void clearError();
+
     // Display methods
     String getLine1() const;
     String getLine2() const;
@@ -109,10 +112,11 @@ private:
     GripperAction gripperAction;
     PlayerTurn currentTurn;
     GameStatus gameStatus;
+    UIMode modeBeforeError;
     
     static const int MENU_COUNT = 4;
     static const int DIFFICULTY_COUNT = 3;
-    static const int CONTROL_COUNT = 4;
+    static const int CONTROL_COUNT = 5;
     static const int GRIPPER_CONTROL_COUNT = 2;
 };
 
