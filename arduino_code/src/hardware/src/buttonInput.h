@@ -7,8 +7,7 @@ enum InputEvent {
     INPUT_NONE,
     INPUT_NEXT,        // Encoder clockwise
     INPUT_PREV,        // Encoder counterclockwise
-    INPUT_SELECT,      // Short press
-    INPUT_BACK         // Long press
+    INPUT_SELECT       // Short press
 };
 
 class ButtonInput {
@@ -30,7 +29,6 @@ private:
     unsigned long buttonPressStartMs;
 
     unsigned long debounceMs;
-    unsigned long longPressMs;
     unsigned long lastButtonChangeMs;
 };
 
