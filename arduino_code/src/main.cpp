@@ -91,13 +91,52 @@ void calibrate() {
 
 int stepCount = 0;
 static String cmdBuffer = "";
- 
+
+// Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `controllerMode`.
+// 'd' is taken by +X in this mode, so Z-down uses 'j' (under 'u' on QWERTY).
+// Steps are small so terminal key-repeat feels continuous instead of queueing.
+static bool controllerMode = false;
+static const float JOG_XY_MM = 3.0f;
+static const float JOG_Z_MM  = 1.5f;
+
+static bool isJogKey(char c) {
+  return c == 'w' || c == 'a' || c == 's' || c == 'd'
+      || c == 'u' || c == 'j'
+      || c == 'c' || c == 'v';
+}
+
 static void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
 
   if (cmd.length() == 1) {
- 
+
+    if (controllerMode) {
+      // Re-sync arm.x()/y() from actual joint angles so a previously clamped
+      // move can't accumulate drift in the requested target.
+      arm.sync();
+
+      bool moved = true;
+      if      (cmd == "w") arm.moveXY(arm.x(), arm.y() + JOG_XY_MM);
+      else if (cmd == "s") arm.moveXY(arm.x(), arm.y() - JOG_XY_MM);
+      else if (cmd == "a") arm.moveXY(arm.x() - JOG_XY_MM, arm.y());
+      else if (cmd == "d") arm.moveXY(arm.x() + JOG_XY_MM, arm.y());
+      else if (cmd == "u") leadScrew.moveBy_mm(JOG_Z_MM);
+      else if (cmd == "j") leadScrew.moveBy_mm(-JOG_Z_MM);
+      else if (cmd == "c") gripper.close();
+      else if (cmd == "v") gripper.open();
+      else moved = false;
+
+      if (moved) {
+        arm.sync();
+        Serial.print("Position: (");
+        Serial.print(arm.x()); Serial.print(", ");
+        Serial.print(arm.y()); Serial.print(", ");
+        Serial.print(leadScrew.position_mm()); Serial.println(")");
+      }
+      return;
+    }
+
     if (cmd == "f") {
       xStepper.setDirection(true);
       xStepper.step();
@@ -126,8 +165,14 @@ static void handleCommand(String cmd) {
       zStepper.setDirection(false);
       zStepper.step();
       stepCount--;
+    } else if (cmd == "c") {
+      gripper.close();
+      return;
+    } else if (cmd == "v") {
+      gripper.open();
+      return;
     }
- 
+
     Serial.print("Position: ");
     Serial.print(stepCount);
     Serial.println(" steps");
@@ -184,7 +229,13 @@ static void handleCommand(String cmd) {
 
     } else if (cmd == "calibrate") {
       calibrate();
- 
+
+    } else if (cmd == "controllerMode" || cmd == "cm") {
+      controllerMode = !controllerMode;
+      Serial.print("Controller mode ");
+      Serial.println(controllerMode ? "ON (w/a/s/d=XY, u/j=Z)" : "OFF");
+      return;
+
     } else if (cmd == "pos") {
       Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println("°");
       Serial.print("Joint2: "); Serial.print(joint2.angle()); Serial.println("°");
@@ -222,13 +273,23 @@ void setup() {
  
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
-  Serial.println("OG = open gripper | CG = close gripper | GS = gripper status");
+  Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
+  Serial.println("cm = toggle controller mode (w/a/s/d=XY, u/j=Z, v/c=gripper)");
 }
  
 void loop() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
+
+    // In controller mode, jog keys dispatch immediately (no Enter needed) so
+    // that holding the key auto-repeats into continuous motion. Multi-char
+    // commands like `cm` still work because their letters aren't jog keys.
+    if (controllerMode && isJogKey(c)) {
+      handleCommand(String(c));
+      continue;
+    }
+
     if (c == '\n') {
       handleCommand(cmdBuffer);
       cmdBuffer = "";
