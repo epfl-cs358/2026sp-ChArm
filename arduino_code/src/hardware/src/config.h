@@ -30,7 +30,7 @@ const float STEPS_PER_MM = STEPS_PER_REV * MICROSTEPS / LEAD;
 const float GRIPPER_LENGTH  = 100.0f;
 
 // Gripper
-const int OPEN_ANGLE = 70;
+const int OPEN_ANGLE = 65;
 const int CLOSED_ANGLE = 0;
 
 #endif

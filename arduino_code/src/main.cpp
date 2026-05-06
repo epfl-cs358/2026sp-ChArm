@@ -45,8 +45,7 @@ void calibrate() {
     findLimit(zStepper, zLim, false, 50);
     backOff(zStepper, zLim, true, 200);
     leadScrew.setZero();
-    leadScrew.moveTo_mm(30);
-    leadScrew.setZero();
+    leadScrew.moveTo_mm(30);  // lift to clear the box during rest of calibration
     Serial.println("Z: done");
 
     // J1: one switch, zero is 90deg away from limit (straight = 0 in IK)
@@ -215,10 +214,8 @@ void setup() {
   xStepper.begin();
   yStepper.begin();
   zStepper.begin();
-
-  //gripper.begin();
- 
   Serial.begin(9600);
+  gripper.begin();
   //Serial1.begin(115200);
 
   //uiController.begin();
