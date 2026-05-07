@@ -79,7 +79,7 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     cells = extract_8x8_cells(warped_board)
 
     # Occupancy detection
-    occupancy_results = detect_occupancy(cells, threshold=2.5)
+    occupancy_results = detect_occupancy(cells, threshold=4.0)
     occupancy_matrix = occupancy_to_matrix(occupancy_results)
     occupancy_debug_image = draw_occupancy_debug(
         warped_board,
@@ -99,7 +99,6 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
         cells,
         color_results,
     )
-
     # Final bitmaps
     white_bitmap, black_bitmap = build_white_black_bitmaps(color_results)
 
