@@ -23,9 +23,9 @@ class PieceColorResult:
 
 def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
     """
-    Compute a simple brightness score from the center ROI.
-    Higher score -> more likely white piece.
-    Lower score -> more likely black piece.
+    Compute a brightness score from the center ROI using CLAHE + Otsu binarization.
+    Returns mean of the binary image: ~255 for white pieces, ~0 for black pieces.
+    This approach is robust to absolute lighting changes since it relies on local contrast.
     """
     h, w = cell_image.shape[:2]
 
@@ -36,7 +36,12 @@ def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
 
     roi = cell_image[y1:y2, x1:x2]
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # Boost saturation so slightly off-white pieces separate from flat board squares
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 2.5, 0, 255)
+    roi_enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    gray = cv2.cvtColor(roi_enhanced, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
     return float(np.mean(blurred))
@@ -45,8 +50,8 @@ def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
 def detect_piece_colors(
     cells: list[SquareCell],
     occupancy_results: list[OccupancyResult],
-    white_threshold: float = 125.0,
-    black_threshold: float = 110.0,
+    white_threshold: float = 128.0,
+    black_threshold: float = 128.0,
 ) -> list[PieceColorResult]:
     """
     Only classify occupied cells.
@@ -92,6 +97,39 @@ def detect_piece_colors(
         )
 
     return results
+
+
+def draw_binary_debug(
+    cells: list[SquareCell],
+    cell_size: int = 100,
+) -> np.ndarray:
+    """
+    Build an 8x8 grid image showing the CLAHE+Otsu binary image for each cell,
+    so you can inspect what the brightness scorer actually sees.
+    """
+    canvas = np.zeros((8 * cell_size, 8 * cell_size), dtype=np.uint8)
+
+    for cell in cells:
+        h, w = cell.image.shape[:2]
+        x1 = int(w * 0.25)
+        x2 = int(w * 0.75)
+        y1 = int(h * 0.25)
+        y2 = int(h * 0.75)
+        roi = cell.image[y1:y2, x1:x2]
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        enhanced = clahe.apply(gray)
+        _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        tile = cv2.resize(binary, (cell_size, cell_size), interpolation=cv2.INTER_NEAREST)
+
+        r = cell.row
+        c = cell.col
+        canvas[r * cell_size:(r + 1) * cell_size, c * cell_size:(c + 1) * cell_size] = tile
+
+    # Convert grayscale to BGR so it fits with the rest of the debug images
+    return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
 
 
 def draw_piece_color_debug(

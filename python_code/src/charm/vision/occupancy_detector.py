@@ -32,10 +32,16 @@ def compute_occupancy_score(cell_image: np.ndarray) -> float:
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
 
-    score = float(np.mean(edges))
-    return score
+    # Lower thresholds to catch weak edges from white pieces on light squares
+    edges = cv2.Canny(blurred, 15, 50)
+    edge_score = float(np.mean(edges))
+
+    # White pieces are 3D with shadows; empty squares are flat and uniform.
+    # Std dev captures this variance even when edges are weak.
+    std_score = float(np.std(blurred)) * 0.4
+
+    return edge_score + std_score
 
 
 def detect_occupancy(
