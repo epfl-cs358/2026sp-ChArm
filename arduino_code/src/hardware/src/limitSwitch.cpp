@@ -1,13 +1,27 @@
 #include "limitSwitch.h"
- 
-LimitSwitch::LimitSwitch(uint8_t pin, bool activeLow)
-    : pin(pin), activeLow(activeLow) {}
- 
+
+LimitSwitch::LimitSwitch(uint8_t pin, uint16_t debounceMs)
+        : pin(pin),
+          debounceMs(debounceMs),
+          lastRead(false),
+          stableState(false),
+          lastChangeMs(0) {}
+
 void LimitSwitch::begin() {
-    pinMode(pin, INPUT_PULLUP);
+    pinMode(pin, INPUT);
+    stableState = (digitalRead(pin) == HIGH);
+    lastRead = stableState;
+    lastChangeMs = millis();
 }
- 
-bool LimitSwitch::isNotTriggered() const {
-    return activeLow ? (digitalRead(pin) == LOW)
-                     : (digitalRead(pin) == HIGH);
+
+bool LimitSwitch::pressed() {
+    bool current = (digitalRead(pin) == HIGH);
+    if (current != lastRead) {
+        lastRead = current;
+        lastChangeMs = millis();
+    }
+    if (millis() - lastChangeMs >= debounceMs) {
+        stableState = lastRead;
+    }
+    return stableState;
 }
