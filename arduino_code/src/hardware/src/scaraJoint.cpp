@@ -4,8 +4,10 @@
 ScaraJoint::ScaraJoint(StepperXYZ& stepper,
                        float stepsPerRev,
                        int microstep,
-                       float gearRatio)
-    : stepper_(stepper) {
+                       float gearRatio,
+                       LimitSwitch& limSwitch
+                       , bool isdualLimit)
+    : stepper_(stepper), limitSwitch(limSwitch), isDualLimit(isdualLimit) {
     this->stepsPerRev = stepsPerRev;
     this->microstep = microstep;
     this->gearRatio = gearRatio;
@@ -15,9 +17,46 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper,
     this->maxAngle = 360.0f;
 }
  
+void ScaraJoint::begin() {
+    stepper_.begin();
+    limitSwitch.begin();
+}
+
 float ScaraJoint::stepsPerDegree() const {
     // Uses stored microstep (not read from stepper) so it's always correct.
     return (stepsPerRev * microstep) / (gearRatio * 360.0f);
+}
+void ScaraJoint::calibrate() {
+    Serial.println("Calibrating joint");
+    // Drive towards the limit until triggered, back off, and set zero.
+    stepper_.setDirection(false);
+    while (!limitSwitch.pressed()) {
+        stepper_.step();
+    }
+    //backoff until switch releases to avoid wearing it out
+    stepper_.toggleDirection();
+    while (limitSwitch.pressed()) {
+        stepper_.step();
+    }
+    setZero();
+    if (isDualLimit) {
+        long stepsDone = 0;
+        // If there's a second limit switch, use it to set the max angle.
+        Serial.println("Calibrating max angle");
+        while (!limitSwitch.pressed()) {
+            stepper_.step();
+            stepsDone++;
+        }
+        stepper_.toggleDirection();
+        while (limitSwitch.pressed())
+        {
+            stepper_.step();
+            stepsDone--;
+        }
+        float angleMoved = stepsDone / stepsPerDegree();
+        setMaxAngle(angleMoved);
+        setAngle(angleMoved); 
+    }
 }
  
 void ScaraJoint::moveBy(float deltaDeg) {

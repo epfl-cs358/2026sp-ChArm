@@ -1,15 +1,20 @@
 #include "leadScrew.h"
 #include <math.h>
 
-LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM, float gripperLength, float maxTravel_mm)
-    : stepper_(stepper) {
+LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM,
+    float maxTravel_mm, LimitSwitch& bottomLimit)
+    : stepper_(stepper), bottomLimit(bottomLimit) {
     this->stepsPerMM = stepsPerMM;
-    this->gripperLength = gripperLength;
-    this->maxTravel_mm = maxTravel_mm; 
+    this->maxTravel_mm = maxTravel_mm;
     this->currentMm = 0.0f;
-    this->stepResidual = 0.0f; 
-    }
+    this->stepResidual = 0.0f;
+}
  
+void LeadScrew::begin() {
+    stepper_.begin();
+    bottomLimit.begin();
+}
+
 void LeadScrew::moveBy_mm(float deltaMm) {
  
     float target = currentMm + deltaMm;
@@ -40,6 +45,17 @@ void LeadScrew::moveBy_mm(float deltaMm) {
  
 void LeadScrew::moveTo_mm(float mm) {
     moveBy_mm(mm - currentMm);
+}
+
+void LeadScrew::calibrate() {
+    // Move down until the bottom limit switch is triggered, then set that position to zero.
+    stepper_.setDirection(false); 
+    while (!bottomLimit.pressed()) {
+        stepper_.step();
+    }
+    stepper_.setDirection(true);
+    moveBy_mm(5.0f); // back off a bit to avoid wearing out the switch
+    setZero();
 }
 
 

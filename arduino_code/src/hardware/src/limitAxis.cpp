@@ -6,9 +6,9 @@ long findLimit(StepperXYZ& stepper, LimitSwitch& sw, bool direction, unsigned lo
     while (true) {
         stepper.step();
         steps++;
-        if (!sw.isNotTriggered()) {
+        if (sw.pressed()) {
             delay(debounceMs);
-            if (!sw.isNotTriggered()) break;  // still triggered after wait = real contact
+            if (sw.pressed()) break;  // still pressed after wait = real contact
         }
     }
     return steps;
@@ -23,11 +23,11 @@ long backOff(StepperXYZ& stepper, LimitSwitch& sw, bool direction, unsigned long
     while (true) {
         stepper.step();
         steps++;
-        if (!sw.isNotTriggered()) {
-            timing = false;  // bounced back, reset
+        if (sw.pressed()) {
+            timing = false;  // still pressed, reset
         } else {
             if (!timing) { stableStart = millis(); timing = true; }
-            if (millis() - stableStart >= backOffDelayMs) break;  // stable for backOffDelayMs
+            if (millis() - stableStart >= backOffDelayMs) break;  // released for backOffDelayMs
         }
     }
     return steps;

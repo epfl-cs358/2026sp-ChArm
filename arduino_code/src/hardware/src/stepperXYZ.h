@@ -19,7 +19,7 @@ public:
  
     void setDirection(bool forward);
     bool direction() const { return forward; }
- 
+    void toggleDirection() { setDirection(!forward); }
     // Half-period of the STEP pulse in microseconds (total period = 2 * us).
     void setStepDelay(unsigned int microseconds);
     unsigned int stepDelay() const { return stepDelayUs; }

@@ -10,19 +10,22 @@ public:
     LeadScrew(StepperXYZ& stepper,
               float stepsPerMM,
               float maxTravel_mm,
-              float gripperLength = 0.0f);
- 
+              LimitSwitch& bottomLimit);
+
+    // Initializes the underlying stepper and bottom limit switch pins.
+    void begin();
+
     void moveTo_mm(float mm);
     void moveBy_mm(float mm);
- 
+    void calibrate();
     float position_mm() const { return currentMm; }
     void setZero() { currentMm = 0.0f; stepResidual = 0.0f; }
  
 private:
     StepperXYZ& stepper_;
+    LimitSwitch& bottomLimit;
     float stepsPerMM;
     float maxTravel_mm;
-    float gripperLength;
     float currentMm;
     float stepResidual;
 };
