@@ -58,6 +58,8 @@ static bool  h1Calibrated = false, a1Calibrated = false, h8Calibrated = false;
 static float h1X = 0.0f, h1Y = 0.0f;
 static float a1X = 0.0f, a1Y = 0.0f;
 static float h8X = 0.0f, h8Y = 0.0f;
+static bool  trashCalibrated = false;
+static float trashX = 0.0f, trashY = 0.0f, trashZ = 0.0f;
 
 static bool boardCalibrated() {
   return h1Calibrated && a1Calibrated && h8Calibrated;
@@ -103,6 +105,26 @@ static void captureH8() {
   Serial.print("H8 CAPTURED  XY=("); Serial.print(h8X); Serial.print(", ");
   Serial.print(h8Y); Serial.println(")");
   Serial.println("====================================");
+}
+
+static void captureTrash() {
+  trashX = arm.x(); trashY = arm.y(); trashZ = arm.z(); trashCalibrated = true;
+  Serial.println("====================================");
+  Serial.print("TRASH CAPTURED XYZ=("); Serial.print(trashX); Serial.print(", ");
+  Serial.print(trashY); Serial.print(", ");
+  Serial.print(trashZ); Serial.println(")");
+  Serial.println("====================================");
+}
+
+static int pieceNameToType(String pieceName) {
+  pieceName.toLowerCase();
+  if (pieceName == "pawn")   return PAWN;
+  if (pieceName == "knight") return KNIGHT;
+  if (pieceName == "bishop") return BISHOP;
+  if (pieceName == "rook")   return ROOK;
+  if (pieceName == "queen")  return QUEEN;
+  if (pieceName == "king")   return KING;
+  return -1;  // invalid
 }
 
 static void printCmHelp() {
@@ -252,6 +274,123 @@ static void handleCommand(String cmd) {
       Serial.print(", Z: "); Serial.println(z);
       arm.moveXYZ(x, y, z);
 
+    } else if (cmd.startsWith("pick ")) {
+      // usage: pick <piece> <square>
+      String vals = cmd.substring(5);
+      int spaceIdx = vals.indexOf(' ');
+      
+      if (spaceIdx < 0) {
+        Serial.println("usage: pick <piece> <square>, e.g. pick pawn e2");
+        Serial.println("pieces: pawn, knight, bishop, rook, queen, king");
+        return;
+      }
+      
+      String pieceName = vals.substring(0, spaceIdx);
+      String sq = vals.substring(spaceIdx + 1);
+      pieceName.trim();
+      sq.trim();
+      sq.toLowerCase();
+      
+      int pieceType = pieceNameToType(pieceName);
+      if (pieceType < 0) {
+        Serial.println("Invalid piece type. Use: pawn, knight, bishop, rook, queen, king");
+        return;
+      }
+      
+      if (sq.length() != 2) {
+        Serial.println("usage: pick <piece> <square>, e.g. pick pawn e2");
+        return;
+      }
+
+      char file = sq.charAt(0);
+      int rank = sq.charAt(1) - '0';
+      float tx, ty;
+      if (!squareToXY(file, rank, tx, ty)) {
+        if (!boardCalibrated()) {
+          Serial.println("Board not fully calibrated. Need all 3 corners:");
+          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING (cm + 1 or setA1)");
+          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING (cm + h or setH1)");
+          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING (cm + 8 or setH8)");
+        } else {
+          Serial.println("bad square (use a1..h8)");
+        }
+        return;
+      }
+
+      Serial.print("Pick "); Serial.print(pieceName); Serial.print(" from "); Serial.print(sq); Serial.print(" -> XY(");
+      Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.println(")");
+      if (!arm.pickAt(tx, ty, pieceType)) Serial.println("Pick failed"); else Serial.println("Pick done");
+      return;
+
+    } else if (cmd.startsWith("put ")) {
+      // usage: put <piece> <square|trash>
+      String vals = cmd.substring(4);
+      int spaceIdx = vals.indexOf(' ');
+      
+      if (spaceIdx < 0) {
+        Serial.println("usage: put <piece> <square>, e.g. put queen d1");
+        Serial.println("pieces: pawn, knight, bishop, rook, queen, king");
+        return;
+      }
+      
+      String pieceName = vals.substring(0, spaceIdx);
+      String sq = vals.substring(spaceIdx + 1);
+      pieceName.trim();
+      sq.trim();
+      sq.toLowerCase();
+
+      bool toTrash = (sq == "trash");
+      
+      int pieceType = pieceNameToType(pieceName);
+      if (pieceType < 0) {
+        Serial.println("Invalid piece type. Use: pawn, knight, bishop, rook, queen, king");
+        return;
+      }
+      
+      float tx, ty;
+      if (toTrash) {
+        if (!trashCalibrated) {
+          Serial.println("Trash not calibrated. Use setTrash first.");
+          return;
+        }
+        tx = trashX;
+        ty = trashY;
+      } else {
+        if (sq.length() != 2) {
+          Serial.println("usage: put <piece> <square|trash>, e.g. put queen d1 or put queen trash");
+          return;
+        }
+
+        char file = sq.charAt(0);
+        int rank = sq.charAt(1) - '0';
+        if (!squareToXY(file, rank, tx, ty)) {
+          if (!boardCalibrated()) {
+            Serial.println("Board not fully calibrated. Need all 3 corners:");
+            Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING (cm + 1 or setA1)");
+            Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING (cm + h or setH1)");
+            Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING (cm + 8 or setH8)");
+          } else {
+            Serial.println("bad square (use a1..h8)");
+          }
+          return;
+        }
+      }
+
+      if (toTrash) {
+        Serial.print("Put "); Serial.print(pieceName); Serial.print(" to trash -> XYZ(");
+        Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.print(", "); Serial.print(trashZ); Serial.println(")");
+        if (!arm.moveXYZ(tx, ty, trashZ)) {
+          Serial.println("Put failed");
+        } else {
+          arm.openGripper();
+          Serial.println("Put done");
+        }
+      } else {
+        Serial.print("Put "); Serial.print(pieceName); Serial.print(" to "); Serial.print(sq); Serial.print(" -> XY(");
+        Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.println(")");
+        if (!arm.putAt(tx, ty, pieceType)) Serial.println("Put failed"); else Serial.println("Put done");
+      }
+      return;
     } else if (cmd == "calibrate") {
       arm.calibrate();
 
@@ -277,6 +416,10 @@ static void handleCommand(String cmd) {
       captureH8();
       return;
 
+    } else if (cmd == "setTrash") {
+      captureTrash();
+      return;
+
     } else if (cmd == "boardInfo") {
       Serial.print("A1: ");
       if (a1Calibrated) { Serial.print("("); Serial.print(a1X); Serial.print(", "); Serial.print(a1Y); Serial.println(")"); }
@@ -297,6 +440,9 @@ static void handleCommand(String cmd) {
       } else {
         Serial.println("(board not fully calibrated)");
       }
+      Serial.print("Trash: ");
+      if (trashCalibrated) { Serial.print("("); Serial.print(trashX); Serial.print(", "); Serial.print(trashY); Serial.print(", "); Serial.print(trashZ); Serial.println(")"); }
+      else                 { Serial.println("not set"); }
       Serial.print("current Z="); Serial.print(arm.z()); Serial.println(" mm");
       return;
 
@@ -363,7 +509,9 @@ void setup() {
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
   Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h/1/8=setH1/A1/H8, q=exit)");
-  Serial.println("setA1 / setH1 / setH8 = capture corners | goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("setA1 / setH1 / setH8 / setTrash = capture corners/trash | goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("pick <sq> | put <sq> | put <piece> trash (trash uses calibrated XYZ)");
+  Serial.println("pick <piece> <sq> | put <piece> <sq> (pieces: pawn, knight, bishop, rook, queen, king)");
 }
  
 void loop() {
