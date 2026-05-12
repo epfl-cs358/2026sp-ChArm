@@ -1,24 +1,36 @@
 #include "leadScrew.h"
 #include <math.h>
 
-LeadScrew::LeadScrew(StepperXYZ& stepper, float stepsPerMM,
-    float maxTravel_mm, LimitSwitch& bottomLimit)
+LeadScrew::LeadScrew(StepperXYZ& stepper,
+                     float stepsPerRev,
+                     int microstep,
+                     float lead_mm,
+                     float maxTravel_mm,
+                     LimitSwitch& bottomLimit)
     : stepper_(stepper), bottomLimit(bottomLimit) {
-    this->stepsPerMM = stepsPerMM;
+    this->stepsPerRev = stepsPerRev;
+    this->microstep = microstep;
+    this->lead_mm = lead_mm;
     this->maxTravel_mm = maxTravel_mm;
     this->currentMm = 0.0f;
-    this->stepResidual = 0.0f;
 }
- 
+
 void LeadScrew::begin() {
     stepper_.begin();
     bottomLimit.begin();
 }
 
+float LeadScrew::stepsPerMm() const {
+    // Uses stored microstep (not read from stepper) so it's always correct.
+    return (stepsPerRev * microstep) / lead_mm;
+}
+
 void LeadScrew::moveBy_mm(float deltaMm) {
- 
+    float spm = stepsPerMm();
+    if (spm == 0.0f) return;
+
     float target = currentMm + deltaMm;
- 
+
     if (target < 0.0f) {
         Serial.print("Z: target ");
         Serial.print(target);
@@ -33,14 +45,11 @@ void LeadScrew::moveBy_mm(float deltaMm) {
         Serial.println(" mm; move cancelled");
         return;
     }
- 
-    // Carry rounding leftover from previous move to avoid drift.
-    float desiredSteps = deltaMm * stepsPerMM + stepResidual;
-    long stepsToEmit = lroundf(desiredSteps);
- 
+
+    long stepsToEmit = lroundf(deltaMm * spm);
     stepper_.step(stepsToEmit);
-    stepResidual = desiredSteps - stepsToEmit;
-    currentMm += deltaMm;
+    // Physical (emitted) position, not the commanded one — see ScaraJoint.
+    currentMm += (float)stepsToEmit / spm;
 }
  
 void LeadScrew::moveTo_mm(float mm) {
