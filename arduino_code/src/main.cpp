@@ -46,7 +46,7 @@ static const float JOG_Z_MM  = 1.5f;
 // Chess board calibration.
 // Board orientation is mechanically fixed: edge along y=0 is parallel to the
 // black-pawn row (arm sits on white side), edge along x=0 is the A-column side.
-// So A is at small x, H at large x, rank 1 at small y, rank 8 at large y.
+// So A is at small x, H at large x, rank 1 at large y, rank 8 at small y.
 // User jogs to H1 with WASD and runs `setH1`; every other square is derived.
 // Z is intentionally NOT part of the calibration — it stays under manual control
 // (use moveZ / u-j in cm mode) so the user is responsible for being at a safe
@@ -64,7 +64,7 @@ static bool squareToXY(char file, int rank, float& outX, float& outY) {
   int fileIdx = file - 'a';            // a=0, h=7
   int rankIdx = rank - 1;              // 1=0, 8=7
   outX = h1X - (7 - fileIdx) * SQUARE_MM;
-  outY = h1Y + rankIdx * SQUARE_MM;
+  outY = h1Y - rankIdx * SQUARE_MM;
   return true;
 }
 
