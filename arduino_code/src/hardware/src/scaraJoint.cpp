@@ -12,7 +12,6 @@ ScaraJoint::ScaraJoint(StepperXYZ& stepper,
     this->microstep = microstep;
     this->gearRatio = gearRatio;
     this->currentAngle = 0.0f;
-    this->stepResidual = 0.0f;
     this->minAngle = 0.0f;
     this->maxAngle = 360.0f;
 }
@@ -82,13 +81,14 @@ void ScaraJoint::moveBy(float deltaDeg) {
         return;
     }               
  
-    // Carry rounding leftover from previous move to avoid drift.
-    float desiredSteps = deltaDeg * spd + stepResidual;
-    long stepsToEmit = lroundf(desiredSteps);
- 
+    long stepsToEmit = lroundf(deltaDeg * spd);
     stepper_.step(stepsToEmit);
-    stepResidual = desiredSteps - stepsToEmit;
-    currentAngle += deltaDeg;
+    // Track the physical (emitted) angle, not the commanded one, so
+    // currentAngle stays in sync with the motor across many moves. Without
+    // this, repeated moveXY substeps accumulate sub-step rounding error and
+    // arm.x()/arm.y() drift from the true physical position — which makes
+    // saved corner captures (h1, a1, h8) non-repeatable.
+    currentAngle += (float)stepsToEmit / spd;
 }
  
 void ScaraJoint::moveTo(float angleDeg) {

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include "hardware/src/pins.h"
 #include "hardware/src/stepperXYZ.h"
 #include "hardware/src/scaraJoint.h"
@@ -20,10 +21,10 @@ LimitSwitch j1Lim(X_LIMIT_PIN);
 LimitSwitch j2Lim(Y_LIMIT_PIN);
 LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN);
 
-ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1, j1Lim, false); //base
-ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2, j2Lim, true); //forearm
+ScaraJoint joint1(xStepper, STEPS_PER_REV, 16, GEAR_RATIO_J1, j1Lim, false); //base
+ScaraJoint joint2(yStepper, STEPS_PER_REV, 16, GEAR_RATIO_J2, j2Lim, true); //forearm
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
-LeadScrew leadScrew(zStepper, STEPS_PER_MM, Z_MAX_MM, zLim);
+LeadScrew leadScrew(zStepper, STEPS_PER_REV, 2, LEAD, Z_MAX_MM, zLim);
 
 ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
  
@@ -39,6 +40,7 @@ static String cmdBuffer = "";
 // Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `controllerMode`.
 // 'd' is taken by +X in this mode, so Z-down uses 'j' (under 'u' on QWERTY).
 // Steps are small so terminal key-repeat feels continuous instead of queueing.
+// This mode is jog-only — board calibration lives in its own mode (`cal`).
 static bool controllerMode = false;
 static const float JOG_XY_MM = 3.0f;
 static const float JOG_Z_MM  = 1.5f;
@@ -63,6 +65,160 @@ static bool boardCalibrated() {
   return h1Calibrated && a1Calibrated && h8Calibrated;
 }
 
+// --- EEPROM persistence ---------------------------------------------------
+// Mega has no filesystem; 3-corner calibration is stored in EEPROM at addr 0.
+// Layout:
+//   [0..3]   magic "CALB" (only load if it matches — avoids loading garbage
+//            on a virgin board where EEPROM reads 0xFF)
+//   [4..27]  six floats: h1X, h1Y, a1X, a1Y, h8X, h8Y
+//   [28]     XOR checksum of bytes [0..27]
+static const int     EEPROM_CAL_ADDR = 0;
+static const uint8_t CAL_MAGIC[4]    = { 'C', 'A', 'L', 'B' };
+static const int     EEPROM_CAL_LEN  = 29;
+
+static bool loadCalFromEEPROM() {
+  for (int i = 0; i < 4; i++) {
+    if (EEPROM.read(EEPROM_CAL_ADDR + i) != CAL_MAGIC[i]) return false;
+  }
+  uint8_t cs = 0;
+  for (int i = 0; i < EEPROM_CAL_LEN - 1; i++) cs ^= EEPROM.read(EEPROM_CAL_ADDR + i);
+  if (cs != EEPROM.read(EEPROM_CAL_ADDR + EEPROM_CAL_LEN - 1)) return false;
+
+  float buf[6];
+  for (int i = 0; i < 6; i++) EEPROM.get(EEPROM_CAL_ADDR + 4 + i * 4, buf[i]);
+  h1X = buf[0]; h1Y = buf[1];
+  a1X = buf[2]; a1Y = buf[3];
+  h8X = buf[4]; h8Y = buf[5];
+  h1Calibrated = a1Calibrated = h8Calibrated = true;
+  return true;
+}
+
+static void saveCalToEEPROM() {
+  for (int i = 0; i < 4; i++) EEPROM.update(EEPROM_CAL_ADDR + i, CAL_MAGIC[i]);
+  EEPROM.put(EEPROM_CAL_ADDR + 4,  h1X);
+  EEPROM.put(EEPROM_CAL_ADDR + 8,  h1Y);
+  EEPROM.put(EEPROM_CAL_ADDR + 12, a1X);
+  EEPROM.put(EEPROM_CAL_ADDR + 16, a1Y);
+  EEPROM.put(EEPROM_CAL_ADDR + 20, h8X);
+  EEPROM.put(EEPROM_CAL_ADDR + 24, h8Y);
+  uint8_t cs = 0;
+  for (int i = 0; i < EEPROM_CAL_LEN - 1; i++) cs ^= EEPROM.read(EEPROM_CAL_ADDR + i);
+  EEPROM.update(EEPROM_CAL_ADDR + EEPROM_CAL_LEN - 1, cs);
+}
+
+static void clearCalEEPROM() {
+  for (int i = 0; i < EEPROM_CAL_LEN; i++) EEPROM.update(EEPROM_CAL_ADDR + i, 0xFF);
+}
+
+// --- Calibration mode (bed_screws_adjust-style wizard) --------------------
+// Walks the user through H1 -> A1 -> H8. For each corner: if a saved value
+// exists, the arm moves there first and the user nudges it with wasd/uj; if
+// no saved value, the user moves to the corner from wherever the arm is.
+// Pressing 'v' locks in the current XY for that corner and advances.
+// Pressing 'n' advances without changing the value (keeps any prior saved
+// value). 'p' goes back. 'q' cancels and reverts to the snapshot taken on
+// entry. Reaching past H8 writes EEPROM iff all 3 corners are set.
+enum CalStep : uint8_t { CAL_H1 = 0, CAL_A1 = 1, CAL_H8 = 2 };
+static bool    calibrationMode = false;
+static CalStep calStep         = CAL_H1;
+static const float CAL_JOG_XY_MM = 1.0f;   // finer than cm: corner alignment
+static const float CAL_JOG_Z_MM  = 0.5f;
+
+// Snapshot of calibration state on entering cal mode; restored if user
+// cancels with 'q'.
+static bool  snapH1c, snapA1c, snapH8c;
+static float snapH1X, snapH1Y, snapA1X, snapA1Y, snapH8X, snapH8Y;
+
+static const char* calCornerName(CalStep s) {
+  if (s == CAL_H1) return "H1";
+  if (s == CAL_A1) return "A1";
+  return "H8";
+}
+
+static bool calCornerSaved(CalStep s) {
+  if (s == CAL_H1) return h1Calibrated;
+  if (s == CAL_A1) return a1Calibrated;
+  return h8Calibrated;
+}
+
+static void calGetSavedXY(CalStep s, float& x, float& y) {
+  if (s == CAL_H1) { x = h1X; y = h1Y; }
+  else if (s == CAL_A1) { x = a1X; y = a1Y; }
+  else { x = h8X; y = h8Y; }
+}
+
+static void captureCalCorner(CalStep s) {
+  if (s == CAL_H1) { h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true; }
+  else if (s == CAL_A1) { a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true; }
+  else            { h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true; }
+  Serial.print("[cal] "); Serial.print(calCornerName(s));
+  Serial.print(" set to ("); Serial.print(arm.x()); Serial.print(", ");
+  Serial.print(arm.y()); Serial.println(")");
+}
+
+static void snapshotCal() {
+  snapH1c = h1Calibrated; snapH1X = h1X; snapH1Y = h1Y;
+  snapA1c = a1Calibrated; snapA1X = a1X; snapA1Y = a1Y;
+  snapH8c = h8Calibrated; snapH8X = h8X; snapH8Y = h8Y;
+}
+
+static void restoreCalSnapshot() {
+  h1Calibrated = snapH1c; h1X = snapH1X; h1Y = snapH1Y;
+  a1Calibrated = snapA1c; a1X = snapA1X; a1Y = snapA1Y;
+  h8Calibrated = snapH8c; h8X = snapH8X; h8Y = snapH8Y;
+}
+
+static void promptCalStep(CalStep s) {
+  Serial.println("====================================");
+  Serial.print("[cal] Step "); Serial.print((int)s + 1); Serial.print("/3: ");
+  Serial.println(calCornerName(s));
+  if (calCornerSaved(s)) {
+    float tx, ty;
+    calGetSavedXY(s, tx, ty);
+    Serial.print("  saved=("); Serial.print(tx); Serial.print(", "); Serial.print(ty);
+    Serial.println(") -- moving there. Nudge to fine-tune.");
+    if (!arm.moveXY(tx, ty)) {
+      Serial.println("  WARNING: saved position unreachable from current pose.");
+      Serial.println("  Jog manually to the corner.");
+    }
+  } else {
+    Serial.println("  no saved value -- move arm to this corner manually.");
+  }
+  Serial.println("  wasd/uj=jog  v=validate  n=skip  p=prev  q=cancel");
+  Serial.println("====================================");
+}
+
+static void enterCalMode() {
+  if (calibrationMode) return;
+  calibrationMode = true;
+  snapshotCal();
+  calStep = CAL_H1;
+  Serial.println("Calibration mode ON");
+  Serial.print("  H1: "); Serial.println(h1Calibrated ? "saved" : "MISSING");
+  Serial.print("  A1: "); Serial.println(a1Calibrated ? "saved" : "MISSING");
+  Serial.print("  H8: "); Serial.println(h8Calibrated ? "saved" : "MISSING");
+  promptCalStep(calStep);
+}
+
+static void finishCalMode() {
+  calibrationMode = false;
+  if (boardCalibrated()) {
+    saveCalToEEPROM();
+    Serial.println("[cal] All 3 corners set. Saved to EEPROM.");
+  } else {
+    Serial.println("[cal] Incomplete -- not all corners set. EEPROM unchanged.");
+    Serial.print("    H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING");
+    Serial.print("    A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING");
+    Serial.print("    H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING");
+  }
+}
+
+static void cancelCalMode() {
+  calibrationMode = false;
+  restoreCalSnapshot();
+  Serial.println("[cal] Cancelled. Reverted to prior values.");
+}
+
 // (file, rank) -> board (x, y) in mm. file in 'a'..'h', rank in 1..8.
 // Returns false if input out of range or board not fully calibrated.
 static bool squareToXY(char file, int rank, float& outX, float& outY) {
@@ -81,38 +237,11 @@ static bool squareToXY(char file, int rank, float& outX, float& outY) {
   return true;
 }
 
-static void captureH1() {
-  h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true;
-  Serial.println("====================================");
-  Serial.print("H1 CAPTURED  XY=("); Serial.print(h1X); Serial.print(", ");
-  Serial.print(h1Y); Serial.println(")");
-  Serial.println("====================================");
-}
-
-static void captureA1() {
-  a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true;
-  Serial.println("====================================");
-  Serial.print("A1 CAPTURED  XY=("); Serial.print(a1X); Serial.print(", ");
-  Serial.print(a1Y); Serial.println(")");
-  Serial.println("====================================");
-}
-
-static void captureH8() {
-  h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true;
-  Serial.println("====================================");
-  Serial.print("H8 CAPTURED  XY=("); Serial.print(h8X); Serial.print(", ");
-  Serial.print(h8Y); Serial.println(")");
-  Serial.println("====================================");
-}
-
 static void printCmHelp() {
   Serial.println("------ controller mode keys ------");
   Serial.println("  w/a/s/d : jog XY (+/- 3 mm)");
   Serial.println("  u/j     : jog Z  (+/- 1.5 mm)");
   Serial.println("  c/v     : close / open gripper");
-  Serial.println("  h       : capture current XY as H1");
-  Serial.println("  1       : capture current XY as A1");
-  Serial.println("  8       : capture current XY as H8");
   Serial.println("  q       : exit controller mode");
   Serial.println("----------------------------------");
 }
@@ -120,14 +249,19 @@ static void printCmHelp() {
 // Keys that fire immediately while in controller mode (no Enter needed).
 // IMPORTANT: any letter listed here cannot appear in a multi-char command while
 // cm is ON — it would be consumed before reaching the line buffer. That is why
-// `setH1` / `cm` toggle don't work inside cm mode and we expose `h` / `q`
-// shortcuts instead.
-static bool isJogKey(char c) {
+// `cm` toggle doesn't work inside cm mode and we expose `q` to exit instead.
+static bool isCmKey(char c) {
   return c == 'w' || c == 'a' || c == 's' || c == 'd'
       || c == 'u' || c == 'j'
       || c == 'c' || c == 'v'
-      || c == 'h' || c == 'q'
-      || c == '1' || c == '8';
+      || c == 'q';
+}
+
+// Keys that fire immediately while in calibration mode.
+static bool isCalKey(char c) {
+  return c == 'w' || c == 'a' || c == 's' || c == 'd'
+      || c == 'u' || c == 'j'
+      || c == 'v' || c == 'n' || c == 'p' || c == 'q';
 }
 
 static void handleCommand(String cmd) {
@@ -136,10 +270,47 @@ static void handleCommand(String cmd) {
 
   if (cmd.length() == 1) {
 
+    if (calibrationMode) {
+      if (cmd == "q") { cancelCalMode(); return; }
+      if (cmd == "v") {
+        captureCalCorner(calStep);
+        if (calStep == CAL_H8) { finishCalMode(); return; }
+        calStep = (CalStep)(calStep + 1);
+        promptCalStep(calStep);
+        return;
+      }
+      if (cmd == "n") {
+        if (calStep == CAL_H8) { finishCalMode(); return; }
+        calStep = (CalStep)(calStep + 1);
+        promptCalStep(calStep);
+        return;
+      }
+      if (cmd == "p") {
+        if (calStep == CAL_H1) { Serial.println("[cal] already at first corner"); return; }
+        calStep = (CalStep)(calStep - 1);
+        promptCalStep(calStep);
+        return;
+      }
+
+      bool moved = true;
+      if      (cmd == "w") arm.moveXY(arm.x(), arm.y() + CAL_JOG_XY_MM);
+      else if (cmd == "s") arm.moveXY(arm.x(), arm.y() - CAL_JOG_XY_MM);
+      else if (cmd == "a") arm.moveXY(arm.x() - CAL_JOG_XY_MM, arm.y());
+      else if (cmd == "d") arm.moveXY(arm.x() + CAL_JOG_XY_MM, arm.y());
+      else if (cmd == "u") arm.moveByZ(CAL_JOG_Z_MM);
+      else if (cmd == "j") arm.moveByZ(-CAL_JOG_Z_MM);
+      else moved = false;
+
+      if (moved) {
+        Serial.print("[cal "); Serial.print(calCornerName(calStep)); Serial.print("] pos=(");
+        Serial.print(arm.x()); Serial.print(", ");
+        Serial.print(arm.y()); Serial.print(", ");
+        Serial.print(arm.z()); Serial.println(")");
+      }
+      return;
+    }
+
     if (controllerMode) {
-      if (cmd == "h") { captureH1(); return; }
-      if (cmd == "1") { captureA1(); return; }
-      if (cmd == "8") { captureH8(); return; }
       if (cmd == "q") {
         controllerMode = false;
         Serial.println("Controller mode OFF");
@@ -256,6 +427,10 @@ static void handleCommand(String cmd) {
       arm.calibrate();
 
     } else if (cmd == "controllerMode" || cmd == "cm") {
+      if (calibrationMode) {
+        Serial.println("Exit calibration first (q).");
+        return;
+      }
       controllerMode = !controllerMode;
       if (controllerMode) {
         Serial.println("Controller mode ON");
@@ -265,16 +440,18 @@ static void handleCommand(String cmd) {
       }
       return;
 
-    } else if (cmd == "setH1") {
-      captureH1();
+    } else if (cmd == "cal" || cmd == "boardCal") {
+      if (controllerMode) {
+        Serial.println("Exit controller mode first (q).");
+        return;
+      }
+      enterCalMode();
       return;
 
-    } else if (cmd == "setA1") {
-      captureA1();
-      return;
-
-    } else if (cmd == "setH8") {
-      captureH8();
+    } else if (cmd == "calClear") {
+      clearCalEEPROM();
+      h1Calibrated = a1Calibrated = h8Calibrated = false;
+      Serial.println("EEPROM calibration cleared.");
       return;
 
     } else if (cmd == "boardInfo") {
@@ -310,10 +487,10 @@ static void handleCommand(String cmd) {
       float tx, ty;
       if (!squareToXY(file, rank, tx, ty)) {
         if (!boardCalibrated()) {
-          Serial.println("Board not fully calibrated. Need all 3 corners:");
-          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING (cm + 1 or setA1)");
-          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING (cm + h or setH1)");
-          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING (cm + 8 or setH8)");
+          Serial.println("Board not fully calibrated. Run `cal` to set all 3 corners.");
+          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING");
+          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING");
+          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING");
         } else {
           Serial.println("bad square (use a1..h8)");
         }
@@ -358,12 +535,19 @@ void setup() {
   //Serial1.begin(115200);
 
   //uiController.begin();
- 
+
+  if (loadCalFromEEPROM()) {
+    Serial.println("Board calibration loaded from EEPROM.");
+  } else {
+    Serial.println("No saved board calibration. Run `cal` to set corners.");
+  }
+
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
-  Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h/1/8=setH1/A1/H8, q=exit)");
-  Serial.println("setA1 / setH1 / setH8 = capture corners | goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("cm = controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, q=exit)");
+  Serial.println("cal = board calibration wizard | calClear = wipe EEPROM cal");
+  Serial.println("goto <sq> e.g. goto e4 | boardInfo");
 }
  
 void loop() {
@@ -371,10 +555,15 @@ void loop() {
     char c = Serial.read();
     if (c == '\r') continue;
 
-    // In controller mode, jog keys dispatch immediately (no Enter needed) so
+    // In cm / cal mode, action keys dispatch immediately (no Enter needed) so
     // that holding the key auto-repeats into continuous motion. Multi-char
-    // commands like `cm` still work because their letters aren't jog keys.
-    if (controllerMode && isJogKey(c)) {
+    // commands like `cm` still work from the main shell because they aren't
+    // active there.
+    if (controllerMode && isCmKey(c)) {
+      handleCommand(String(c));
+      continue;
+    }
+    if (calibrationMode && isCalKey(c)) {
       handleCommand(String(c));
       continue;
     }
