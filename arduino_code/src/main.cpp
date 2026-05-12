@@ -43,41 +43,65 @@ static bool controllerMode = false;
 static const float JOG_XY_MM = 3.0f;
 static const float JOG_Z_MM  = 1.5f;
 
-// Chess board calibration.
-// Board orientation is mechanically fixed: edge along y=0 is parallel to the
-// black-pawn row (arm sits on white side), edge along x=0 is the A-column side.
-// So A is at small x, H at large x, rank 1 at large y, rank 8 at small y.
-// User jogs to H1 with WASD and runs `setH1`; every other square is derived.
-// Z is intentionally NOT part of the calibration — it stays under manual control
-// (use moveZ / u-j in cm mode) so the user is responsible for being at a safe
-// travel height before each `goto`.
-static const float SQUARE_MM = 37.5f;  // 3.75 cm per square
-static bool  h1Calibrated = false;
+// Chess board calibration by 3-corner vector decomposition.
+// Capture the arm's (x, y) at the centers of A1, H1, and H8. Every other
+// square is then built from H1 plus integer multiples of two basis vectors:
+//   vFile = (a1 - h1) / 7    one file step, h -> a
+//   vRank = (h8 - h1) / 7    one rank step, 1 -> 8
+//   P(file, rank) = h1 + (7 - fileIdx) * vFile + rankIdx * vRank
+// Any kinematic scaling/skew that affects all three corners equally cancels
+// out within the board area, so this is robust to bad link lengths or gear
+// ratios as long as the board itself is a parallelogram in arm coordinates.
+// Z is intentionally NOT part of the calibration — it stays under manual
+// control (moveZ / u-j) so the user picks a safe travel height before goto.
+static bool  h1Calibrated = false, a1Calibrated = false, h8Calibrated = false;
 static float h1X = 0.0f, h1Y = 0.0f;
+static float a1X = 0.0f, a1Y = 0.0f;
+static float h8X = 0.0f, h8Y = 0.0f;
+
+static bool boardCalibrated() {
+  return h1Calibrated && a1Calibrated && h8Calibrated;
+}
 
 // (file, rank) -> board (x, y) in mm. file in 'a'..'h', rank in 1..8.
-// Returns false if input out of range or H1 not yet calibrated.
+// Returns false if input out of range or board not fully calibrated.
 static bool squareToXY(char file, int rank, float& outX, float& outY) {
-  if (!h1Calibrated) return false;
+  if (!boardCalibrated()) return false;
   if (file < 'a' || file > 'h') return false;
   if (rank < 1 || rank > 8)     return false;
   int fileIdx = file - 'a';            // a=0, h=7
   int rankIdx = rank - 1;              // 1=0, 8=7
-  outX = h1X - (7 - fileIdx) * SQUARE_MM;
-  outY = h1Y - rankIdx * SQUARE_MM;
+  float vFileX = (a1X - h1X) / 7.0f;
+  float vFileY = (a1Y - h1Y) / 7.0f;
+  float vRankX = (h8X - h1X) / 7.0f;
+  float vRankY = (h8Y - h1Y) / 7.0f;
+  int fileFromH = 7 - fileIdx;         // 0 at h, 7 at a
+  outX = h1X + fileFromH * vFileX + rankIdx * vRankX;
+  outY = h1Y + fileFromH * vFileY + rankIdx * vRankY;
   return true;
 }
 
 static void captureH1() {
-  h1X = arm.x();
-  h1Y = arm.y();
-  h1Calibrated = true;
+  h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true;
   Serial.println("====================================");
-  Serial.println("H1 CAPTURED");
-  Serial.print("  XY = ("); Serial.print(h1X); Serial.print(", ");
+  Serial.print("H1 CAPTURED  XY=("); Serial.print(h1X); Serial.print(", ");
   Serial.print(h1Y); Serial.println(")");
-  Serial.print("  current Z = "); Serial.print(arm.z()); Serial.println(" mm (not stored)");
-  Serial.println("  Z stays under manual control (moveZ / u-j keys).");
+  Serial.println("====================================");
+}
+
+static void captureA1() {
+  a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("A1 CAPTURED  XY=("); Serial.print(a1X); Serial.print(", ");
+  Serial.print(a1Y); Serial.println(")");
+  Serial.println("====================================");
+}
+
+static void captureH8() {
+  h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("H8 CAPTURED  XY=("); Serial.print(h8X); Serial.print(", ");
+  Serial.print(h8Y); Serial.println(")");
   Serial.println("====================================");
 }
 
@@ -87,6 +111,8 @@ static void printCmHelp() {
   Serial.println("  u/j     : jog Z  (+/- 1.5 mm)");
   Serial.println("  c/v     : close / open gripper");
   Serial.println("  h       : capture current XY as H1");
+  Serial.println("  1       : capture current XY as A1");
+  Serial.println("  8       : capture current XY as H8");
   Serial.println("  q       : exit controller mode");
   Serial.println("----------------------------------");
 }
@@ -100,7 +126,8 @@ static bool isJogKey(char c) {
   return c == 'w' || c == 'a' || c == 's' || c == 'd'
       || c == 'u' || c == 'j'
       || c == 'c' || c == 'v'
-      || c == 'h' || c == 'q';
+      || c == 'h' || c == 'q'
+      || c == '1' || c == '8';
 }
 
 static void handleCommand(String cmd) {
@@ -111,6 +138,8 @@ static void handleCommand(String cmd) {
 
     if (controllerMode) {
       if (cmd == "h") { captureH1(); return; }
+      if (cmd == "1") { captureA1(); return; }
+      if (cmd == "8") { captureH8(); return; }
       if (cmd == "q") {
         controllerMode = false;
         Serial.println("Controller mode OFF");
@@ -240,11 +269,34 @@ static void handleCommand(String cmd) {
       captureH1();
       return;
 
+    } else if (cmd == "setA1") {
+      captureA1();
+      return;
+
+    } else if (cmd == "setH8") {
+      captureH8();
+      return;
+
     } else if (cmd == "boardInfo") {
-      if (!h1Calibrated) { Serial.println("H1 not calibrated. Jog to H1 then run setH1."); return; }
-      Serial.print("H1 XY=("); Serial.print(h1X); Serial.print(", ");
-      Serial.print(h1Y); Serial.println(")");
-      Serial.print("square="); Serial.print(SQUARE_MM); Serial.println(" mm");
+      Serial.print("A1: ");
+      if (a1Calibrated) { Serial.print("("); Serial.print(a1X); Serial.print(", "); Serial.print(a1Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      Serial.print("H1: ");
+      if (h1Calibrated) { Serial.print("("); Serial.print(h1X); Serial.print(", "); Serial.print(h1Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      Serial.print("H8: ");
+      if (h8Calibrated) { Serial.print("("); Serial.print(h8X); Serial.print(", "); Serial.print(h8Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      if (boardCalibrated()) {
+        float vFileX = (a1X - h1X) / 7.0f, vFileY = (a1Y - h1Y) / 7.0f;
+        float vRankX = (h8X - h1X) / 7.0f, vRankY = (h8Y - h1Y) / 7.0f;
+        Serial.print("vFile (h->a, per file): ("); Serial.print(vFileX); Serial.print(", "); Serial.print(vFileY);
+        Serial.print(")  |vFile|="); Serial.println(sqrt(vFileX*vFileX + vFileY*vFileY));
+        Serial.print("vRank (1->8, per rank): ("); Serial.print(vRankX); Serial.print(", "); Serial.print(vRankY);
+        Serial.print(")  |vRank|="); Serial.println(sqrt(vRankX*vRankX + vRankY*vRankY));
+      } else {
+        Serial.println("(board not fully calibrated)");
+      }
       Serial.print("current Z="); Serial.print(arm.z()); Serial.println(" mm");
       return;
 
@@ -257,8 +309,14 @@ static void handleCommand(String cmd) {
       int  rank = sq.charAt(1) - '0';
       float tx, ty;
       if (!squareToXY(file, rank, tx, ty)) {
-        if (!h1Calibrated) Serial.println("H1 not calibrated. Jog to H1 then run setH1 (or press h in cm).");
-        else               Serial.println("bad square (use a1..h8)");
+        if (!boardCalibrated()) {
+          Serial.println("Board not fully calibrated. Need all 3 corners:");
+          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING (cm + 1 or setA1)");
+          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING (cm + h or setH1)");
+          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING (cm + 8 or setH8)");
+        } else {
+          Serial.println("bad square (use a1..h8)");
+        }
         return;
       }
       Serial.print("[goto "); Serial.print(sq); Serial.print("] ");
@@ -304,8 +362,8 @@ void setup() {
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
-  Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h=setH1, q=exit)");
-  Serial.println("setH1 = capture current XY as H1 | goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h/1/8=setH1/A1/H8, q=exit)");
+  Serial.println("setA1 / setH1 / setH8 = capture corners | goto <sq> e.g. goto e4 | boardInfo");
 }
  
 void loop() {
