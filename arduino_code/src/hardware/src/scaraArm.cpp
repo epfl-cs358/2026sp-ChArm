@@ -44,8 +44,8 @@ void ScaraArm::calibrate() {
     //once j1 is calibrated need to move it in the middle so it straight along the axis
     joint2.moveTo(joint2.maxAngleDeg() / 2.0f);
     joint2.setZero(); // set zero to the middle of the range so IK is centered on straight configuration
-    joint2.setMinAngle(-joint2.maxAngleDeg() / 2.0f);
-    joint2.setMaxAngle(joint2.maxAngleDeg() / 2.0f);
+    joint2.setMinAngle(-joint2.maxAngleDeg() / 2.0f -2);
+    joint2.setMaxAngle(joint2.maxAngleDeg() / 2.0f + 2);
 
 
 
