@@ -15,21 +15,23 @@ bool ScaraArm::moveXY(float x, float y) {
     if (!result.reachable) { Serial.println("out of reach"); return false; }
 
     joint1.moveTo(result.theta1);
-    joint2.moveTo(result.theta2);
+    // joint2 motor is mounted with its positive direction opposite to the IK
+    // CCW convention, so negate the commanded angle.
+    joint2.moveTo(-result.theta2);
 
-    currentX = x; 
+    currentX = x;
     currentY = y;
-    currentTheta1 = result.theta1; 
+    currentTheta1 = result.theta1;
     currentTheta2 = result.theta2;
-    
+
     return true;
 }
 
 void ScaraArm::sync() {
-    FKResult pos = ik.forwardKinematics(joint1.angle(), joint2.angle());
+    FKResult pos = ik.forwardKinematics(joint1.angle(), -joint2.angle());
 
-    currentX = pos.x; 
+    currentX = pos.x;
     currentY = pos.y;
-    currentTheta1 = joint1.angle(); 
-    currentTheta2 = joint2.angle();
+    currentTheta1 = joint1.angle();
+    currentTheta2 = -joint2.angle();
 }

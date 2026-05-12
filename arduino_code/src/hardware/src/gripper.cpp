@@ -8,20 +8,25 @@ Gripper::Gripper(uint8_t servoPin, int openAngle, int closedAngle) {
 }
 
 void Gripper::begin() {
-    servo.attach(servoPin);
-    close();
+    this->servo.attach(servoPin);
+    this->servo.write(openAngle); 
+    is_Open = true;
+    Serial.println("Gripper: begin at 100 degrees");
 }
 
 void Gripper::open() {
-    servo.write(openAngle);
+    goToAngle(openAngle);
     is_Open = true;
-    delay(500);
     Serial.println("Gripper: open");
 }
 
 void Gripper::close() {
-    servo.write(closedAngle);
+    goToAngle(closedAngle);
     is_Open = false;
-    delay(500);
     Serial.println("Gripper: closed");
+}
+
+void Gripper::goToAngle(float angle) {
+    this->servo.write(angle);
+    delay(500);
 }

@@ -13,6 +13,8 @@ public:
     void close();
     bool isOpen() const { return is_Open; }
 
+    void goToAngle(float angle);
+
 private:
     Servo servo;
     uint8_t servoPin;

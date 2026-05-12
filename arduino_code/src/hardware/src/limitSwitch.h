@@ -8,7 +8,7 @@ public:
     LimitSwitch(uint8_t pin, bool activeLow);
  
     void begin();
-    bool isTriggered() const;
+    bool isNotTriggered() const;
  
 private:
     uint8_t pin;
