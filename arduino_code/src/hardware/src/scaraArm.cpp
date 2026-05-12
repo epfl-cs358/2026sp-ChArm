@@ -36,7 +36,7 @@ void ScaraArm::calibrate() {
     joint1.moveBy(137.0f);
     joint1.setZero();
     joint1.setMinAngle(-137.0f);
-    joint1.setMaxAngle(137.0f);
+    joint1.setMaxAngle(250.0f);
 
 
     Serial.println("Calibrating forearm joint");
