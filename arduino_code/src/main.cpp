@@ -7,7 +7,6 @@
 #include "hardware/src/config.h"
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
-#include "hardware/src/limitAxis.h"
 #include "hardware/src/buttonInput.h"
 #include "hardware/src/uiState.h"
 #include "hardware/src/lcdDisplay.h"
@@ -17,77 +16,22 @@ StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
 StepperXYZ zStepper(Z_STEP_IN1, Z_DIR_IN1);
 
-LimitSwitch j1Lim(X_LIMIT_PIN, true);
-LimitSwitch j2Lim(Y_LIMIT_PIN, true);
-LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
- 
-ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1);
-ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2);
- 
-LeadScrew leadScrew(zStepper, STEPS_PER_MM, GRIPPER_LENGTH, Z_MAX_MM);
- 
-ScaraArm arm(joint1, joint2, LINK1_LENGTH, LINK2_LENGTH);
- 
+LimitSwitch j1Lim(X_LIMIT_PIN);
+LimitSwitch j2Lim(Y_LIMIT_PIN);
+LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN);
+
+ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1, j1Lim, false); //base
+ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2, j2Lim, true); //forearm
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
+LeadScrew leadScrew(zStepper, STEPS_PER_MM, Z_MAX_MM, zLim);
 
-
+ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
+ 
 UIState uiState;
 ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
 LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
 UIController uiController(buttonInput, uiState, lcd, Serial1);
 
-
-void calibrate() {
-    Serial.println("Calibrating");
- 
-    // Z: drive to bottom switch, set zero, max is constant
-    Serial.println("Z: finding bottom");
-    findLimit(zStepper, zLim, false, 50);
-    backOff(zStepper, zLim, true, 200);
-    leadScrew.setZero();
-    leadScrew.moveTo_mm(30);  // lift to clear the box during rest of calibration
-    Serial.println("Z: done");
-
-    // J1: one switch, zero is 90deg away from limit (straight = 0 in IK)
-    Serial.println("J1: finding limit");
-    findLimit(xStepper, j1Lim, false, 50);
-    backOff(xStepper, j1Lim, true, 50);
-    joint1.setZero();
-    joint1.setMaxAngle(270.0f);  // temp max to allow 90deg move
-    joint1.moveTo(137.0f);        // 90deg away from limit = IK zero
-    joint1.setZero();
-    joint1.setMinAngle(-137.0f);  // limit switch is 90deg in this direction
-    joint1.setMaxAngle(133.0f);
-    Serial.println("J1: done");
-
-    // J2: two switches, zero is center of range (straight = 0 in IK)
-    Serial.println("J2: finding min");
-    findLimit(yStepper, j2Lim, false, 100);
-    backOff(yStepper, j2Lim, true, 200);
-    joint2.setZero();
-    joint2.setMaxAngle(360.0f);  // temp max to allow full range move
-    Serial.println("J2: finding max");
-    long steps = findLimit(yStepper, j2Lim, true, 100);
-    long stepsB = backOff(yStepper, j2Lim, false, 50);
-
-    float maxAngleDeg = (steps - stepsB) / joint2.stepsPerDegree();
-    joint2.setMaxAngle(maxAngleDeg);
-    joint2.setAngle(maxAngleDeg);
-    Serial.print("J2: steps = "); Serial.println(steps);
-    Serial.print("J2: max = "); Serial.print(maxAngleDeg); Serial.println(" deg");
-
-    // move to center of range, declare as IK zero
-    float halfRange = maxAngleDeg / 2.0f;
-    joint2.moveTo(halfRange);
-    joint2.setZero();
-    joint2.setMinAngle(-halfRange);
-    joint2.setMaxAngle(halfRange);
-    Serial.print("J2: center = "); Serial.print(halfRange); Serial.println(" deg");
-    
-
-    arm.sync();
-    Serial.println("Calibration done");
-}
 
 int stepCount = 0;
 static String cmdBuffer = "";
@@ -99,10 +43,91 @@ static bool controllerMode = false;
 static const float JOG_XY_MM = 3.0f;
 static const float JOG_Z_MM  = 1.5f;
 
+// Chess board calibration by 3-corner vector decomposition.
+// Capture the arm's (x, y) at the centers of A1, H1, and H8. Every other
+// square is then built from H1 plus integer multiples of two basis vectors:
+//   vFile = (a1 - h1) / 7    one file step, h -> a
+//   vRank = (h8 - h1) / 7    one rank step, 1 -> 8
+//   P(file, rank) = h1 + (7 - fileIdx) * vFile + rankIdx * vRank
+// Any kinematic scaling/skew that affects all three corners equally cancels
+// out within the board area, so this is robust to bad link lengths or gear
+// ratios as long as the board itself is a parallelogram in arm coordinates.
+// Z is intentionally NOT part of the calibration — it stays under manual
+// control (moveZ / u-j) so the user picks a safe travel height before goto.
+static bool  h1Calibrated = false, a1Calibrated = false, h8Calibrated = false;
+static float h1X = 0.0f, h1Y = 0.0f;
+static float a1X = 0.0f, a1Y = 0.0f;
+static float h8X = 0.0f, h8Y = 0.0f;
+
+static bool boardCalibrated() {
+  return h1Calibrated && a1Calibrated && h8Calibrated;
+}
+
+// (file, rank) -> board (x, y) in mm. file in 'a'..'h', rank in 1..8.
+// Returns false if input out of range or board not fully calibrated.
+static bool squareToXY(char file, int rank, float& outX, float& outY) {
+  if (!boardCalibrated()) return false;
+  if (file < 'a' || file > 'h') return false;
+  if (rank < 1 || rank > 8)     return false;
+  int fileIdx = file - 'a';            // a=0, h=7
+  int rankIdx = rank - 1;              // 1=0, 8=7
+  float vFileX = (a1X - h1X) / 7.0f;
+  float vFileY = (a1Y - h1Y) / 7.0f;
+  float vRankX = (h8X - h1X) / 7.0f;
+  float vRankY = (h8Y - h1Y) / 7.0f;
+  int fileFromH = 7 - fileIdx;         // 0 at h, 7 at a
+  outX = h1X + fileFromH * vFileX + rankIdx * vRankX;
+  outY = h1Y + fileFromH * vFileY + rankIdx * vRankY;
+  return true;
+}
+
+static void captureH1() {
+  h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("H1 CAPTURED  XY=("); Serial.print(h1X); Serial.print(", ");
+  Serial.print(h1Y); Serial.println(")");
+  Serial.println("====================================");
+}
+
+static void captureA1() {
+  a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("A1 CAPTURED  XY=("); Serial.print(a1X); Serial.print(", ");
+  Serial.print(a1Y); Serial.println(")");
+  Serial.println("====================================");
+}
+
+static void captureH8() {
+  h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("H8 CAPTURED  XY=("); Serial.print(h8X); Serial.print(", ");
+  Serial.print(h8Y); Serial.println(")");
+  Serial.println("====================================");
+}
+
+static void printCmHelp() {
+  Serial.println("------ controller mode keys ------");
+  Serial.println("  w/a/s/d : jog XY (+/- 3 mm)");
+  Serial.println("  u/j     : jog Z  (+/- 1.5 mm)");
+  Serial.println("  c/v     : close / open gripper");
+  Serial.println("  h       : capture current XY as H1");
+  Serial.println("  1       : capture current XY as A1");
+  Serial.println("  8       : capture current XY as H8");
+  Serial.println("  q       : exit controller mode");
+  Serial.println("----------------------------------");
+}
+
+// Keys that fire immediately while in controller mode (no Enter needed).
+// IMPORTANT: any letter listed here cannot appear in a multi-char command while
+// cm is ON — it would be consumed before reaching the line buffer. That is why
+// `setH1` / `cm` toggle don't work inside cm mode and we expose `h` / `q`
+// shortcuts instead.
 static bool isJogKey(char c) {
   return c == 'w' || c == 'a' || c == 's' || c == 'd'
       || c == 'u' || c == 'j'
-      || c == 'c' || c == 'v';
+      || c == 'c' || c == 'v'
+      || c == 'h' || c == 'q'
+      || c == '1' || c == '8';
 }
 
 static void handleCommand(String cmd) {
@@ -112,27 +137,31 @@ static void handleCommand(String cmd) {
   if (cmd.length() == 1) {
 
     if (controllerMode) {
-      // Re-sync arm.x()/y() from actual joint angles so a previously clamped
-      // move can't accumulate drift in the requested target.
-      arm.sync();
+      if (cmd == "h") { captureH1(); return; }
+      if (cmd == "1") { captureA1(); return; }
+      if (cmd == "8") { captureH8(); return; }
+      if (cmd == "q") {
+        controllerMode = false;
+        Serial.println("Controller mode OFF");
+        return;
+      }
 
       bool moved = true;
       if      (cmd == "w") arm.moveXY(arm.x(), arm.y() + JOG_XY_MM);
       else if (cmd == "s") arm.moveXY(arm.x(), arm.y() - JOG_XY_MM);
       else if (cmd == "a") arm.moveXY(arm.x() - JOG_XY_MM, arm.y());
       else if (cmd == "d") arm.moveXY(arm.x() + JOG_XY_MM, arm.y());
-      else if (cmd == "u") leadScrew.moveBy_mm(JOG_Z_MM);
-      else if (cmd == "j") leadScrew.moveBy_mm(-JOG_Z_MM);
-      else if (cmd == "c") gripper.close();
-      else if (cmd == "v") gripper.open();
+      else if (cmd == "u") arm.moveByZ(JOG_Z_MM);
+      else if (cmd == "j") arm.moveByZ(-JOG_Z_MM);
+      else if (cmd == "c") { arm.closeGripper(); Serial.println("Gripper: CLOSED"); return; }
+      else if (cmd == "v") { arm.openGripper();  Serial.println("Gripper: OPEN");   return; }
       else moved = false;
 
       if (moved) {
-        arm.sync();
-        Serial.print("Position: (");
+        Serial.print("[cm] pos=(");
         Serial.print(arm.x()); Serial.print(", ");
         Serial.print(arm.y()); Serial.print(", ");
-        Serial.print(leadScrew.position_mm()); Serial.println(")");
+        Serial.print(arm.z()); Serial.println(")");
       }
       return;
     }
@@ -166,10 +195,10 @@ static void handleCommand(String cmd) {
       zStepper.step();
       stepCount--;
     } else if (cmd == "c") {
-      gripper.close();
+      arm.closeGripper();
       return;
     } else if (cmd == "v") {
-      gripper.open();
+      arm.openGripper();
       return;
     }
 
@@ -179,27 +208,24 @@ static void handleCommand(String cmd) {
 
   } else {
     if (cmd == "OG") {
-      gripper.open();
+      arm.openGripper();
     } else if (cmd == "CG") {
-      gripper.close();
+      arm.closeGripper();
     } else if (cmd == "GS") {
-      Serial.println(gripper.isOpen() ? "Gripper: open" : "Gripper: closed");
+      Serial.println(arm.gripperOpen() ? "Gripper: open" : "Gripper: closed");
     } else if (cmd == "GA ") {
       float angle = cmd.substring(3).toFloat();
-      gripper.goToAngle(angle);
- 
+      arm.setGripperAngle(angle);
+
     } else if (cmd.startsWith("angleX ")) {
       float a = cmd.substring(7).toFloat();
       Serial.println(a);
-      joint1.moveTo(a);
-      arm.sync();
-      
- 
+      arm.moveJ1(a);
+
     } else if (cmd.startsWith("angleY ")) {
       float a = cmd.substring(7).toFloat();
-      joint2.moveTo(a);
-      arm.sync();
- 
+      arm.moveJ2(a);
+
     } else if (cmd.startsWith("moveXY ")) {
       String vals = cmd.substring(7);
       int space   = vals.indexOf(' ');
@@ -212,8 +238,8 @@ static void handleCommand(String cmd) {
     } else if (cmd.startsWith("moveZ ")) {
       float mm = cmd.substring(6).toFloat();
       Serial.print("Moving Z to: "); Serial.print(mm); Serial.println(" mm");
-      leadScrew.moveTo_mm(mm);
- 
+      arm.moveZ(mm);
+
     } else if (cmd.startsWith("moveXYZ ")) {
       String vals  = cmd.substring(8);
       int space1   = vals.indexOf(' ');
@@ -224,32 +250,101 @@ static void handleCommand(String cmd) {
       Serial.print("Moving to X: "); Serial.print(x);
       Serial.print(", Y: "); Serial.print(y);
       Serial.print(", Z: "); Serial.println(z);
-      leadScrew.moveTo_mm(z);
-      arm.moveXY(x, y);
+      arm.moveXYZ(x, y, z);
 
     } else if (cmd == "calibrate") {
-      calibrate();
+      arm.calibrate();
 
     } else if (cmd == "controllerMode" || cmd == "cm") {
       controllerMode = !controllerMode;
-      Serial.print("Controller mode ");
-      Serial.println(controllerMode ? "ON (w/a/s/d=XY, u/j=Z)" : "OFF");
+      if (controllerMode) {
+        Serial.println("Controller mode ON");
+        printCmHelp();
+      } else {
+        Serial.println("Controller mode OFF");
+      }
+      return;
+
+    } else if (cmd == "setH1") {
+      captureH1();
+      return;
+
+    } else if (cmd == "setA1") {
+      captureA1();
+      return;
+
+    } else if (cmd == "setH8") {
+      captureH8();
+      return;
+
+    } else if (cmd == "boardInfo") {
+      Serial.print("A1: ");
+      if (a1Calibrated) { Serial.print("("); Serial.print(a1X); Serial.print(", "); Serial.print(a1Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      Serial.print("H1: ");
+      if (h1Calibrated) { Serial.print("("); Serial.print(h1X); Serial.print(", "); Serial.print(h1Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      Serial.print("H8: ");
+      if (h8Calibrated) { Serial.print("("); Serial.print(h8X); Serial.print(", "); Serial.print(h8Y); Serial.println(")"); }
+      else              { Serial.println("not set"); }
+      if (boardCalibrated()) {
+        float vFileX = (a1X - h1X) / 7.0f, vFileY = (a1Y - h1Y) / 7.0f;
+        float vRankX = (h8X - h1X) / 7.0f, vRankY = (h8Y - h1Y) / 7.0f;
+        Serial.print("vFile (h->a, per file): ("); Serial.print(vFileX); Serial.print(", "); Serial.print(vFileY);
+        Serial.print(")  |vFile|="); Serial.println(sqrt(vFileX*vFileX + vFileY*vFileY));
+        Serial.print("vRank (1->8, per rank): ("); Serial.print(vRankX); Serial.print(", "); Serial.print(vRankY);
+        Serial.print(")  |vRank|="); Serial.println(sqrt(vRankX*vRankX + vRankY*vRankY));
+      } else {
+        Serial.println("(board not fully calibrated)");
+      }
+      Serial.print("current Z="); Serial.print(arm.z()); Serial.println(" mm");
+      return;
+
+    } else if (cmd.startsWith("goto ")) {
+      String sq = cmd.substring(5);
+      sq.trim();
+      sq.toLowerCase();
+      if (sq.length() != 2) { Serial.println("usage: goto <file><rank>, e.g. goto e4"); return; }
+      char file = sq.charAt(0);
+      int  rank = sq.charAt(1) - '0';
+      float tx, ty;
+      if (!squareToXY(file, rank, tx, ty)) {
+        if (!boardCalibrated()) {
+          Serial.println("Board not fully calibrated. Need all 3 corners:");
+          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING (cm + 1 or setA1)");
+          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING (cm + h or setH1)");
+          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING (cm + 8 or setH8)");
+        } else {
+          Serial.println("bad square (use a1..h8)");
+        }
+        return;
+      }
+      Serial.print("[goto "); Serial.print(sq); Serial.print("] ");
+      Serial.print("from ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y());
+      Serial.print(") -> ("); Serial.print(tx); Serial.print(", "); Serial.print(ty);
+      Serial.print(")  Z="); Serial.println(arm.z());
+      if (!arm.moveXY(tx, ty)) {
+        Serial.println("  FAILED: square unreachable from current pose");
+      } else {
+        Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", ");
+        Serial.print(arm.y()); Serial.println(")");
+      }
       return;
 
     } else if (cmd == "pos") {
-      Serial.print("Joint1: "); Serial.print(joint1.angle()); Serial.println("°");
-      Serial.print("Joint2: "); Serial.print(joint2.angle()); Serial.println("°");
+      Serial.print("Joint1: "); Serial.print(arm.j1Angle()); Serial.println("°");
+      Serial.print("Joint2: "); Serial.print(arm.j2Angle()); Serial.println("°");
       Serial.print("Position: (");
       Serial.print(arm.x()); Serial.print(", ");
       Serial.print(arm.y()); Serial.print(", ");
-      Serial.print(leadScrew.position_mm()); Serial.println(")");
+      Serial.print(arm.z()); Serial.println(")");
       return;
     }
- 
+
     Serial.print("Position: (");
     Serial.print(arm.x()); Serial.print(", ");
     Serial.print(arm.y()); Serial.print(", ");
-    Serial.print(leadScrew.position_mm()); Serial.println(")");
+    Serial.print(arm.z()); Serial.println(")");
     
   }
 }
@@ -258,15 +353,8 @@ void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW);
 
-  j1Lim.begin();
-  j2Lim.begin();
-  zLim.begin();
- 
-  xStepper.begin();
-  yStepper.begin();
-  zStepper.begin();
   Serial.begin(9600);
-  gripper.begin();
+  arm.begin();
   //Serial1.begin(115200);
 
   //uiController.begin();
@@ -274,7 +362,8 @@ void setup() {
   Serial.println("f/b = single step X | w/s = single step Y | u/d = single step Z");
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
-  Serial.println("cm = toggle controller mode (w/a/s/d=XY, u/j=Z, v/c=gripper)");
+  Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h/1/8=setH1/A1/H8, q=exit)");
+  Serial.println("setA1 / setH1 / setH8 = capture corners | goto <sq> e.g. goto e4 | boardInfo");
 }
  
 void loop() {

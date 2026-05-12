@@ -2,9 +2,9 @@
 #include "hardware/src/pins.h"
 #include "hardware/src/limitSwitch.h"
 
-LimitSwitch j1Lim(X_LIMIT_PIN, true);
-LimitSwitch j2Lim(Y_LIMIT_PIN, true);
-LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN, true);
+LimitSwitch j1Lim(X_LIMIT_PIN);
+LimitSwitch j2Lim(Y_LIMIT_PIN);
+LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN);
 
 void setup() {
   Serial.begin(9600);
