@@ -26,7 +26,7 @@ const int DT_PIN = 23;
 const int SW_PIN = 21;
 
 // lcd pins
-const int RS_PIN = 34;
+const int RS_PIN = 32;
 const int E_PIN = 35;
 const int D4_PIN = 27;
 const int D5_PIN = 29;

@@ -1,4 +1,5 @@
 #include "scaraArm.h"
+#include "config.h"
 
 ScaraArm::ScaraArm(ScaraJoint& joint1, ScaraJoint& joint2, LeadScrew& leadScrew, 
     Gripper& gripper, float j1Length, float j2Length): 
@@ -118,3 +119,39 @@ bool ScaraArm::gripperOpen() const        { return gripper.isOpen(); }
 float ScaraArm::z() const        { return leadScrew.position_mm(); }
 float ScaraArm::j1Angle() const  { return joint1.angle(); }
 float ScaraArm::j2Angle() const  { return joint2.angle(); }
+
+bool ScaraArm::pickAt(float x, float y, int pieceType) {
+    // Clamp piece type to valid range
+    if (pieceType < 0 || pieceType > 5) pieceType = 0;
+    
+    // Move to hover above target (sets Z then XY).
+    if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;
+
+    // Lower to piece-specific pick height and close gripper
+    moveZ(PICK_Z[pieceType]);
+    delay(200);
+    closeGripper();
+
+    // Lift back to safe hover/travel Z
+    moveZ(PICKPLACE_HOVER_Z_MM);
+    delay(200);
+    return true;
+}
+
+bool ScaraArm::putAt(float x, float y, int pieceType) {
+    // Clamp piece type to valid range
+    if (pieceType < 0 || pieceType > 5) pieceType = 0;
+    
+    // Move to hover above target
+    if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;
+
+    // Lower to piece-specific place height and open gripper
+    moveZ(PLACE_Z[pieceType]);
+    delay(200);
+    openGripper();
+
+    // Retreat to safe hover/travel Z
+    moveZ(PICKPLACE_HOVER_Z_MM);
+    delay(200);
+    return true;
+}

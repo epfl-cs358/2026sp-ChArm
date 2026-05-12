@@ -38,6 +38,10 @@ public:
     void setGripperAngle(float deg);
     bool gripperOpen() const;
 
+    // High-level pick and place helpers using preset Z heights per piece type.
+    bool pickAt(float x, float y, int pieceType);
+    bool putAt(float x, float y, int pieceType);
+
     float theta1() const { return currentTheta1; }
     float theta2() const { return currentTheta2; }
     float x() const { return currentX; }

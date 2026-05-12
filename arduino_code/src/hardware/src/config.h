@@ -33,5 +33,39 @@ const float GRIPPER_LENGTH  = 100.0f;
 const int OPEN_ANGLE = 65;
 const int CLOSED_ANGLE = 0;
 
+// Chess piece types (used for pick/place Z height lookup)
+enum ChessPiece {
+  PAWN = 0,
+  KNIGHT = 1,
+  BISHOP = 2,
+  ROOK = 3,
+  QUEEN = 4,
+  KING = 5
+};
+
+// Pick/place Z presets per piece type (mm)
+// Common hover/travel height (safe for all pieces)
+const float PICKPLACE_HOVER_Z_MM = 85.0f;
+
+// Pick Z (lower to grip) per piece type
+const float PICK_Z[6] = {
+  20.0f,  // PAWN
+  20.0f,  // KNIGHT
+  22.0f,  // BISHOP
+  25.0f,  // ROOK
+  28.0f,  // QUEEN
+  30.0f   // KING
+};
+
+// Place Z (lower to set down) per piece type
+const float PLACE_Z[6] = {
+  30.0f,  // PAWN
+  30.0f,  // KNIGHT
+  32.0f,  // BISHOP
+  35.0f,  // ROOK
+  38.0f,  // QUEEN
+  40.0f   // KING
+};
+
 #endif
 

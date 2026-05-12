@@ -12,9 +12,9 @@ ButtonInput::ButtonInput(int pinCLK, int pinDT, int pinSW) {
 }
 
 void ButtonInput::begin() {
-    pinMode(pinCLK, INPUT);
-    pinMode(pinDT, INPUT);
-    pinMode(pinSW, INPUT);
+    pinMode(pinCLK, INPUT_PULLUP);
+    pinMode(pinDT, INPUT_PULLUP);
+    pinMode(pinSW, INPUT_PULLUP);
     lastCLKState = digitalRead(pinCLK);
     lastButtonState = digitalRead(pinSW);
 }
