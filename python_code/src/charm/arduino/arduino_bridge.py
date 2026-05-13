@@ -53,6 +53,8 @@ def execute_move(uci_move: str, board: chess.Board):
         send_command(f"pick rook {rook_from}")
         send_command(f"put rook {rook_to}")
 
+    send_command("home")
+
 
 def send_command(command):
     manual_serial.write(f"{command}\n".encode())

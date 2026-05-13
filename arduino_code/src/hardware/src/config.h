@@ -26,7 +26,7 @@ const float Z_MAX_MM = LINK3_LENGTH;
 const float STARTS = 4.0f;
 const float PITCH = 2.0f;
 const float LEAD = STARTS * PITCH;
-const float STEPS_PER_MM = STEPS_PER_REV * MICROSTEPS / LEAD;
+const float STEPS_PER_MM = STEPS_PER_REV * 2 / LEAD;
 const float GRIPPER_LENGTH  = 100.0f;
 
 // Gripper
@@ -66,6 +66,9 @@ const float PLACE_Z[6] = {
   38.0f,  // QUEEN
   40.0f   // KING
 };
+
+// Trash position Z (hardcoded, not calibrated)
+const float TRASH_Z = 50.0f;
 
 #endif
 

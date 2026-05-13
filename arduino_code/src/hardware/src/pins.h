@@ -21,7 +21,7 @@ const int Z_LIMIT_BOTTOM_PIN = 11;
 const int GRIPPER_PIN = 46;
 
 // button pins
-const int CLK_PIN = 25;
+const int CLK_PIN = 24;
 const int DT_PIN = 23;
 const int SW_PIN = 21;
 
