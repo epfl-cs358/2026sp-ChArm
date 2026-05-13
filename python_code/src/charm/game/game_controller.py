@@ -100,9 +100,17 @@ class GameController:
         is_capture = board.is_capture(best_move)
         is_castling = board.is_castling(best_move)
         is_promotion = best_move.promotion is not None
+        piece = board.piece_at(best_move.from_square)
+        piece_type = chess.piece_name(piece.piece_type) if piece is not None else None
 
         self.ui_link.bot_moving()
-        execute_move(best_move.uci(), board)
+        execute_move(
+            best_move.uci(),
+            is_capture=is_capture,
+            is_castling=is_castling,
+            is_promotion=is_promotion,
+            piece_type=piece_type,
+        )
 
         # Keep session board state in sync with physical execution.
         board.push(best_move)
