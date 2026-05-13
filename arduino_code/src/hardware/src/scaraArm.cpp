@@ -1,4 +1,5 @@
 #include "scaraArm.h"
+#include "config.h"
 
 ScaraArm::ScaraArm(ScaraJoint& joint1, ScaraJoint& joint2, LeadScrew& leadScrew, 
     Gripper& gripper, float j1Length, float j2Length): 
@@ -21,6 +22,8 @@ void ScaraArm::begin() {
 }
 
 void ScaraArm::calibrate() {
+    beforeMove();
+
     Serial.println("Gripper openned for calibration");
     gripper.open();
 
@@ -51,24 +54,35 @@ void ScaraArm::calibrate() {
 
     sync();
     Serial.println("Calibration done");
+
+    afterMove();
+}
+
+void ScaraArm::goHome() {
+    beforeMove();
+    leadScrew.moveTo_mm(PICKPLACE_HOVER_Z_MM);
+    joint1.moveTo(0.0f);
+    joint2.moveTo(0.0f);
+    afterMove();
+    sync();
 }
 
 bool ScaraArm::moveXY(float x, float y) {
     IKResult r = ik.inverseKinematics(x, y);
     if (!r.reachable) { Serial.println("out of reach"); return false; }
 
+    beforeMove();
     // Sweep j1 fully to its target, then sweep j2 fully. The arm traces an
     // arc (j1) then a second arc (j2) rather than a straight Cartesian line.
     joint1.moveTo(r.theta1);
     // joint2 motor is mounted with its positive direction opposite to the
     // IK CCW convention, so negate the commanded angle.
     joint2.moveTo(-r.theta2);
+    afterMove();
 
     sync();
     return true;
 }
-
-
 
 void ScaraArm::sync() {
     FKResult pos = ik.forwardKinematics(joint1.angle(), -joint2.angle());
@@ -79,12 +93,22 @@ void ScaraArm::sync() {
     currentTheta2 = -joint2.angle();
 }
 
-void ScaraArm::moveZ(float mm)   { leadScrew.moveTo_mm(mm); }
-void ScaraArm::moveByZ(float mm) { leadScrew.moveBy_mm(mm); }
+void ScaraArm::moveZ(float mm)   { 
+    beforeMove();
+    leadScrew.moveTo_mm(mm); 
+    afterMove();
+}
+void ScaraArm::moveByZ(float mm) {
+    beforeMove();
+    leadScrew.moveBy_mm(mm); 
+    afterMove();
+}
 
 bool ScaraArm::moveXYZ(float x, float y, float z) {
+    beforeMove();
     leadScrew.moveTo_mm(z);
     return moveXY(x, y);
+    afterMove();
 }
 
 void ScaraArm::moveJ1(float deg) { joint1.moveTo(deg); sync(); }
@@ -98,3 +122,39 @@ bool ScaraArm::gripperOpen() const        { return gripper.isOpen(); }
 float ScaraArm::z() const        { return leadScrew.position_mm(); }
 float ScaraArm::j1Angle() const  { return joint1.angle(); }
 float ScaraArm::j2Angle() const  { return joint2.angle(); }
+
+bool ScaraArm::pickAt(float x, float y, int pieceType) {
+    // Clamp piece type to valid range
+    if (pieceType < 0 || pieceType > 5) pieceType = 0;
+    
+    // Move to hover above target (sets Z then XY).
+    if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;
+
+    // Lower to piece-specific pick height and close gripper
+    moveZ(PICK_Z[pieceType]);
+    delay(200);
+    closeGripper();
+
+    // Lift back to safe hover/travel Z
+    moveZ(PICKPLACE_HOVER_Z_MM);
+    delay(200);
+    return true;
+}
+
+bool ScaraArm::putAt(float x, float y, int pieceType) {
+    // Clamp piece type to valid range
+    if (pieceType < 0 || pieceType > 5) pieceType = 0;
+    
+    // Move to hover above target
+    if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;
+
+    // Lower to piece-specific place height and open gripper
+    moveZ(PLACE_Z[pieceType]);
+    delay(200);
+    openGripper();
+
+    // Retreat to safe hover/travel Z
+    moveZ(PICKPLACE_HOVER_Z_MM);
+    delay(200);
+    return true;
+}

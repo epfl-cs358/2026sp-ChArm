@@ -102,12 +102,7 @@ class GameController:
         is_promotion = best_move.promotion is not None
 
         self.ui_link.bot_moving()
-        execute_move(
-            best_move.uci(),
-            is_capture=is_capture,
-            is_castling=is_castling,
-            is_promotion=is_promotion,
-        )
+        execute_move(best_move.uci(), board)
 
         # Keep session board state in sync with physical execution.
         board.push(best_move)

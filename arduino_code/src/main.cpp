@@ -12,6 +12,7 @@
 #include "hardware/src/uiState.h"
 #include "hardware/src/lcdDisplay.h"
 #include "hardware/src/uiController.h"
+#include "hardware/src/enableDriver.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
@@ -21,75 +22,64 @@ LimitSwitch j1Lim(X_LIMIT_PIN);
 LimitSwitch j2Lim(Y_LIMIT_PIN);
 LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN);
 
-ScaraJoint joint1(xStepper, STEPS_PER_REV, 16, GEAR_RATIO_J1, j1Lim, false); //base
-ScaraJoint joint2(yStepper, STEPS_PER_REV, 16, GEAR_RATIO_J2, j2Lim, true); //forearm
+ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1, j1Lim, false); //base
+ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2, j2Lim, true);  //forearm
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
 LeadScrew leadScrew(zStepper, STEPS_PER_REV, 2, LEAD, Z_MAX_MM, zLim);
 
 ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
- 
+
 UIState uiState;
 ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
 LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
 UIController uiController(buttonInput, uiState, lcd, Serial1);
 
-
 int stepCount = 0;
 static String cmdBuffer = "";
 
-// Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `controllerMode`.
-// 'd' is taken by +X in this mode, so Z-down uses 'j' (under 'u' on QWERTY).
-// Steps are small so terminal key-repeat feels continuous instead of queueing.
-// This mode is jog-only — board calibration lives in its own mode (`cal`).
-static bool controllerMode = false;
-static const float JOG_XY_MM = 3.0f;
-static const float JOG_Z_MM  = 1.5f;
+// Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `cm`.
+static bool controllerMode  = false;
+static bool calibrationMode = false;
+static const float JOG_XY_MM     = 3.0f;
+static const float JOG_Z_MM      = 1.5f;
+static const float CAL_JOG_XY_MM = 1.0f;
+static const float CAL_JOG_Z_MM  = 0.5f;
+static const float TRASH_CAL_START_X = 470.0f;  // Default starting position for trash calibration
+static const float TRASH_CAL_START_Y = 70.0f;
 
-// Chess board calibration by 3-corner vector decomposition.
-// Capture the arm's (x, y) at the centers of A1, H1, and H8. Every other
-// square is then built from H1 plus integer multiples of two basis vectors:
-//   vFile = (a1 - h1) / 7    one file step, h -> a
-//   vRank = (h8 - h1) / 7    one rank step, 1 -> 8
-//   P(file, rank) = h1 + (7 - fileIdx) * vFile + rankIdx * vRank
-// Any kinematic scaling/skew that affects all three corners equally cancels
-// out within the board area, so this is robust to bad link lengths or gear
-// ratios as long as the board itself is a parallelogram in arm coordinates.
-// Z is intentionally NOT part of the calibration — it stays under manual
-// control (moveZ / u-j) so the user picks a safe travel height before goto.
+// ── Board calibration ────────────────────────────────────────────────────────
+// 3-corner vector decomposition: capture arm (x,y) at H1, A1, H8.
+// Every square is then: P = h1 + fileFromH*vFile + rankIdx*vRank
+// Z is NOT part of board calibration — user picks travel height manually.
 static bool  h1Calibrated = false, a1Calibrated = false, h8Calibrated = false;
-static float h1X = 0.0f, h1Y = 0.0f;
-static float a1X = 0.0f, a1Y = 0.0f;
-static float h8X = 0.0f, h8Y = 0.0f;
+static float h1X = 0, h1Y = 0;
+static float a1X = 0, a1Y = 0;
+static float h8X = 0, h8Y = 0;
+static bool  trashCalibrated = false;
+static float trashX = 0, trashY = 0;
 
-static bool boardCalibrated() {
-  return h1Calibrated && a1Calibrated && h8Calibrated;
-}
+static bool boardCalibrated() { return h1Calibrated && a1Calibrated && h8Calibrated; }
+static bool fullCalibrated()  { return boardCalibrated() && trashCalibrated; }
 
-// --- EEPROM persistence ---------------------------------------------------
-// Mega has no filesystem; 3-corner calibration is stored in EEPROM at addr 0.
-// Layout:
-//   [0..3]   magic "CALB" (only load if it matches — avoids loading garbage
-//            on a virgin board where EEPROM reads 0xFF)
-//   [4..27]  six floats: h1X, h1Y, a1X, a1Y, h8X, h8Y
-//   [28]     XOR checksum of bytes [0..27]
+// ── EEPROM persistence ───────────────────────────────────────────────────────
+// Layout: [0..3] magic "CALB" | [4..35] eight floats h1X,h1Y,a1X,a1Y,h8X,h8Y,trashX,trashY | [36] XOR checksum
 static const int     EEPROM_CAL_ADDR = 0;
 static const uint8_t CAL_MAGIC[4]    = { 'C', 'A', 'L', 'B' };
-static const int     EEPROM_CAL_LEN  = 29;
+static const int     EEPROM_CAL_LEN  = 37;
 
 static bool loadCalFromEEPROM() {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 4; i++)
     if (EEPROM.read(EEPROM_CAL_ADDR + i) != CAL_MAGIC[i]) return false;
-  }
   uint8_t cs = 0;
   for (int i = 0; i < EEPROM_CAL_LEN - 1; i++) cs ^= EEPROM.read(EEPROM_CAL_ADDR + i);
   if (cs != EEPROM.read(EEPROM_CAL_ADDR + EEPROM_CAL_LEN - 1)) return false;
-
-  float buf[6];
-  for (int i = 0; i < 6; i++) EEPROM.get(EEPROM_CAL_ADDR + 4 + i * 4, buf[i]);
+  float buf[8];
+  for (int i = 0; i < 8; i++) EEPROM.get(EEPROM_CAL_ADDR + 4 + i * 4, buf[i]);
   h1X = buf[0]; h1Y = buf[1];
   a1X = buf[2]; a1Y = buf[3];
   h8X = buf[4]; h8Y = buf[5];
-  h1Calibrated = a1Calibrated = h8Calibrated = true;
+  trashX = buf[6]; trashY = buf[7];
+  h1Calibrated = a1Calibrated = h8Calibrated = trashCalibrated = true;
   return true;
 }
 
@@ -101,6 +91,8 @@ static void saveCalToEEPROM() {
   EEPROM.put(EEPROM_CAL_ADDR + 16, a1Y);
   EEPROM.put(EEPROM_CAL_ADDR + 20, h8X);
   EEPROM.put(EEPROM_CAL_ADDR + 24, h8Y);
+  EEPROM.put(EEPROM_CAL_ADDR + 28, trashX);
+  EEPROM.put(EEPROM_CAL_ADDR + 32, trashY);
   uint8_t cs = 0;
   for (int i = 0; i < EEPROM_CAL_LEN - 1; i++) cs ^= EEPROM.read(EEPROM_CAL_ADDR + i);
   EEPROM.update(EEPROM_CAL_ADDR + EEPROM_CAL_LEN - 1, cs);
@@ -110,79 +102,82 @@ static void clearCalEEPROM() {
   for (int i = 0; i < EEPROM_CAL_LEN; i++) EEPROM.update(EEPROM_CAL_ADDR + i, 0xFF);
 }
 
-// --- Calibration mode (bed_screws_adjust-style wizard) --------------------
-// Walks the user through H1 -> A1 -> H8. For each corner: if a saved value
-// exists, the arm moves there first and the user nudges it with wasd/uj; if
-// no saved value, the user moves to the corner from wherever the arm is.
-// Pressing 'v' locks in the current XY for that corner and advances.
-// Pressing 'n' advances without changing the value (keeps any prior saved
-// value). 'p' goes back. 'q' cancels and reverts to the snapshot taken on
-// entry. Reaching past H8 writes EEPROM iff all 3 corners are set.
-enum CalStep : uint8_t { CAL_H1 = 0, CAL_A1 = 1, CAL_H8 = 2 };
-static bool    calibrationMode = false;
-static CalStep calStep         = CAL_H1;
-static const float CAL_JOG_XY_MM = 1.0f;   // finer than cm: corner alignment
-static const float CAL_JOG_Z_MM  = 0.5f;
+// ── Calibration wizard ───────────────────────────────────────────────────────
+// Walks user through H1 -> A1 -> H8 -> Trash. 'v' locks, 'n' skips,
+// 'p' goes back, 'q' cancels and reverts. Saves to EEPROM when all 4 done.
+enum CalStep : uint8_t { CAL_H1 = 0, CAL_A1 = 1, CAL_H8 = 2, CAL_TRASH = 3 };
+static CalStep calStep = CAL_H1;
 
-// Snapshot of calibration state on entering cal mode; restored if user
-// cancels with 'q'.
-static bool  snapH1c, snapA1c, snapH8c;
+// Snapshot: saved on entering cal mode, restored on cancel
+static bool  snapH1c, snapA1c, snapH8c, snapTrashc;
 static float snapH1X, snapH1Y, snapA1X, snapA1Y, snapH8X, snapH8Y;
+static float snapTrashX, snapTrashY;
 
 static const char* calCornerName(CalStep s) {
-  if (s == CAL_H1) return "H1";
-  if (s == CAL_A1) return "A1";
-  return "H8";
+  if (s == CAL_H1)    return "H1";
+  if (s == CAL_A1)    return "A1";
+  if (s == CAL_H8)    return "H8";
+  return "Trash";
 }
 
 static bool calCornerSaved(CalStep s) {
-  if (s == CAL_H1) return h1Calibrated;
-  if (s == CAL_A1) return a1Calibrated;
-  return h8Calibrated;
+  if (s == CAL_H1)    return h1Calibrated;
+  if (s == CAL_A1)    return a1Calibrated;
+  if (s == CAL_H8)    return h8Calibrated;
+  return trashCalibrated;
 }
 
 static void calGetSavedXY(CalStep s, float& x, float& y) {
-  if (s == CAL_H1) { x = h1X; y = h1Y; }
-  else if (s == CAL_A1) { x = a1X; y = a1Y; }
-  else { x = h8X; y = h8Y; }
+  if (s == CAL_H1)       { x = h1X;    y = h1Y; }
+  else if (s == CAL_A1)  { x = a1X;    y = a1Y; }
+  else if (s == CAL_H8)  { x = h8X;    y = h8Y; }
+  else                   { x = trashX; y = trashY; }
 }
 
 static void captureCalCorner(CalStep s) {
-  if (s == CAL_H1) { h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true; }
-  else if (s == CAL_A1) { a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true; }
-  else            { h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true; }
+  if (s == CAL_H1)       { h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true; }
+  else if (s == CAL_A1)  { a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true; }
+  else if (s == CAL_H8)  { h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true; }
+  else { trashX = arm.x(); trashY = arm.y(); trashCalibrated = true; }
   Serial.print("[cal] "); Serial.print(calCornerName(s));
-  Serial.print(" set to ("); Serial.print(arm.x()); Serial.print(", ");
-  Serial.print(arm.y()); Serial.println(")");
+  Serial.print(" set to ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y());
+  Serial.println(")");
 }
 
 static void snapshotCal() {
   snapH1c = h1Calibrated; snapH1X = h1X; snapH1Y = h1Y;
   snapA1c = a1Calibrated; snapA1X = a1X; snapA1Y = a1Y;
   snapH8c = h8Calibrated; snapH8X = h8X; snapH8Y = h8Y;
+  snapTrashc = trashCalibrated; snapTrashX = trashX; snapTrashY = trashY;
 }
 
 static void restoreCalSnapshot() {
   h1Calibrated = snapH1c; h1X = snapH1X; h1Y = snapH1Y;
   a1Calibrated = snapA1c; a1X = snapA1X; a1Y = snapA1Y;
   h8Calibrated = snapH8c; h8X = snapH8X; h8Y = snapH8Y;
+  trashCalibrated = snapTrashc; trashX = snapTrashX; trashY = snapTrashY;
 }
 
 static void promptCalStep(CalStep s) {
   Serial.println("====================================");
-  Serial.print("[cal] Step "); Serial.print((int)s + 1); Serial.print("/3: ");
+  Serial.print("[cal] Step "); Serial.print((int)s + 1); Serial.print("/4: ");
   Serial.println(calCornerName(s));
+  if (s == CAL_TRASH)
+    Serial.println("  Move arm to trash position (XY only — Z is hardcoded in config).");
   if (calCornerSaved(s)) {
-    float tx, ty;
-    calGetSavedXY(s, tx, ty);
+    float tx, ty; calGetSavedXY(s, tx, ty);
     Serial.print("  saved=("); Serial.print(tx); Serial.print(", "); Serial.print(ty);
-    Serial.println(") -- moving there. Nudge to fine-tune.");
-    if (!arm.moveXY(tx, ty)) {
-      Serial.println("  WARNING: saved position unreachable from current pose.");
-      Serial.println("  Jog manually to the corner.");
-    }
+    Serial.println(") — moving there. Nudge to fine-tune.");
+    if (!arm.moveXY(tx, ty))
+      Serial.println("  WARNING: saved position unreachable. Jog manually.");
   } else {
-    Serial.println("  no saved value -- move arm to this corner manually.");
+    if (s == CAL_TRASH) {
+      Serial.print("  moving to default trash start position ("); Serial.print(TRASH_CAL_START_X); Serial.print(", "); Serial.print(TRASH_CAL_START_Y); Serial.println(").");
+      if (!arm.moveXY(TRASH_CAL_START_X, TRASH_CAL_START_Y))
+        Serial.println("  WARNING: default trash position unreachable. Jog manually.");
+    } else {
+      Serial.println("  no saved value — move arm here manually.");
+    }
   }
   Serial.println("  wasd/uj=jog  v=validate  n=skip  p=prev  q=cancel");
   Serial.println("====================================");
@@ -194,22 +189,24 @@ static void enterCalMode() {
   snapshotCal();
   calStep = CAL_H1;
   Serial.println("Calibration mode ON");
-  Serial.print("  H1: "); Serial.println(h1Calibrated ? "saved" : "MISSING");
-  Serial.print("  A1: "); Serial.println(a1Calibrated ? "saved" : "MISSING");
-  Serial.print("  H8: "); Serial.println(h8Calibrated ? "saved" : "MISSING");
+  Serial.print("  H1:    "); Serial.println(h1Calibrated    ? "saved" : "MISSING");
+  Serial.print("  A1:    "); Serial.println(a1Calibrated    ? "saved" : "MISSING");
+  Serial.print("  H8:    "); Serial.println(h8Calibrated    ? "saved" : "MISSING");
+  Serial.print("  Trash: "); Serial.println(trashCalibrated ? "saved" : "MISSING");
   promptCalStep(calStep);
 }
 
 static void finishCalMode() {
   calibrationMode = false;
-  if (boardCalibrated()) {
+  if (fullCalibrated()) {
     saveCalToEEPROM();
-    Serial.println("[cal] All 3 corners set. Saved to EEPROM.");
+    Serial.println("[cal] All 4 points set. Saved to EEPROM.");
   } else {
-    Serial.println("[cal] Incomplete -- not all corners set. EEPROM unchanged.");
-    Serial.print("    H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING");
-    Serial.print("    A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING");
-    Serial.print("    H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING");
+    Serial.println("[cal] Incomplete — not all points set. EEPROM unchanged.");
+    Serial.print("  H1    "); Serial.println(h1Calibrated    ? "OK" : "MISSING");
+    Serial.print("  A1    "); Serial.println(a1Calibrated    ? "OK" : "MISSING");
+    Serial.print("  H8    "); Serial.println(h8Calibrated    ? "OK" : "MISSING");
+    Serial.print("  Trash "); Serial.println(trashCalibrated ? "OK" : "MISSING");
   }
 }
 
@@ -219,24 +216,75 @@ static void cancelCalMode() {
   Serial.println("[cal] Cancelled. Reverted to prior values.");
 }
 
-// (file, rank) -> board (x, y) in mm. file in 'a'..'h', rank in 1..8.
-// Returns false if input out of range or board not fully calibrated.
+// ── Square → XY ─────────────────────────────────────────────────────────────
 static bool squareToXY(char file, int rank, float& outX, float& outY) {
   if (!boardCalibrated()) return false;
   if (file < 'a' || file > 'h') return false;
-  if (rank < 1 || rank > 8)     return false;
-  int fileIdx = file - 'a';            // a=0, h=7
-  int rankIdx = rank - 1;              // 1=0, 8=7
-  float vFileX = (a1X - h1X) / 7.0f;
-  float vFileY = (a1Y - h1Y) / 7.0f;
-  float vRankX = (h8X - h1X) / 7.0f;
-  float vRankY = (h8Y - h1Y) / 7.0f;
-  int fileFromH = 7 - fileIdx;         // 0 at h, 7 at a
+  if (rank < 1   || rank > 8)   return false;
+  int fileIdx   = file - 'a';
+  int rankIdx   = rank - 1;
+  float vFileX  = (a1X - h1X) / 7.0f, vFileY = (a1Y - h1Y) / 7.0f;
+  float vRankX  = (h8X - h1X) / 7.0f, vRankY = (h8Y - h1Y) / 7.0f;
+  int fileFromH = 7 - fileIdx;
   outX = h1X + fileFromH * vFileX + rankIdx * vRankX;
   outY = h1Y + fileFromH * vFileY + rankIdx * vRankY;
   return true;
 }
 
+// ── Capture helpers (direct commands, outside wizard) ───────────────────────
+static void captureH1() {
+  h1X = arm.x(); h1Y = arm.y(); h1Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("H1 CAPTURED  XY=("); Serial.print(h1X); Serial.print(", "); Serial.print(h1Y); Serial.println(")");
+  Serial.println("====================================");
+}
+static void captureA1() {
+  a1X = arm.x(); a1Y = arm.y(); a1Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("A1 CAPTURED  XY=("); Serial.print(a1X); Serial.print(", "); Serial.print(a1Y); Serial.println(")");
+  Serial.println("====================================");
+}
+static void captureH8() {
+  h8X = arm.x(); h8Y = arm.y(); h8Calibrated = true;
+  Serial.println("====================================");
+  Serial.print("H8 CAPTURED  XY=("); Serial.print(h8X); Serial.print(", "); Serial.print(h8Y); Serial.println(")");
+  Serial.println("====================================");
+}
+static void captureTrash() {
+  trashX = arm.x(); trashY = arm.y(); trashCalibrated = true;
+  Serial.println("====================================");
+  Serial.print("TRASH CAPTURED XY=("); Serial.print(trashX); Serial.print(", ");
+  Serial.print(trashY); Serial.println(")");
+  Serial.println("====================================");
+}
+
+// ── Piece helpers ────────────────────────────────────────────────────────────
+static int pieceNameToType(String pieceName) {
+  pieceName.toLowerCase();
+  if (pieceName == "pawn")   return PAWN;
+  if (pieceName == "knight") return KNIGHT;
+  if (pieceName == "bishop") return BISHOP;
+  if (pieceName == "rook")   return ROOK;
+  if (pieceName == "queen")  return QUEEN;
+  if (pieceName == "king")   return KING;
+  return -1;
+}
+
+// ── Key classification ───────────────────────────────────────────────────────
+static bool isCmKey(char c) {
+  return c == 'w' || c == 'a' || c == 's' || c == 'd'
+      || c == 'u' || c == 'j'
+      || c == 'c' || c == 'v'
+      || c == 'q';
+}
+
+static bool isCalKey(char c) {
+  return c == 'w' || c == 'a' || c == 's' || c == 'd'
+      || c == 'u' || c == 'j'
+      || c == 'v' || c == 'n' || c == 'p' || c == 'q';
+}
+
+// ── Help ─────────────────────────────────────────────────────────────────────
 static void printCmHelp() {
   Serial.println("------ controller mode keys ------");
   Serial.println("  w/a/s/d : jog XY (+/- 3 mm)");
@@ -246,41 +294,26 @@ static void printCmHelp() {
   Serial.println("----------------------------------");
 }
 
-// Keys that fire immediately while in controller mode (no Enter needed).
-// IMPORTANT: any letter listed here cannot appear in a multi-char command while
-// cm is ON — it would be consumed before reaching the line buffer. That is why
-// `cm` toggle doesn't work inside cm mode and we expose `q` to exit instead.
-static bool isCmKey(char c) {
-  return c == 'w' || c == 'a' || c == 's' || c == 'd'
-      || c == 'u' || c == 'j'
-      || c == 'c' || c == 'v'
-      || c == 'q';
-}
-
-// Keys that fire immediately while in calibration mode.
-static bool isCalKey(char c) {
-  return c == 'w' || c == 'a' || c == 's' || c == 'd'
-      || c == 'u' || c == 'j'
-      || c == 'v' || c == 'n' || c == 'p' || c == 'q';
-}
-
+// ── Command handler ───────────────────────────────────────────────────────────
 static void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
 
   if (cmd.length() == 1) {
 
+    // ── Calibration wizard keys ──────────────────────────────────────────────
     if (calibrationMode) {
       if (cmd == "q") { cancelCalMode(); return; }
+
       if (cmd == "v") {
         captureCalCorner(calStep);
-        if (calStep == CAL_H8) { finishCalMode(); return; }
+        if (calStep == CAL_TRASH) { finishCalMode(); return; }
         calStep = (CalStep)(calStep + 1);
         promptCalStep(calStep);
         return;
       }
       if (cmd == "n") {
-        if (calStep == CAL_H8) { finishCalMode(); return; }
+        if (calStep == CAL_TRASH) { finishCalMode(); return; }
         calStep = (CalStep)(calStep + 1);
         promptCalStep(calStep);
         return;
@@ -297,7 +330,7 @@ static void handleCommand(String cmd) {
       else if (cmd == "s") arm.moveXY(arm.x(), arm.y() - CAL_JOG_XY_MM);
       else if (cmd == "a") arm.moveXY(arm.x() - CAL_JOG_XY_MM, arm.y());
       else if (cmd == "d") arm.moveXY(arm.x() + CAL_JOG_XY_MM, arm.y());
-      else if (cmd == "u") arm.moveByZ(CAL_JOG_Z_MM);
+      else if (cmd == "u") arm.moveByZ( CAL_JOG_Z_MM);
       else if (cmd == "j") arm.moveByZ(-CAL_JOG_Z_MM);
       else moved = false;
 
@@ -310,6 +343,7 @@ static void handleCommand(String cmd) {
       return;
     }
 
+    // ── Controller mode keys ─────────────────────────────────────────────────
     if (controllerMode) {
       if (cmd == "q") {
         controllerMode = false;
@@ -322,7 +356,7 @@ static void handleCommand(String cmd) {
       else if (cmd == "s") arm.moveXY(arm.x(), arm.y() - JOG_XY_MM);
       else if (cmd == "a") arm.moveXY(arm.x() - JOG_XY_MM, arm.y());
       else if (cmd == "d") arm.moveXY(arm.x() + JOG_XY_MM, arm.y());
-      else if (cmd == "u") arm.moveByZ(JOG_Z_MM);
+      else if (cmd == "u") arm.moveByZ( JOG_Z_MM);
       else if (cmd == "j") arm.moveByZ(-JOG_Z_MM);
       else if (cmd == "c") { arm.closeGripper(); Serial.println("Gripper: CLOSED"); return; }
       else if (cmd == "v") { arm.openGripper();  Serial.println("Gripper: OPEN");   return; }
@@ -337,175 +371,224 @@ static void handleCommand(String cmd) {
       return;
     }
 
+    // ── Raw step jog ─────────────────────────────────────────────────────────
     if (cmd == "f") {
-      xStepper.setDirection(true);
-      xStepper.step();
-      arm.sync();
-      stepCount++;
+      beforeMove();
+      xStepper.setDirection(true); xStepper.step(); arm.sync(); stepCount++;
+      afterMove();
     } else if (cmd == "b") {
-      xStepper.setDirection(false);
-      xStepper.step();
-      arm.sync();
-      stepCount--;
+      beforeMove();
+      xStepper.setDirection(false); xStepper.step(); arm.sync(); stepCount--;
+      afterMove();
     } else if (cmd == "w") {
-      yStepper.setDirection(true);
-      yStepper.step();
-      arm.sync();
-      stepCount++;
+      beforeMove();
+      yStepper.setDirection(true); yStepper.step(); arm.sync(); stepCount++;
+      afterMove();
     } else if (cmd == "s") {
-      yStepper.setDirection(false);
-      yStepper.step();
-      arm.sync();
-      stepCount--;
+      beforeMove();
+      yStepper.setDirection(false); yStepper.step(); arm.sync(); stepCount--;
+      afterMove();
     } else if (cmd == "u") {
-      zStepper.setDirection(true);
-      zStepper.step();
-      stepCount++;
+      beforeMove();
+      zStepper.setDirection(true); zStepper.step(); stepCount++;
+      afterMove();
     } else if (cmd == "d") {
-      zStepper.setDirection(false);
-      zStepper.step();
-      stepCount--;
+      beforeMove();
+      zStepper.setDirection(false); zStepper.step(); stepCount--;
+      afterMove();
     } else if (cmd == "c") {
-      arm.closeGripper();
-      return;
+      arm.closeGripper(); return;
     } else if (cmd == "v") {
-      arm.openGripper();
-      return;
+      arm.openGripper(); return;
     }
 
-    Serial.print("Position: ");
-    Serial.print(stepCount);
-    Serial.println(" steps");
+    Serial.print("Position: "); Serial.print(stepCount); Serial.println(" steps");
 
   } else {
+
+    // ── Multi-char commands ───────────────────────────────────────────────────
     if (cmd == "OG") {
       arm.openGripper();
     } else if (cmd == "CG") {
       arm.closeGripper();
     } else if (cmd == "GS") {
       Serial.println(arm.gripperOpen() ? "Gripper: open" : "Gripper: closed");
-    } else if (cmd == "GA ") {
-      float angle = cmd.substring(3).toFloat();
-      arm.setGripperAngle(angle);
+
+    } else if (cmd.startsWith("GA ")) {
+      arm.setGripperAngle(cmd.substring(3).toFloat());
 
     } else if (cmd.startsWith("angleX ")) {
-      float a = cmd.substring(7).toFloat();
-      Serial.println(a);
-      arm.moveJ1(a);
+      arm.moveJ1(cmd.substring(7).toFloat());
 
     } else if (cmd.startsWith("angleY ")) {
-      float a = cmd.substring(7).toFloat();
-      arm.moveJ2(a);
+      arm.moveJ2(cmd.substring(7).toFloat());
 
     } else if (cmd.startsWith("moveXY ")) {
       String vals = cmd.substring(7);
-      int space   = vals.indexOf(' ');
-      float x     = vals.substring(0, space).toFloat();
-      float y     = vals.substring(space + 1).toFloat();
-      Serial.print("Moving to X: "); Serial.print(x);
-      Serial.print(", Y: "); Serial.println(y);
+      int sp = vals.indexOf(' ');
+      float x = vals.substring(0, sp).toFloat();
+      float y = vals.substring(sp + 1).toFloat();
+      Serial.print("Moving to X: "); Serial.print(x); Serial.print(", Y: "); Serial.println(y);
       arm.moveXY(x, y);
- 
+
     } else if (cmd.startsWith("moveZ ")) {
       float mm = cmd.substring(6).toFloat();
       Serial.print("Moving Z to: "); Serial.print(mm); Serial.println(" mm");
       arm.moveZ(mm);
 
     } else if (cmd.startsWith("moveXYZ ")) {
-      String vals  = cmd.substring(8);
-      int space1   = vals.indexOf(' ');
-      int space2   = vals.indexOf(' ', space1 + 1);
-      float x = vals.substring(0, space1).toFloat();
-      float y = vals.substring(space1 + 1, space2).toFloat();
-      float z = vals.substring(space2 + 1).toFloat();
+      String vals = cmd.substring(8);
+      int sp1 = vals.indexOf(' ');
+      int sp2 = vals.indexOf(' ', sp1 + 1);
+      float x = vals.substring(0, sp1).toFloat();
+      float y = vals.substring(sp1 + 1, sp2).toFloat();
+      float z = vals.substring(sp2 + 1).toFloat();
       Serial.print("Moving to X: "); Serial.print(x);
       Serial.print(", Y: "); Serial.print(y);
       Serial.print(", Z: "); Serial.println(z);
       arm.moveXYZ(x, y, z);
 
+    } else if (cmd == "home") {
+      Serial.println("Going home: J1=0, J2=0, Z=hover");
+      arm.goHome();
+
+    } else if (cmd.startsWith("pick ")) {
+      String vals = cmd.substring(5);
+      int sp = vals.indexOf(' ');
+      if (sp < 0) { Serial.println("usage: pick <piece> <square>"); return; }
+      String pieceName = vals.substring(0, sp);
+      String sq = vals.substring(sp + 1);
+      pieceName.trim(); sq.trim(); sq.toLowerCase();
+      int pieceType = pieceNameToType(pieceName);
+      if (pieceType < 0) { Serial.println("Invalid piece. Use: pawn, knight, bishop, rook, queen, king"); return; }
+      if (sq.length() != 2) { Serial.println("usage: pick <piece> <square>, e.g. pick pawn e2"); return; }
+      char file = sq.charAt(0);
+      int  rank = sq.charAt(1) - '0';
+      float tx, ty;
+      if (!squareToXY(file, rank, tx, ty)) {
+        Serial.println(boardCalibrated() ? "bad square (use a1..h8)" : "Board not fully calibrated. Run `cal`.");
+        return;
+      }
+      Serial.print("Pick "); Serial.print(pieceName); Serial.print(" from "); Serial.print(sq);
+      Serial.print(" -> XY("); Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.println(")");
+      if (!arm.pickAt(tx, ty, pieceType)) Serial.println("Pick failed"); else Serial.println("Pick done");
+
+    } else if (cmd.startsWith("put ")) {
+      String vals = cmd.substring(4);
+      int sp = vals.indexOf(' ');
+      if (sp < 0) { Serial.println("usage: put <piece> <square|trash>"); return; }
+      String pieceName = vals.substring(0, sp);
+      String sq = vals.substring(sp + 1);
+      pieceName.trim(); sq.trim(); sq.toLowerCase();
+      bool toTrash = (sq == "trash");
+      int pieceType = pieceNameToType(pieceName);
+      if (pieceType < 0) { Serial.println("Invalid piece. Use: pawn, knight, bishop, rook, queen, king"); return; }
+      float tx, ty;
+      if (toTrash) {
+        if (!trashCalibrated) { Serial.println("Trash not calibrated. Use setTrash first."); return; }
+        tx = trashX; ty = trashY; // Note: trashZ is hardcoded in config
+      } else {
+        if (sq.length() != 2) { Serial.println("usage: put <piece> <square|trash>"); return; }
+        char file = sq.charAt(0);
+        int  rank = sq.charAt(1) - '0';
+        if (!squareToXY(file, rank, tx, ty)) {
+          Serial.println(boardCalibrated() ? "bad square (use a1..h8)" : "Board not fully calibrated. Run `cal`.");
+          return;
+        }
+      }
+      if (toTrash) {
+        Serial.print("Put "); Serial.print(pieceName); Serial.print(" to trash -> XYZ(");
+        Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.print(", "); Serial.print(TRASH_Z); Serial.println(")");
+        if (!arm.moveXYZ(tx, ty, TRASH_Z)) Serial.println("Put failed");
+        else { arm.openGripper(); Serial.println("Put done"); }
+      } else {
+        Serial.print("Put "); Serial.print(pieceName); Serial.print(" to "); Serial.print(sq);
+        Serial.print(" -> XY("); Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.println(")");
+        if (!arm.putAt(tx, ty, pieceType)) Serial.println("Put failed"); else Serial.println("Put done");
+      }
+
     } else if (cmd == "calibrate") {
       arm.calibrate();
 
     } else if (cmd == "controllerMode" || cmd == "cm") {
-      if (calibrationMode) {
-        Serial.println("Exit calibration first (q).");
-        return;
-      }
+      if (calibrationMode) { Serial.println("Exit calibration first (q)."); return; }
       controllerMode = !controllerMode;
-      if (controllerMode) {
-        Serial.println("Controller mode ON");
-        printCmHelp();
-      } else {
-        Serial.println("Controller mode OFF");
-      }
+      if (controllerMode) { Serial.println("Controller mode ON"); printCmHelp(); }
+      else                { Serial.println("Controller mode OFF"); }
       return;
 
     } else if (cmd == "cal" || cmd == "boardCal") {
-      if (controllerMode) {
-        Serial.println("Exit controller mode first (q).");
-        return;
-      }
+      if (controllerMode) { Serial.println("Exit controller mode first (q)."); return; }
       enterCalMode();
       return;
 
     } else if (cmd == "calClear") {
       clearCalEEPROM();
-      h1Calibrated = a1Calibrated = h8Calibrated = false;
+      h1Calibrated = a1Calibrated = h8Calibrated = trashCalibrated = false;
       Serial.println("EEPROM calibration cleared.");
       return;
+
+    } else if (cmd == "setH1") {
+      captureH1(); return;
+    } else if (cmd == "setA1") {
+      captureA1(); return;
+    } else if (cmd == "setH8") {
+      captureH8(); return;
+    } else if (cmd == "setTrash") {
+      captureTrash(); return;
 
     } else if (cmd == "boardInfo") {
       Serial.print("A1: ");
       if (a1Calibrated) { Serial.print("("); Serial.print(a1X); Serial.print(", "); Serial.print(a1Y); Serial.println(")"); }
-      else              { Serial.println("not set"); }
+      else Serial.println("not set");
       Serial.print("H1: ");
       if (h1Calibrated) { Serial.print("("); Serial.print(h1X); Serial.print(", "); Serial.print(h1Y); Serial.println(")"); }
-      else              { Serial.println("not set"); }
+      else Serial.println("not set");
       Serial.print("H8: ");
       if (h8Calibrated) { Serial.print("("); Serial.print(h8X); Serial.print(", "); Serial.print(h8Y); Serial.println(")"); }
-      else              { Serial.println("not set"); }
+      else Serial.println("not set");
       if (boardCalibrated()) {
         float vFileX = (a1X - h1X) / 7.0f, vFileY = (a1Y - h1Y) / 7.0f;
         float vRankX = (h8X - h1X) / 7.0f, vRankY = (h8Y - h1Y) / 7.0f;
-        Serial.print("vFile (h->a, per file): ("); Serial.print(vFileX); Serial.print(", "); Serial.print(vFileY);
+        Serial.print("vFile: ("); Serial.print(vFileX); Serial.print(", "); Serial.print(vFileY);
         Serial.print(")  |vFile|="); Serial.println(sqrt(vFileX*vFileX + vFileY*vFileY));
-        Serial.print("vRank (1->8, per rank): ("); Serial.print(vRankX); Serial.print(", "); Serial.print(vRankY);
+        Serial.print("vRank: ("); Serial.print(vRankX); Serial.print(", "); Serial.print(vRankY);
         Serial.print(")  |vRank|="); Serial.println(sqrt(vRankX*vRankX + vRankY*vRankY));
       } else {
         Serial.println("(board not fully calibrated)");
       }
+      Serial.print("Trash: ");
+      if (trashCalibrated) { Serial.print("("); Serial.print(trashX); Serial.print(", "); Serial.print(trashY); Serial.println(")"); }
+      else Serial.println("not set");
+      if (!fullCalibrated()) Serial.println("(full calibration not ready)");
       Serial.print("current Z="); Serial.print(arm.z()); Serial.println(" mm");
+      return;
+
+    } else if (cmd.startsWith("driver")) {
+      Serial.println(driversEnabled() ? "Drivers: ON" : "Drivers: OFF");
       return;
 
     } else if (cmd.startsWith("goto ")) {
       String sq = cmd.substring(5);
-      sq.trim();
-      sq.toLowerCase();
+      sq.trim(); sq.toLowerCase();
+      if (sq == "trash") {
+        if (!trashCalibrated) { Serial.println("Trash not calibrated. Use setTrash first."); return; }
+        Serial.print("[goto trash] -> ("); Serial.print(trashX); Serial.print(", "); Serial.print(trashY); Serial.print(", "); Serial.print(TRASH_Z); Serial.println(")");
+        if (!arm.moveXYZ(trashX, trashY, TRASH_Z)) Serial.println("  FAILED: trash position unreachable");
+        else { Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y()); Serial.print(", "); Serial.print(arm.z()); Serial.println(")"); }
+        return;
+      }
       if (sq.length() != 2) { Serial.println("usage: goto <file><rank>, e.g. goto e4"); return; }
       char file = sq.charAt(0);
       int  rank = sq.charAt(1) - '0';
       float tx, ty;
       if (!squareToXY(file, rank, tx, ty)) {
-        if (!boardCalibrated()) {
-          Serial.println("Board not fully calibrated. Run `cal` to set all 3 corners.");
-          Serial.print("  A1 "); Serial.println(a1Calibrated ? "OK" : "MISSING");
-          Serial.print("  H1 "); Serial.println(h1Calibrated ? "OK" : "MISSING");
-          Serial.print("  H8 "); Serial.println(h8Calibrated ? "OK" : "MISSING");
-        } else {
-          Serial.println("bad square (use a1..h8)");
-        }
+        Serial.println(boardCalibrated() ? "bad square (use a1..h8)" : "Board not fully calibrated. Run `cal`.");
         return;
       }
-      Serial.print("[goto "); Serial.print(sq); Serial.print("] ");
-      Serial.print("from ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y());
-      Serial.print(") -> ("); Serial.print(tx); Serial.print(", "); Serial.print(ty);
-      Serial.print(")  Z="); Serial.println(arm.z());
-      if (!arm.moveXY(tx, ty)) {
-        Serial.println("  FAILED: square unreachable from current pose");
-      } else {
-        Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", ");
-        Serial.print(arm.y()); Serial.println(")");
-      }
+      Serial.print("[goto "); Serial.print(sq); Serial.print("] -> ("); Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.println(")");
+      if (!arm.moveXY(tx, ty)) Serial.println("  FAILED: square unreachable");
+      else { Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y()); Serial.println(")"); }
       return;
 
     } else if (cmd == "pos") {
@@ -522,18 +605,17 @@ static void handleCommand(String cmd) {
     Serial.print(arm.x()); Serial.print(", ");
     Serial.print(arm.y()); Serial.print(", ");
     Serial.print(arm.z()); Serial.println(")");
-    
   }
 }
- 
+
+// ── Setup & loop ─────────────────────────────────────────────────────────────
 void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
-  digitalWrite(ENABLE_PIN, LOW);
+  //digitalWrite(ENABLE_PIN, LOW);
 
   Serial.begin(9600);
   arm.begin();
   //Serial1.begin(115200);
-
   //uiController.begin();
 
   if (loadCalFromEEPROM()) {
@@ -547,18 +629,20 @@ void setup() {
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
   Serial.println("cm = controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, q=exit)");
   Serial.println("cal = board calibration wizard | calClear = wipe EEPROM cal");
-  Serial.println("goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("setH1 / setA1 / setH8 / setTrash = capture corners/trash | goto <sq|trash> | boardInfo");
+  Serial.println("pick <piece> <sq> | put <piece> <sq|trash>  (pieces: pawn knight bishop rook queen king)");
 }
- 
+
 void loop() {
+  updateDrivers();
+
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
 
     // In cm / cal mode, action keys dispatch immediately (no Enter needed) so
     // that holding the key auto-repeats into continuous motion. Multi-char
-    // commands like `cm` still work from the main shell because they aren't
-    // active there.
+    // commands still work because their letters aren't action keys.
     if (controllerMode && isCmKey(c)) {
       handleCommand(String(c));
       continue;
