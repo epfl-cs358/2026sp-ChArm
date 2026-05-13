@@ -25,7 +25,7 @@ LimitSwitch zLim(Z_LIMIT_BOTTOM_PIN);
 ScaraJoint joint1(xStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J1, j1Lim, false); //base
 ScaraJoint joint2(yStepper, STEPS_PER_REV, MICROSTEPS, GEAR_RATIO_J2, j2Lim, true);  //forearm
 Gripper gripper(GRIPPER_PIN, OPEN_ANGLE, CLOSED_ANGLE);
-LeadScrew leadScrew(zStepper, STEPS_PER_REV, 2, LEAD, Z_MAX_MM, zLim);
+LeadScrew leadScrew(zStepper, STEPS_PER_MM, Z_MAX_MM, zLim);
 
 ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
 
