@@ -44,8 +44,6 @@ static const float JOG_XY_MM     = 3.0f;
 static const float JOG_Z_MM      = 1.5f;
 static const float CAL_JOG_XY_MM = 1.0f;
 static const float CAL_JOG_Z_MM  = 0.5f;
-static const float TRASH_CAL_START_X = 470.0f;  // Default starting position for trash calibration
-static const float TRASH_CAL_START_Y = 70.0f;
 
 // ── Board calibration ────────────────────────────────────────────────────────
 // 3-corner vector decomposition: capture arm (x,y) at H1, A1, H8.
@@ -171,29 +169,27 @@ static void promptCalStep(CalStep s) {
     if (!arm.moveXY(tx, ty))
       Serial.println("  WARNING: saved position unreachable. Jog manually.");
   } else {
-    if (s == CAL_TRASH) {
-      Serial.print("  moving to default trash start position ("); Serial.print(TRASH_CAL_START_X); Serial.print(", "); Serial.print(TRASH_CAL_START_Y); Serial.println(").");
-      if (!arm.moveXY(TRASH_CAL_START_X, TRASH_CAL_START_Y))
-        Serial.println("  WARNING: default trash position unreachable. Jog manually.");
-    } else {
-      Serial.println("  no saved value — move arm here manually.");
-    }
+    Serial.println("  no saved value — move arm here manually.");
   }
   Serial.println("  wasd/uj=jog  v=validate  n=skip  p=prev  q=cancel");
   Serial.println("====================================");
 }
 
-static void enterCalMode() {
+static void enterCalModeAt(CalStep startStep) {
   if (calibrationMode) return;
   calibrationMode = true;
   snapshotCal();
-  calStep = CAL_H1;
+  calStep = startStep;
   Serial.println("Calibration mode ON");
   Serial.print("  H1:    "); Serial.println(h1Calibrated    ? "saved" : "MISSING");
   Serial.print("  A1:    "); Serial.println(a1Calibrated    ? "saved" : "MISSING");
   Serial.print("  H8:    "); Serial.println(h8Calibrated    ? "saved" : "MISSING");
   Serial.print("  Trash: "); Serial.println(trashCalibrated ? "saved" : "MISSING");
   promptCalStep(calStep);
+}
+
+static void enterCalMode() {
+  enterCalModeAt(CAL_H1);
 }
 
 static void finishCalMode() {
@@ -522,6 +518,14 @@ static void handleCommand(String cmd) {
       enterCalMode();
       return;
 
+    } else if (cmd == "calTrash" || cmd == "trashCal") {
+      if (controllerMode) { Serial.println("Exit controller mode first (q)."); return; }
+      if (!boardCalibrated()) { Serial.println("Board points missing. Run `cal` first."); return; }
+      // Force manual/jog flow for trash by ignoring old saved trash point.
+      trashCalibrated = false;
+      enterCalModeAt(CAL_TRASH);
+      return;
+
     } else if (cmd == "calClear") {
       clearCalEEPROM();
       h1Calibrated = a1Calibrated = h8Calibrated = trashCalibrated = false;
@@ -629,6 +633,7 @@ void setup() {
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
   Serial.println("cm = controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, q=exit)");
   Serial.println("cal = board calibration wizard | calClear = wipe EEPROM cal");
+  Serial.println("calTrash = calibrate only trash XY (keeps H1/A1/H8)");
   Serial.println("setH1 / setA1 / setH8 / setTrash = capture corners/trash | goto <sq|trash> | boardInfo");
   Serial.println("pick <piece> <sq> | put <piece> <sq|trash>  (pieces: pawn knight bishop rook queen king)");
 }
