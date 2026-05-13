@@ -58,6 +58,15 @@ void ScaraArm::calibrate() {
     afterMove();
 }
 
+void ScaraArm::goHome() {
+    beforeMove();
+    leadScrew.moveTo_mm(PICKPLACE_HOVER_Z_MM);
+    joint1.moveTo(0.0f);
+    joint2.moveTo(0.0f);
+    afterMove();
+    sync();
+}
+
 bool ScaraArm::moveXY(float x, float y) {
     IKResult r = ik.inverseKinematics(x, y);
     if (!r.reachable) { Serial.println("out of reach"); return false; }

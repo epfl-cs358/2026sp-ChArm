@@ -9,5 +9,6 @@ void disableDrivers();
 void beforeMove();
 void afterMove();
 void updateDrivers();
+bool driversEnabled();
 
 #endif

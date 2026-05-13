@@ -29,3 +29,7 @@ void updateDrivers() {
         disableDrivers();
     }
 }
+
+bool driversEnabled() {
+    return digitalRead(ENABLE_PIN) == LOW;
+}

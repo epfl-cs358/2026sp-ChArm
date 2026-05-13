@@ -56,6 +56,7 @@ public:
 
     void sync();
     void calibrate();
+    void goHome();
 
 private:
     ScaraJoint& joint1;
