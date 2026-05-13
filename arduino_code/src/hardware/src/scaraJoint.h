@@ -26,9 +26,9 @@ public:
     // Returns the current angle in degrees, as tracked by the class. This is not
     float angle() const { return currentAngle; }
     // Sets the current angle to zero without moving the motor, for use after calibration.
-    void setZero() { currentAngle = 0.0f; }
+    void setZero() { currentAngle = 0.0f; stepResidual = 0.0f; }
     // Sets the current angle to a set angle without moving the motor, for use after calibration.
-    void setAngle(float deg) { currentAngle = deg; }
+    void setAngle(float deg) { currentAngle = deg; stepResidual = 0.0f; }
     
     //set soft limits for the joint, which will be enforced by moveTo and moveBy. These are relative to the zero position set during calibration.
     void setMinAngle(float deg) { minAngle = deg; }
@@ -46,6 +46,7 @@ private:
     int microstep;
     float gearRatio;
     float currentAngle;
+    float stepResidual;
     float minAngle;
     float maxAngle;
     bool isDualLimit;
