@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include "leadScrew.h"
 #include "gripper.h"
+#include "enableDriver.h"
 // Ties two ScaraJoints together with a ScaraKinematics solver.
 // Lets the caller move the end effector in Cartesian (x, y) space.
 class ScaraArm {
