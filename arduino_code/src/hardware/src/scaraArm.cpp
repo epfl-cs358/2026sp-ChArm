@@ -22,6 +22,8 @@ void ScaraArm::begin() {
 }
 
 void ScaraArm::calibrate() {
+    beforeMove();
+
     Serial.println("Gripper openned for calibration");
     gripper.open();
 
@@ -52,44 +54,26 @@ void ScaraArm::calibrate() {
 
     sync();
     Serial.println("Calibration done");
+
+    afterMove();
 }
 
 bool ScaraArm::moveXY(float x, float y) {
-    IKResult finalIK = ik.inverseKinematics(x, y);
-    if (!finalIK.reachable) { Serial.println("out of reach"); return false; }
+    IKResult r = ik.inverseKinematics(x, y);
+    if (!r.reachable) { Serial.println("out of reach"); return false; }
 
-    // Subdivide the Cartesian path into ~1 mm substeps so the two joints'
-    // sequential moveTo calls never lag enough to bend the trajectory.
-    const float STEP_MM = 1.0f;
-    float startX = currentX;
-    float startY = currentY;
-    float dx = x - startX;
-    float dy = y - startY;
-    float dist = sqrt(dx * dx + dy * dy);
-    int nSteps = (int)ceil(dist / STEP_MM);
-    if (nSteps < 1) nSteps = 1;
-
-    for (int i = 1; i <= nSteps; i++) {
-        float t  = (float)i / (float)nSteps;
-        float xi = startX + dx * t;
-        float yi = startY + dy * t;
-        IKResult r = ik.inverseKinematics(xi, yi);
-        if (!r.reachable) {
-            Serial.println("intermediate substep out of reach");
-            sync();
-            return false;
-        }
-        joint1.moveTo(r.theta1);
-        // joint2 motor is mounted with its positive direction opposite to the
-        // IK CCW convention, so negate the commanded angle.
-        joint2.moveTo(-r.theta2);
-    }
+    beforeMove();
+    // Sweep j1 fully to its target, then sweep j2 fully. The arm traces an
+    // arc (j1) then a second arc (j2) rather than a straight Cartesian line.
+    joint1.moveTo(r.theta1);
+    // joint2 motor is mounted with its positive direction opposite to the
+    // IK CCW convention, so negate the commanded angle.
+    joint2.moveTo(-r.theta2);
+    afterMove();
 
     sync();
     return true;
 }
-
-
 
 void ScaraArm::sync() {
     FKResult pos = ik.forwardKinematics(joint1.angle(), -joint2.angle());
@@ -100,12 +84,22 @@ void ScaraArm::sync() {
     currentTheta2 = -joint2.angle();
 }
 
-void ScaraArm::moveZ(float mm)   { leadScrew.moveTo_mm(mm); }
-void ScaraArm::moveByZ(float mm) { leadScrew.moveBy_mm(mm); }
+void ScaraArm::moveZ(float mm)   { 
+    beforeMove();
+    leadScrew.moveTo_mm(mm); 
+    afterMove();
+}
+void ScaraArm::moveByZ(float mm) {
+    beforeMove();
+    leadScrew.moveBy_mm(mm); 
+    afterMove();
+}
 
 bool ScaraArm::moveXYZ(float x, float y, float z) {
+    beforeMove();
     leadScrew.moveTo_mm(z);
     return moveXY(x, y);
+    afterMove();
 }
 
 void ScaraArm::moveJ1(float deg) { joint1.moveTo(deg); sync(); }

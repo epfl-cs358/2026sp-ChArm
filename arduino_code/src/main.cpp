@@ -11,6 +11,7 @@
 #include "hardware/src/uiState.h"
 #include "hardware/src/lcdDisplay.h"
 #include "hardware/src/uiController.h"
+#include "hardware/src/enableDriver.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ yStepper(Y_STEP_IN1, Y_DIR_IN1);
@@ -63,6 +64,10 @@ static float trashX = 0.0f, trashY = 0.0f, trashZ = 0.0f;
 
 static bool boardCalibrated() {
   return h1Calibrated && a1Calibrated && h8Calibrated;
+}
+
+static bool fullCalibrated() {
+  return boardCalibrated() && trashCalibrated;
 }
 
 // (file, rank) -> board (x, y) in mm. file in 'a'..'h', rank in 1..8.
@@ -189,33 +194,45 @@ static void handleCommand(String cmd) {
     }
 
     if (cmd == "f") {
+      beforeMove();
       xStepper.setDirection(true);
       xStepper.step();
       arm.sync();
       stepCount++;
+      afterMove();
     } else if (cmd == "b") {
+      beforeMove();
       xStepper.setDirection(false);
       xStepper.step();
       arm.sync();
       stepCount--;
+      afterMove();
     } else if (cmd == "w") {
+      beforeMove();
       yStepper.setDirection(true);
       yStepper.step();
       arm.sync();
       stepCount++;
+      afterMove();
     } else if (cmd == "s") {
+      beforeMove();
       yStepper.setDirection(false);
       yStepper.step();
       arm.sync();
       stepCount--;
+      afterMove();
     } else if (cmd == "u") {
+      beforeMove();
       zStepper.setDirection(true);
       zStepper.step();
       stepCount++;
+      afterMove();
     } else if (cmd == "d") {
+      beforeMove();
       zStepper.setDirection(false);
       zStepper.step();
       stepCount--;
+      afterMove();
     } else if (cmd == "c") {
       arm.closeGripper();
       return;
@@ -443,6 +460,9 @@ static void handleCommand(String cmd) {
       Serial.print("Trash: ");
       if (trashCalibrated) { Serial.print("("); Serial.print(trashX); Serial.print(", "); Serial.print(trashY); Serial.print(", "); Serial.print(trashZ); Serial.println(")"); }
       else                 { Serial.println("not set"); }
+      if (!fullCalibrated()) {
+        Serial.println("(full calibration not ready: board corners and trash must be set)");
+      }
       Serial.print("current Z="); Serial.print(arm.z()); Serial.println(" mm");
       return;
 
@@ -450,6 +470,24 @@ static void handleCommand(String cmd) {
       String sq = cmd.substring(5);
       sq.trim();
       sq.toLowerCase();
+      if (sq == "trash") {
+        if (!trashCalibrated) {
+          Serial.println("Trash not calibrated. Use setTrash first.");
+          return;
+        }
+        Serial.print("[goto trash] ");
+        Serial.print("from ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y());
+        Serial.print(") -> ("); Serial.print(trashX); Serial.print(", "); Serial.print(trashY);
+        Serial.print(")  Z="); Serial.println(trashZ);
+        if (!arm.moveXYZ(trashX, trashY, trashZ)) {
+          Serial.println("  FAILED: trash position unreachable from current pose");
+        } else {
+          Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", ");
+          Serial.print(arm.y()); Serial.print(", ");
+          Serial.print(arm.z()); Serial.println(")");
+        }
+        return;
+      }
       if (sq.length() != 2) { Serial.println("usage: goto <file><rank>, e.g. goto e4"); return; }
       char file = sq.charAt(0);
       int  rank = sq.charAt(1) - '0';
@@ -509,12 +547,14 @@ void setup() {
   Serial.println("home | moveXY x y | moveZ z | moveXYZ x y z | pos");
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
   Serial.println("cm = enter controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, h/1/8=setH1/A1/H8, q=exit)");
-  Serial.println("setA1 / setH1 / setH8 / setTrash = capture corners/trash | goto <sq> e.g. goto e4 | boardInfo");
+  Serial.println("setA1 / setH1 / setH8 / setTrash = capture corners/trash | goto <sq|trash> e.g. goto e4 | boardInfo");
   Serial.println("pick <sq> | put <sq> | put <piece> trash (trash uses calibrated XYZ)");
   Serial.println("pick <piece> <sq> | put <piece> <sq> (pieces: pawn, knight, bishop, rook, queen, king)");
 }
  
 void loop() {
+  updateDrivers();
+  
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
