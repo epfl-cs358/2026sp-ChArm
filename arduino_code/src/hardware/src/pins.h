@@ -26,11 +26,11 @@ const int DT_PIN = 19;
 const int SW_PIN = 24;
 
 // lcd pins
-const int RS_PIN = 32;
-const int E_PIN = 35;
-const int D4_PIN = 27;
-const int D5_PIN = 29;
-const int D6_PIN = 31;
-const int D7_PIN = 33;
+const int RS_PIN = 42;
+const int E_PIN = 40;
+const int D4_PIN = 36;
+const int D5_PIN = 34;
+const int D6_PIN = 32;
+const int D7_PIN = 30;
 
 #endif
