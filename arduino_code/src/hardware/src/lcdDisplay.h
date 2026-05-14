@@ -12,15 +12,15 @@ public:
     void begin();
 
     // Update both lines; only refreshes if content changed
-    void update(String line1, String line2);
+    void update(const String& line1, const String& line2);
 
     // Clear the display
     void clear();
 
 private:
     LiquidCrystal lcd;
-    String lastLine1;
-    String lastLine2;
+    char lastLine1[17];
+    char lastLine2[17];
 };
 
 #endif

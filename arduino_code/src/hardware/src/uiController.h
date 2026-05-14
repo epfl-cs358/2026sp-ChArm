@@ -31,6 +31,7 @@ private:
     unsigned long boardRequestTs = 0;
     const unsigned long boardTimeoutMs = 3000;
     UIMode lastMode;
+    bool pendingLcdUpdate = false;
 
     void processLine(const String& line);
     void handleHostCommand(const String& cmd);

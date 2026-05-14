@@ -6,7 +6,7 @@
 #include "scaraArm.h"
 #include "gripper.h"
 
-extern void calibrate();
+//extern void calibrate();
 extern ScaraJoint joint1;
 extern ScaraJoint joint2;
 extern LeadScrew leadScrew;
@@ -31,18 +31,20 @@ void UIController::begin(unsigned long baud) {
 }
 
 void UIController::loop() {
+
     // detect mode entry for one-shot actions (e.g., auto-start calibration)
     UIMode currentMode = uiState.getMode();
     if (currentMode != lastMode) {
         if (currentMode == CALIBRATION) {
             // auto-start calibration immediately on entering CALIBRATION
             sendMessage("CALIBRATE_START");
-            calibrate();
+            //calibrate();
             sendMessage("CALIBRATE_DONE");
             uiState.setMode(MENU);
             currentMode = uiState.getMode();
         }
         lastMode = currentMode;
+        pendingLcdUpdate = true;
     }
 
     // handle incoming serial lines
@@ -52,7 +54,7 @@ void UIController::loop() {
             String line = rxBuffer;
             rxBuffer = "";
             line.trim();
-            if (line.length()) processLine(line);
+            if (line.length()) { processLine(line); pendingLcdUpdate = true; }
         } else if (c != '\r') {
             rxBuffer += c;
             if (rxBuffer.length() > 256) rxBuffer = rxBuffer.substring(rxBuffer.length() - 256);
@@ -62,6 +64,7 @@ void UIController::loop() {
     // handle one button event per loop
     InputEvent ev = buttonInput.readEvent();
     if (ev != INPUT_NONE) {
+        pendingLcdUpdate = true;
         UIMode mode = uiState.getMode();
         switch (mode) {
             case MENU:
@@ -99,24 +102,24 @@ void UIController::loop() {
 
             case MANUAL_ACTIVE:
                 if (uiState.getSelectedControlTarget() == JOINT1) {
-                    if (ev == INPUT_NEXT) joint1.moveBy(MANUAL_JOINT_STEP_DEG);
-                    else if (ev == INPUT_PREV) joint1.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    if (ev == INPUT_NEXT); //joint1.moveBy(MANUAL_JOINT_STEP_DEG);
+                    else if (ev == INPUT_PREV); //joint1.moveBy(-MANUAL_JOINT_STEP_DEG);
                     else if (ev == INPUT_SELECT) {
-                        arm.sync();
+                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == JOINT2) {
-                    if (ev == INPUT_NEXT) joint2.moveBy(MANUAL_JOINT_STEP_DEG);
-                    else if (ev == INPUT_PREV) joint2.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    if (ev == INPUT_NEXT); //joint2.moveBy(MANUAL_JOINT_STEP_DEG);
+                    else if (ev == INPUT_PREV); //joint2.moveBy(-MANUAL_JOINT_STEP_DEG);
                     else if (ev == INPUT_SELECT) {
-                        arm.sync();
+                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == LEADSCREW) {
-                    if (ev == INPUT_NEXT) leadScrew.moveBy_mm(MANUAL_Z_STEP_MM);
-                    else if (ev == INPUT_PREV) leadScrew.moveBy_mm(-MANUAL_Z_STEP_MM);
+                    if (ev == INPUT_NEXT); //leadScrew.moveBy_mm(MANUAL_Z_STEP_MM);
+                    else if (ev == INPUT_PREV); //leadScrew.moveBy_mm(-MANUAL_Z_STEP_MM);
                     else if (ev == INPUT_SELECT) {
-                        arm.sync();
+                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == GRIPPER) {
@@ -126,9 +129,9 @@ void UIController::loop() {
                         uiState.gripperPrev();
                     } else if (ev == INPUT_SELECT) {
                         if (uiState.getGripperAction() == GRIPPER_OPEN) {
-                            gripper.open();
+                            //gripper.open();
                         } else {
-                            gripper.close();
+                            //gripper.close();
                         }
                         uiState.setMode(MANUAL_CONTROL);
                     }
@@ -157,10 +160,13 @@ void UIController::loop() {
         waitingForBoard = false;
         uiState.setMode(ERROR);
         sendMessage("BOARD_TIMEOUT");
+        pendingLcdUpdate = true;
     }
 
-    // update LCD to reflect current UIState
-    lcd.update(uiState.getLine1(), uiState.getLine2());
+    if (pendingLcdUpdate) {
+        lcd.update(uiState.getLine1(), uiState.getLine2());
+        pendingLcdUpdate = false;
+    }
 }
 
 void UIController::processLine(const String& line) {

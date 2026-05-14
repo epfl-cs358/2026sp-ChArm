@@ -220,7 +220,7 @@ String UIState::getLine2() const {
                 case START_GAME: return "> Start Game";
                 case DIFFICULTY_ITEM: return "> Difficulty";
                 case CALIBRATION_ITEM: return "> Calibration";
-                case MANUAL_CONTROL_ITEM: return "> Manual Cotrol";
+                case MANUAL_CONTROL_ITEM: return "> Manual Control";
             }
             return "?";
 
