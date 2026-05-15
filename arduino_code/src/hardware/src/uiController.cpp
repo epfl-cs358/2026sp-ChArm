@@ -72,12 +72,20 @@ void UIController::loop() {
                 else if (ev == INPUT_PREV) uiState.menuPrev();
                 else if (ev == INPUT_SELECT) {
                     if (uiState.getSelectedMenuItem() == START_GAME) {
-                        sendMessage("CHECK_BOARD");
-                        waitingForBoard = true;
-                        boardRequestTs = millis();
+                        uiState.setMode(COLOR_SELECT);
                     } else {
                         uiState.selectCurrentMenuItem();
                     }
+                }
+                break;
+
+            case COLOR_SELECT:
+                if (ev == INPUT_NEXT || ev == INPUT_PREV) uiState.colorToggle();
+                else if (ev == INPUT_SELECT) {
+                    sendMessage(String("SET_COLOR ") + String((int)uiState.getSelectedColor()));
+                    sendMessage("CHECK_BOARD");
+                    waitingForBoard = true;
+                    boardRequestTs = millis();
                 }
                 break;
 

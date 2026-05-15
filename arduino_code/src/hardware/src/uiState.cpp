@@ -10,6 +10,7 @@ UIState::UIState() {
     this->currentTurn = WHITE;
     this->gameStatus = WAITING_PLAYER;
     this->modeBeforeError = MENU;
+    this->selectedColor = WHITE;
 }
 
 void UIState::setMode(UIMode mode) {
@@ -25,6 +26,9 @@ UIMode UIState::getMode() const {
 
 void UIState::back() {
     switch (currentMode) {
+        case COLOR_SELECT:
+            setMode(MENU);
+            break;
         case DIFFICULTY:
             cancelDifficulty();
             break;
@@ -153,6 +157,14 @@ PlayerTurn UIState::getTurn() const {
     return currentTurn;
 }
 
+void UIState::colorToggle() {
+    selectedColor = (selectedColor == WHITE) ? BLACK : WHITE;
+}
+
+PlayerTurn UIState::getSelectedColor() const {
+    return selectedColor;
+}
+
 void UIState::setGameStatus(GameStatus status) {
     gameStatus = status;
 }
@@ -195,6 +207,9 @@ String UIState::getLine1() const {
                     return "Return to Menu";
             }
             return "?";
+
+        case COLOR_SELECT:
+            return "Play as...";
 
         case CALIBRATION:
             return "Calibration";
@@ -247,6 +262,9 @@ String UIState::getLine2() const {
                 return gripperAction == GRIPPER_OPEN ? "> Open" : "> Close";
             }
             return "Press to go Back";
+
+        case COLOR_SELECT:
+            return selectedColor == WHITE ? "> White" : "> Black";
 
         case CALIBRATION:
             return "Running...";
