@@ -17,10 +17,18 @@ public:
     // Clear the display
     void clear();
 
+    // Call frequently from loop(): periodically re-initializes the HD44780
+    // interface so a noise glitch that desyncs the 4-bit nibble counter
+    // self-heals instead of staying garbled until reset.
+    void tick();
+
 private:
     LiquidCrystal lcd;
     char lastLine1[17];
     char lastLine2[17];
+    unsigned long lastResyncMs;
+
+    static const unsigned long RESYNC_INTERVAL_MS = 1000;
 };
 
 #endif
