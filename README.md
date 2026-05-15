@@ -249,4 +249,4 @@ using `A1_X`, `A1_Y` and a per-square `STEP` (≈37.5 mm).
 
 ## 5. License
 
-Except where otherwise noted, all code in this repository is licensed under the terms of the [MIT license](https://mit-license.org/).
+All hardware designs are licensed under the terms of [Creative Commons Attribution 4.0](https://creativecommons.org/licenses/by/4.0/) — see [LICENSE-CC-BY-4.0](LICENSE-CC-BY-4.0). Except where otherwise noted, all code in this repository is licensed under the terms of the [MIT license](https://mit-license.org/) — see [LICENSE](LICENSE).
