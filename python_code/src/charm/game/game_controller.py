@@ -97,10 +97,6 @@ class GameController:
         if best_move is None:
             return
 
-        is_capture = board.is_capture(best_move)
-        is_castling = board.is_castling(best_move)
-        is_promotion = best_move.promotion is not None
-
         self.ui_link.bot_moving()
         execute_move(best_move.uci(), board)
 
