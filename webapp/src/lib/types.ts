@@ -222,6 +222,6 @@ export const DEFAULT_PARAMS: PipelineParams = {
   canny_high: 50,
   occupancy_std_weight: 0.4,
   white_threshold: 80.0,
-  black_threshold: 70.0,
+  black_threshold: 80.0,
   warp_size: 800,
 };
