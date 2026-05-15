@@ -243,3 +243,10 @@ A UCI move is translated into a Cartesian command sequence:
 
 Square-to-millimetre mapping is done by `coordinate_map.get_square_position()`
 using `A1_X`, `A1_Y` and a per-square `STEP` (≈37.5 mm).
+
+## 4. Future Plans and Improvement
+// List any
+
+## 5. License
+
+Except where otherwise noted, all code in this repository is licensed under the terms of the [MIT license](https://mit-license.org/).
