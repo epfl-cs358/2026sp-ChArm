@@ -7,9 +7,16 @@ from pathlib import Path
 # Change this IP if ESP32-CAM prints a new IP in Serial Monitor.
 ESP32_URL = "http://172.21.73.228/capture"
 
-# This points to: 2026sp-ChArm/python_code/latest_raw.jpg
-ROOT = Path(__file__).resolve().parents[3]
-RAW_PATH = ROOT / "latest_raw.jpg"
+# This file is:
+#   python_code/src/charm/vision/transferphoto.py
+#
+# parents[3] is:
+#   python_code/
+PYTHON_CODE_ROOT = Path(__file__).resolve().parents[3]
+
+# Save ESP32-CAM capture here:
+#   python_code/latest_raw.jpg
+RAW_PATH = PYTHON_CODE_ROOT / "latest_raw.jpg"
 
 
 def fetch_raw_image() -> str:
