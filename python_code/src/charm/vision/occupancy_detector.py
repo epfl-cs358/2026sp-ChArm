@@ -109,7 +109,7 @@ def draw_occupancy_debug(
             label,
             (cell.x1 + 5, cell.y1 + 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.30,
             color,
             1,
             cv2.LINE_AA,
