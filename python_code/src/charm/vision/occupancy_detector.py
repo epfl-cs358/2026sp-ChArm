@@ -51,15 +51,12 @@ def compute_occupancy_score(
 
 def detect_occupancy(
     cells: list[SquareCell],
-    threshold: float = 8,
-    canny_low: int = 15,
-    canny_high: int = 50,
-    std_weight: float = 0.4,
+    threshold: float = 4.0,
 ) -> list[OccupancyResult]:
     results: list[OccupancyResult] = []
 
     for cell in cells:
-        score = compute_occupancy_score(cell.image, canny_low, canny_high, std_weight)
+        score = compute_occupancy_score(cell.image)
         occupied = score > threshold
 
         results.append(

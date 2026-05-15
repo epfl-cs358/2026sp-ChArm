@@ -5,7 +5,6 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { Chess, Square } from "chess.js";
 import {
-  Activity,
   ArrowRight,
   Bot,
   Camera,
@@ -26,17 +25,31 @@ import {
   CalibrationData,
   DEFAULT_PARAMS,
   GameStepResult,
+  RobotPoint3D,
   PipelineResult,
   RobotStatus,
 } from "@/lib/types";
 import ChessBoard from "@/components/ChessBoard";
+import DebugImages from "@/components/DebugImages";
+import ParamControls from "@/components/ParamControls";
+import ManualCalibration from "@/components/ManualCalibration";
 import { BASE as ARM_BASE, type ArmAngles, type ArmDebugTarget, type ArmMove } from "@/components/RobotArmOverlay";
-import VisionImage from "@/components/VisionImage";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
+
+const DEBUG_PANELS = [
+  { key: "original", label: "Raw" },
+  { key: "board_edges_debug", label: "Board Edges" },
+  { key: "first_warp", label: "Board Warp" },
+  { key: "refined_warp", label: "Refined Warp" },
+  { key: "preprocessed", label: "Preprocessed" },
+  { key: "grid_debug", label: "Grid" },
+  { key: "occupancy_debug", label: "Occupancy" },
+  { key: "piece_color_debug", label: "Piece Colors" },
+] as const;
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
@@ -110,6 +123,28 @@ function uciToArmMove(uci: string, san: string, id: number): ArmMove {
     to: uci.slice(2, 4),
     label: `robot ${san}`,
     piece: "♟",
+  };
+}
+
+function robotPositionToBoardTarget(
+  position: Pick<RobotPoint3D, "x" | "y">,
+  status: RobotStatus | null
+): ArmDebugTarget | null {
+  const robotCalibration = status?.robot_calibration;
+  if (!robotCalibration?.exists) return null;
+
+  const { a1, file_vector, rank_vector } = robotCalibration.calibration;
+  const dx = position.x - a1.x;
+  const dy = position.y - a1.y;
+  const det = file_vector.x * rank_vector.y - file_vector.y * rank_vector.x;
+  if (Math.abs(det) < 0.001) return null;
+
+  const fileIndex = (dx * rank_vector.y - dy * rank_vector.x) / det;
+  const rankIndex = (file_vector.x * dy - file_vector.y * dx) / det;
+
+  return {
+    x: fileIndex + 0.5,
+    y: 7.5 - rankIndex,
   };
 }
 
@@ -338,6 +373,7 @@ export default function Dashboard() {
   const [armView, setArmView] = useState<"Board" | "Arm">("Board");
   const [armDebug, setArmDebug] = useState(false);
   const [armDebugTarget, setArmDebugTarget] = useState<ArmDebugTarget>({ x: 4, y: 6 });
+  const [armIdleTarget, setArmIdleTarget] = useState<ArmDebugTarget | null>(null);
   const [armOpacity, setArmOpacity] = useState(0.78);
   const [expectedOpacity, setExpectedOpacity] = useState(0.26);
   const [scaraPiecesVisible, setScaraPiecesVisible] = useState(true);
@@ -351,15 +387,22 @@ export default function Dashboard() {
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
   const [calibration, setCalibration] = useState<CalibrationData | null>(null);
+  const [params, setParams] = useState<typeof DEFAULT_PARAMS>(() => ({ ...DEFAULT_PARAMS }));
+  const [showParamsModal, setShowParamsModal] = useState(false);
+  const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
   const armMoveId = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getRobotStatus(), api.getCalibration()])
-      .then(([robot, vision]) => {
+    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams()])
+      .then(([robot, vision, saved]) => {
         if (cancelled) return;
         setRobotStatus(robot);
         setCalibration(vision);
+        setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
+        if (saved.exists && saved.data?.params) {
+          setParams({ ...DEFAULT_PARAMS, ...saved.data.params });
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -388,13 +431,19 @@ export default function Dashboard() {
         ...current,
         response.responses.length > 0 ? `Calibrate: ${response.responses.at(-1)}` : "Calibrate: command sent",
       ]);
+      setArmIdleTarget(
+        robotPositionToBoardTarget(
+          response.position ?? robotStatus?.robot_calibration.calibration.home ?? { x: 0, y: 0 },
+          robotStatus
+        )
+      );
       setArmCalibrated(true);
       setTurnState("human_turn");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Arm calibration failed");
       setTurnState("error");
     }
-  }, [turnState]);
+  }, [robotStatus, turnState]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const finishRobotMove = useCallback((_finishedMove: ArmMove) => {
@@ -417,7 +466,7 @@ export default function Dashboard() {
     try {
       const response = await api.processGameStep({
         moves,
-        params: DEFAULT_PARAMS,
+        params,
         capture: true,
         max_mismatches: 0,
       });
@@ -498,7 +547,7 @@ export default function Dashboard() {
       setError(e instanceof Error ? e.message : "Failed to process turn");
       setTurnState("error");
     }
-  }, [armCalibrated, game, moves, requestBestMove, turnState]);
+  }, [armCalibrated, game, moves, params, requestBestMove, turnState]);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -528,7 +577,7 @@ export default function Dashboard() {
       const capture = await api.captureFromCamera();
       setLastCapturePath(capture.path);
       setTurnState("processing");
-      const pipeline = await api.runPipeline({ ...DEFAULT_PARAMS, image_path: capture.path });
+      const pipeline = await api.runPipeline({ ...params, image_path: capture.path });
       setResult(pipeline);
       setMoveLog((current) => [...current, `Pipeline: ${pipeline.stats.occupied} pieces, ${pipeline.total_ms.toFixed(0)} ms`]);
       setTurnState(armCalibrated ? "human_turn" : "arm_calibrate");
@@ -538,7 +587,7 @@ export default function Dashboard() {
     } finally {
       setTestBusy(null);
     }
-  }, [armCalibrated, busy, testBusy]);
+  }, [armCalibrated, busy, params, testBusy]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -675,6 +724,7 @@ export default function Dashboard() {
                 mode={turnState === "arm_calibrating" ? "calibrating" : robotMove ? "playing" : "idle"}
                 onDone={finishRobotMove}
                 debugTarget={armDebug ? armDebugTarget : null}
+                idleTarget={armCalibrated ? armIdleTarget : null}
                 opacity={armOpacity}
                 expectedOpacity={expectedOpacity}
                 onAnglesChange={setArmAngles}
@@ -752,7 +802,17 @@ export default function Dashboard() {
         <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
           <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
             <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Vision Pipeline</h2>
-            <Badge variant="outline" className="font-jetbrains" style={{ borderColor: "var(--charm-border)", color: "var(--charm-cyan)" }}>camera on</Badge>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowParamsModal(true)}
+                className="flex items-center gap-1.5 rounded border px-2 py-1 font-jetbrains text-xs transition-colors"
+                style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "transparent" }}
+              >
+                <Settings className="size-3" />
+                Params
+              </button>
+              <Badge variant="outline" className="font-jetbrains" style={{ borderColor: "var(--charm-border)", color: "var(--charm-cyan)" }}>camera on</Badge>
+            </div>
           </CardHeader>
           <CardContent className="px-4 pb-4 space-y-4">
             <div className="grid grid-cols-3 gap-2">
@@ -773,14 +833,15 @@ export default function Dashboard() {
               <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Latest capture</p>
               <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>{lastCapturePath ?? result?.image_path ?? "waiting"}</p>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <ImagePanel title="Raw photo" image={result?.original} active={turnState === "capturing"} />
-              <ImagePanel title="Preprocessed" image={result?.preprocessed} active={turnState === "processing"} />
-              <VisionImage title="Grid" image={result?.preprocessed} overlay="grid" />
-              <VisionImage title="Occupancy" image={result?.preprocessed} overlay="occupancy" occupancyMatrix={result?.occupancy_matrix} occupancyScores={result?.occupancy_scores} />
-              <VisionImage title="Colors" image={result?.refined_warp} overlay="colors" colorLabels={result?.color_labels} />
-              <ImagePanel title="Warped" image={result?.refined_warp} />
-            </div>
+            <DebugImages
+              panels={DEBUG_PANELS.map(({ key, label }) => ({
+                key,
+                label,
+                b64: result?.[key as keyof PipelineResult] as string | undefined,
+              }))}
+              gridClassName="grid grid-cols-2 gap-3"
+              imageMaxHeight={210}
+            />
 
             {result && (
               <div className="grid grid-cols-2 gap-3">
@@ -824,19 +885,62 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {showParamsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-8 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.7)" }}
+          onClick={() => setShowParamsModal(false)}
+        >
+          <div
+            className="mx-4 w-full max-w-md rounded-md border shadow-2xl !max-w-[calc(100%-18rem)]"
+            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
+              <div className="flex items-center gap-2">
+                <Settings className="size-4" style={{ color: "var(--charm-cyan)" }} />
+                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Pipeline Parameters</span>
+              </div>
+              <button onClick={() => setShowParamsModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+            </div>
+            <div className="max-h-[85vh] overflow-y-auto p-4 ">
+              <ParamControls params={params} onChange={setParams} onOpenManualCalibration={() => { setShowParamsModal(false); setShowManualCalibrationModal(true); }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showManualCalibrationModal && (
+        <div 
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.7)" }}
+          onClick={() => setShowManualCalibrationModal(false)}
+        >
+          <div
+            className="w-full max-w-7xl max-h-[95vh] overflow-y-auto rounded-md border shadow-2xl bg-black"
+            style={{ borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
+              <span className="font-jetbrains text-sm font-semibold text-white">Manual Calibration</span>
+              <button onClick={() => setShowManualCalibrationModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+            </div>
+            <div className="bg-background">
+              <ManualCalibration imagePath={lastCapturePath} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {overlayOpen && result && (
         <div className="fixed bottom-4 right-4 z-50 w-90 max-w-[calc(100vw-2rem)] rounded-md border p-3 shadow-2xl" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-          <div className="mb-2 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Activity className="size-4" style={{ color: "var(--charm-cyan)" }} />
-              <p className="font-jetbrains text-xs font-semibold" style={{ color: "var(--charm-text)" }}>Latest camera analysis</p>
-            </div>
+          <div className="mb-2 flex justify-end">
             <button onClick={() => setOverlayOpen(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>close</button>
           </div>
           <div className="grid grid-cols-3 gap-2">
             <ImagePanel title="raw" image={result.original} />
             <ImagePanel title="pre" image={result.preprocessed} />
-            <VisionImage title="colors" image={result.refined_warp} overlay="colors" colorLabels={result.color_labels} />
+            <ImagePanel title="colors" image={result.piece_color_debug} />
           </div>
           <p className="mt-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
             {result.image_path ?? "latest frame"} · {stepResult?.inference.move_uci ? `move ${stepResult.inference.move_uci}` : "move pending"}

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,7 +19,10 @@ from pydantic import BaseModel, Field
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON_CODE_DIR = REPO_ROOT / "python_code"
 SRC_PATH = PYTHON_CODE_DIR / "src"
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_PATH))
+
+from webapp_backend import robot_adapter
 
 from charm.vision.four_point_calibration import (
     FourPointCalibration,
@@ -48,41 +51,25 @@ from charm.vision.occupancy_detector import (
     draw_occupancy_debug,
     occupancy_to_matrix,
 )
-from charm.vision.piece_color_detector import draw_piece_color_debug, reload_model
-from charm.vision.piece_color_knn import (
-    DEFAULT_MODEL_PATH,
-    build_color_dataset,
-    classify_piece_colors,
-    compute_image_median_L,
-    load_color_model,
-    train_color_classifier,
-)
-from charm.game.state_tracker import infer_move_from_bitmaps
-from charm.arduino.arduino_bridge import (
-    ArduinoBridge,
-    MoveFlags,
-    build_move_commands,
-    find_arduino_port,
-    parse_position_response,
-)
-from charm.arduino.coordinate_map import (
-    DEFAULT_CONFIG_PATH as ROBOT_CAL_PATH,
-    BoardCalibration,
-    load_calibration as load_robot_calibration,
-    save_calibration as save_robot_calibration,
-)
+from charm.vision.piece_color_detector import draw_piece_color_debug
+
+_STATE_TRACKER_PATH = SRC_PATH / "charm" / "game" / "state_tracker.py"
+_STATE_TRACKER_SPEC = importlib.util.spec_from_file_location("charm_webapp_state_tracker", _STATE_TRACKER_PATH)
+if _STATE_TRACKER_SPEC is None or _STATE_TRACKER_SPEC.loader is None:
+    raise RuntimeError(f"Could not load state tracker from {_STATE_TRACKER_PATH}")
+_STATE_TRACKER_MODULE = importlib.util.module_from_spec(_STATE_TRACKER_SPEC)
+sys.modules[_STATE_TRACKER_SPEC.name] = _STATE_TRACKER_MODULE
+_STATE_TRACKER_SPEC.loader.exec_module(_STATE_TRACKER_MODULE)
+infer_move_from_bitmaps = _STATE_TRACKER_MODULE.infer_move_from_bitmaps
 
 BOARD_CAL_PATH = PYTHON_CODE_DIR / "board_calibration.json"
 INNER_CAL_PATH = PYTHON_CODE_DIR / "inner_warp_calibration.json"
+ROBOT_CAL_PATH = PYTHON_CODE_DIR / "robot_calibration.json"
 RAW_IMAGE_PATH = REPO_ROOT / "latest_raw.jpg"
 LEGACY_RAW_IMAGE_PATH = PYTHON_CODE_DIR / "latest_raw.jpg"
 SAVED_PARAMS_PATH = REPO_ROOT / "saved_pipeline_params.json"
 ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
-
-_robot_bridge: Optional[ArduinoBridge] = None
-_robot_bridge_key: Optional[tuple[Optional[str], int, bool]] = None
-_robot_bridge_lock = threading.RLock()
 
 app = FastAPI(title="ChArm Vision API", version="1.0.0")
 app.add_middleware(
@@ -92,28 +79,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_knn_model = None
-
-
-def _get_knn_model():
-    global _knn_model
-    if _knn_model is None:
-        _knn_model = load_color_model()
-    return _knn_model
-
-
 class PipelineParams(BaseModel):
-    auto_detect_board: bool = True
-    apply_inner_warp: bool = False
+    auto_detect_board: bool = False
+    apply_inner_warp: bool = True
     board_canny_low: int = 50
     board_canny_high: int = 150
     board_dilation_iterations: int = 1
     board_min_area: float = 5000.0
-    board_max_side_ratio: float = 1.18
+    board_max_side_ratio: float = 1.35
     board_min_area_ratio: float = 0.08
     board_max_area_ratio: float = 0.80
     board_min_color_ratio: float = 0.12
-    board_padding_ratio: float = 0.006
+    board_padding_ratio: float = 0.015
     board_hough_refine: bool = False
     board_hough_canny_low: int = 30
     board_hough_canny_high: int = 100
@@ -130,14 +107,12 @@ class PipelineParams(BaseModel):
     brightness_boost: float = 1.05
     sharpen_alpha: float = 1.35
     sharpen_beta: float = -0.35
-    occupancy_threshold: float = 25.0
+    occupancy_threshold: float = 4.0
     canny_low: int = 15
     canny_high: int = 50
     occupancy_std_weight: float = 0.4
-    white_threshold: float = 125.0
+    white_threshold: float = 110.5
     black_threshold: float = 110.0
-    knn_n_neighbors: int = 5
-    color_mode: str = "threshold"  # "threshold" | "knn"
     warp_size: int = 800
     image_path: Optional[str] = None
 
@@ -147,11 +122,33 @@ class CalibrationUpdate(BaseModel):
     inner: Optional[dict] = None
 
 
+class BoardCornerCalibrationPayload(BaseModel):
+    top_left: tuple[int, int]
+    top_right: tuple[int, int]
+    bottom_right: tuple[int, int]
+    bottom_left: tuple[int, int]
+    image_path: Optional[str] = None
+    warp_size: int = 800
+
+
+class ImagePathPayload(BaseModel):
+    path: str
+
+
 class SavedParamsPayload(BaseModel):
     params: PipelineParams
     score: Optional[dict] = None
     labels: Optional[list[list[str]]] = None
     source_image: Optional[str] = None
+
+
+class PipelineSnapshotPayload(BaseModel):
+    params: PipelineParams
+    images: dict[str, str]
+    result: Optional[dict] = None
+    labels: Optional[list[list[str]]] = None
+    source_image: Optional[str] = None
+    name: Optional[str] = None
 
 
 class AnnotationPayload(BaseModel):
@@ -180,7 +177,8 @@ class RobotCalibrationPayload(BaseModel):
     z_down: float
     home: Point3DPayload
     capture_bin: Point3DPayload
-    piece_heights: dict[str, float] = Field(default_factory=dict)
+    pick_z: dict[str, float] = Field(default_factory=dict)
+    place_z: dict[str, float] = Field(default_factory=dict)
 
 
 class RobotCommandPayload(BaseModel):
@@ -210,6 +208,21 @@ class GameStepPayload(BaseModel):
 
 class CameraCapturePayload(BaseModel):
     url: Optional[str] = None
+    port: Optional[str] = None
+    baud: int = 9600
+
+
+def _normalize_camera_url(url: Optional[str]) -> Optional[str]:
+    if url is None:
+        return None
+    cleaned = url.strip()
+    if not cleaned:
+        return None
+    if not cleaned.startswith(("http://", "https://")):
+        cleaned = f"http://{cleaned}"
+    if "/" not in cleaned.removeprefix("http://").removeprefix("https://"):
+        cleaned = f"{cleaned.rstrip('/')}/capture"
+    return cleaned
 
 
 def _board_from_uci_moves(moves: list[str]) -> chess.Board:
@@ -220,6 +233,21 @@ def _board_from_uci_moves(moves: list[str]) -> chess.Board:
             raise ValueError(f"Illegal move for current board state: {uci}")
         board.push(move)
     return board
+
+
+def _safe_snapshot_name(name: Optional[str]) -> str:
+    if name:
+        cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
+        cleaned = cleaned.strip("_")
+        if cleaned:
+            return cleaned[:80]
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _write_b64_image(path: Path, data: str) -> None:
+    if "," in data:
+        data = data.split(",", 1)[1]
+    path.write_bytes(base64.b64decode(data))
 
 
 def to_b64(img: np.ndarray, quality: int = 85) -> str:
@@ -305,25 +333,6 @@ def _resolve_board_calibration(
     return board_cal, "saved", draw_calibration_points(image, board_cal)
 
 
-def _extract_cells_for_training(
-    image_bgr: np.ndarray,
-    p: PipelineParams,
-) -> list[np.ndarray]:
-    """Preprocess + warp + grid-split, return 64 color crops (unenhanced, warped)."""
-    try:
-        board_cal, _, _ = _resolve_board_calibration(image_bgr, p)
-        warped = warp_from_calibration(image_bgr, board_cal, p.warp_size)
-        if p.apply_inner_warp:
-            inner_cal = load_inner_warp_calibration(str(INNER_CAL_PATH))
-            warped = refine_board_with_inner_corners(warped, inner_cal, p.warp_size)
-    except Exception:
-        warped = cv2.resize(image_bgr, (p.warp_size, p.warp_size))
-
-    preprocessed = preprocess(warped, p)
-    x_lines, y_lines = detect_8x8_grid_lines(preprocessed)
-    color_cells = extract_8x8_cells(warped, x_lines, y_lines)
-    return [c.image for c in color_cells]
-
 
 def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
     results: dict = {}
@@ -367,7 +376,12 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
     occupancy_cells = extract_8x8_cells(preprocessed, x_lines, y_lines)
     color_cells = extract_8x8_cells(warped, x_lines, y_lines)
     scores = [
-        compute_occupancy_score(c.image, p.canny_low, p.canny_high, p.occupancy_std_weight)
+        compute_occupancy_score(
+            c.image,
+            canny_low=p.canny_low,
+            canny_high=p.canny_high,
+            std_weight=p.occupancy_std_weight,
+        )
         for c in occupancy_cells
     ]
     occupancy_results = [
@@ -390,47 +404,14 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
     timings["occupancy_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
     t = time.perf_counter()
-    crops = [c.image for c in color_cells]
-    occupancy_mask = [r.occupied for r in occupancy_results]
-
     white_bitmap = [[0] * 8 for _ in range(8)]
     black_bitmap = [[0] * 8 for _ in range(8)]
     brightness_grid = [[0.0] * 8 for _ in range(8)]
     color_labels = [["empty"] * 8 for _ in range(8)]
 
-    from charm.vision.piece_color_detector import PieceColorResult
+    from charm.vision.piece_color_detector import detect_piece_colors
 
-    if p.color_mode == "knn":
-        model = _get_knn_model()
-        if model is not None:
-            median_L = compute_image_median_L(crops)
-            color_preds = classify_piece_colors(crops, occupancy_mask, model, {"median_L": median_L})
-            color_results = [
-                PieceColorResult(
-                    row=color_cells[i].row,
-                    col=color_cells[i].col,
-                    occupied=occupancy_mask[i],
-                    color=color_preds[i] if occupancy_mask[i] and color_preds[i] in ("white", "black") else "unknown",
-                    brightness_score=0.0,
-                )
-                for i in range(len(color_cells))
-            ]
-        else:
-            color_results = [
-                PieceColorResult(row=c.row, col=c.col, occupied=occupancy_mask[i], color="unknown", brightness_score=0.0)
-                for i, c in enumerate(color_cells)
-            ]
-    else:
-        # threshold mode — original logic
-        from charm.vision.piece_color_detector import classify_piece_color_threshold
-        color_results = []
-        for i, cell in enumerate(color_cells):
-            occ = occupancy_mask[i]
-            if not occ:
-                color_results.append(PieceColorResult(row=cell.row, col=cell.col, occupied=False, color="unknown", brightness_score=0.0))
-            else:
-                label, score = classify_piece_color_threshold(cell.image, p.white_threshold, p.black_threshold)
-                color_results.append(PieceColorResult(row=cell.row, col=cell.col, occupied=True, color=label, brightness_score=score))
+    color_results = detect_piece_colors(color_cells, occupancy_results, p.white_threshold, p.black_threshold)
 
     for r in color_results:
         brightness_grid[r.row][r.col] = round(r.brightness_score, 1)
@@ -476,182 +457,92 @@ def health():
 
 def _robot_calibration_response() -> dict:
     exists = ROBOT_CAL_PATH.exists()
-    calibration = load_robot_calibration(ROBOT_CAL_PATH)
-    samples = {square: calibration.square_center(square) for square in ("a1", "b1", "a2", "e4", "h8")}
+    calibration = robot_adapter.load_calibration(ROBOT_CAL_PATH)
+    samples = {square: robot_adapter.square_center(calibration, square) for square in ("a1", "b1", "a2", "e4", "h8")}
     return {
         "exists": exists,
         "path": str(ROBOT_CAL_PATH),
-        "calibration": calibration.to_dict(),
+        "calibration": calibration,
         "samples": samples,
     }
 
 
-def _close_robot_bridge() -> None:
-    global _robot_bridge, _robot_bridge_key
-    with _robot_bridge_lock:
-        if _robot_bridge is not None:
-            _robot_bridge.close()
-        _robot_bridge = None
-        _robot_bridge_key = None
-
-
-def _get_robot_bridge(port: Optional[str], baud: int, require_calibration: bool) -> ArduinoBridge:
-    global _robot_bridge, _robot_bridge_key
-    key = (port, baud, require_calibration)
-    with _robot_bridge_lock:
-        if _robot_bridge is None or _robot_bridge_key != key:
-            _close_robot_bridge()
-            calibration = load_robot_calibration(ROBOT_CAL_PATH, require_exists=require_calibration)
-            _robot_bridge = ArduinoBridge(port=port, baud=baud, calibration=calibration)
-            _robot_bridge_key = key
-        return _robot_bridge
-
-
 @app.get("/api/robot/status")
 def robot_status():
-    ports: list[dict] = []
-    try:
-        import serial.tools.list_ports
-
-        ports = [
-            {"device": p.device, "description": p.description, "manufacturer": p.manufacturer}
-            for p in serial.tools.list_ports.comports()
-        ]
-    except Exception:
-        ports = []
-
-    detected_port = None
-    try:
-        detected_port = find_arduino_port()
-    except Exception:
-        detected_port = None
-
-    with _robot_bridge_lock:
-        serial_connected = _robot_bridge is not None
-        active_port = _robot_bridge.port if _robot_bridge is not None else None
+    active_port = robot_adapter.connected_port()
 
     return {
-        "serial_connected": serial_connected,
+        "serial_connected": active_port is not None,
         "active_port": active_port,
-        "detected_port": detected_port,
-        "ports": ports,
+        "detected_port": robot_adapter.find_port(),
+        "ports": robot_adapter.list_ports(),
         "robot_calibration": _robot_calibration_response(),
     }
 
 
 @app.put("/api/robot/calibration")
 def update_robot_calibration(payload: RobotCalibrationPayload):
-    a8 = (
-        payload.a1.x + payload.h8.x - payload.h1.x,
-        payload.a1.y + payload.h8.y - payload.h1.y,
-    )
-    calibration = BoardCalibration.from_three_squares(
-        a1=(payload.a1.x, payload.a1.y),
-        h1=(payload.h1.x, payload.h1.y),
-        a8=a8,
-        z_hover=payload.z_hover,
-        z_down=payload.z_down,
-        home=(payload.home.x, payload.home.y, payload.home.z),
-        capture_bin=(payload.capture_bin.x, payload.capture_bin.y, payload.capture_bin.z),
-        piece_heights=payload.piece_heights,
-    )
-    save_robot_calibration(calibration, ROBOT_CAL_PATH)
-    _close_robot_bridge()
+    payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    robot_adapter.save_calibration(ROBOT_CAL_PATH, payload_data)
     return {"status": "saved", **_robot_calibration_response()}
 
 
 @app.post("/api/robot/disconnect")
 def disconnect_robot():
-    _close_robot_bridge()
+    robot_adapter.close()
     return {"status": "disconnected"}
 
 
 @app.get("/api/robot/position")
 def robot_position(port: Optional[str] = None, baud: int = 9600):
     try:
-        with _robot_bridge_lock:
-            bridge = _get_robot_bridge(port, baud, require_calibration=False)
-            responses = bridge.position()
-        return {
-            "status": "ok",
-            "position": parse_position_response(responses),
-            "responses": responses,
-            "timestamp": time.time(),
-        }
+        responses = robot_adapter.send_commands(["pos"], port, baud)
+        return robot_adapter.response(responses, ROBOT_CAL_PATH)
     except Exception as e:
-        _close_robot_bridge()
+        robot_adapter.close()
         raise HTTPException(500, str(e))
 
 
 @app.post("/api/robot/command")
 def robot_command(payload: RobotCommandPayload):
     try:
-        with _robot_bridge_lock:
-            requires_calibration = False
-            bridge = _get_robot_bridge(payload.port, payload.baud, requires_calibration)
-
-            if payload.command == "pos":
-                responses = bridge.position()
-            elif payload.command == "arm-calibrate":
-                responses = bridge.calibrate_arm()
-                responses.extend(bridge.position())
-            elif payload.command == "board-info":
-                responses = bridge.board_info()
-            elif payload.command == "board-calibrate":
-                responses = bridge.start_board_calibration()
-            elif payload.command == "board-cal-key":
-                if payload.raw is None:
-                    raise HTTPException(400, "raw calibration key is required")
-                responses = bridge.board_calibration_key(payload.raw.lower())
-            elif payload.command == "board-cal-clear":
-                responses = bridge.clear_board_calibration()
-            elif payload.command == "capture-corner":
-                if payload.corner is None:
-                    raise HTTPException(400, "corner is required")
-                responses = bridge.capture_board_corner(payload.corner)
-            elif payload.command == "goto":
-                if payload.x is None or payload.y is None or payload.z is None:
-                    raise HTTPException(400, "x, y, z are required")
-                responses = bridge.move_xyz(payload.x, payload.y, payload.z)
-            elif payload.command == "jog":
-                if payload.raw is None:
-                    raise HTTPException(400, "raw jog key is required")
-                responses = bridge.jog(payload.raw.lower())
-            elif payload.command == "move-square":
-                if payload.square is None:
-                    raise HTTPException(400, "square is required")
-                z = bridge.calibration.z_down if payload.down else bridge.calibration.z_hover
-                responses = bridge.move_to_square(payload.square, z=z)
-            elif payload.command == "move":
-                if payload.uci is None:
-                    raise HTTPException(400, "uci is required")
-                commands = build_move_commands(
-                    payload.uci,
-                    bridge.calibration,
-                    MoveFlags(payload.capture, payload.castling, payload.promotion),
-                    piece_type=payload.piece_type,
-                )
-                responses = []
-                for command in commands:
-                    responses.extend(bridge.send_command(command))
-            elif payload.command == "raw":
-                if payload.raw is None:
-                    raise HTTPException(400, "raw is required")
-                responses = bridge.send_command(payload.raw)
-            else:
-                raise HTTPException(400, f"Unknown robot command: {payload.command}")
+        payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        commands = robot_adapter.commands_for_request(payload_data)
+        responses = robot_adapter.send_commands(commands, payload.port, payload.baud)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except HTTPException:
         raise
     except Exception as e:
-        _close_robot_bridge()
+        robot_adapter.close()
         raise HTTPException(500, str(e))
 
-    return {
-        "status": "ok",
-        "responses": responses,
-        "position": parse_position_response(responses),
-        "timestamp": time.time(),
-    }
+    return robot_adapter.response(responses, ROBOT_CAL_PATH)
+
+
+@app.post("/api/robot/inject-cal")
+def inject_board_cal(payload: RobotCommandPayload):
+    try:
+        payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        payload_data["command"] = "inject-cal"
+        commands = robot_adapter.commands_for_request(payload_data)
+        responses = robot_adapter.send_commands(commands, payload.port, payload.baud)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        robot_adapter.close()
+        raise HTTPException(500, str(e))
+    return robot_adapter.response(responses, ROBOT_CAL_PATH)
+
+
+@app.get("/api/robot/eeprom")
+def robot_eeprom(port: Optional[str] = None, baud: int = 9600):
+    try:
+        responses = robot_adapter.send_commands(["boardInfo"], port, baud)
+        return robot_adapter.response(responses, ROBOT_CAL_PATH)
+    except Exception as e:
+        robot_adapter.close()
+        raise HTTPException(500, str(e))
 
 
 @app.post("/api/pipeline/run")
@@ -679,6 +570,46 @@ async def pipeline_upload(file: UploadFile = File(...), params_json: str = "{}")
     result = run_pipeline(img, params)
     result["timestamp"] = time.time()
     return result
+
+
+@app.post("/api/pipeline/snapshot")
+def save_pipeline_snapshot(payload: PipelineSnapshotPayload):
+    snapshot_dir = PYTHON_CODE_DIR / "webapp_snapshots" / _safe_snapshot_name(payload.name)
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        image_paths: dict[str, str] = {}
+        for key, value in payload.images.items():
+            if not value:
+                continue
+            image_path = snapshot_dir / f"{key}.jpg"
+            _write_b64_image(image_path, value)
+            image_paths[key] = str(image_path)
+
+        summary = {
+            "saved_at": time.time(),
+            "snapshot_dir": str(snapshot_dir),
+            "source_image": payload.source_image,
+            "params": payload.params.model_dump(),
+            "labels": payload.labels,
+            "result": payload.result or {},
+            "images": image_paths,
+            "python_inputs": {
+                "refined_warp": image_paths.get("refined_warp"),
+                "raw": image_paths.get("original"),
+            },
+        }
+        summary_path = snapshot_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save pipeline snapshot: {e}")
+
+    return {
+        "status": "saved",
+        "path": str(snapshot_dir),
+        "summary_path": str(summary_path),
+        "refined_warp_path": image_paths.get("refined_warp"),
+    }
 
 
 @app.post("/api/game/step")
@@ -765,6 +696,44 @@ def update_calibration(update: CalibrationUpdate):
     return {"status": "saved"}
 
 
+@app.post("/api/calibration/board-corners")
+def calibrate_board_corners(payload: BoardCornerCalibrationPayload):
+    calibration = FourPointCalibration(
+        top_left=payload.top_left,
+        top_right=payload.top_right,
+        bottom_right=payload.bottom_right,
+        bottom_left=payload.bottom_left,
+    )
+
+    path = Path(payload.image_path) if payload.image_path else resolve_latest_raw_path()
+    if not path.exists():
+        raise HTTPException(404, f"Image not found: {path}")
+    image = cv2.imread(str(path))
+    if image is None:
+        raise HTTPException(400, f"Failed to decode image: {path}")
+
+    try:
+        save_four_point_calibration(calibration, BOARD_CAL_PATH)
+        first_warp = warp_from_calibration(image, calibration, output_size=payload.warp_size)
+        debug = draw_calibration_points(image, calibration)
+    except Exception as e:
+        raise HTTPException(500, f"Board calibration failed: {e}")
+
+    return {
+        "status": "saved",
+        "path": str(BOARD_CAL_PATH),
+        "image_path": str(path),
+        "board": {
+            "top_left": list(calibration.top_left),
+            "top_right": list(calibration.top_right),
+            "bottom_right": list(calibration.bottom_right),
+            "bottom_left": list(calibration.bottom_left),
+        },
+        "first_warp": to_b64(first_warp),
+        "debug": to_b64(debug),
+    }
+
+
 @app.get("/api/images/list")
 def list_raw_images():
     candidates = sorted(
@@ -795,12 +764,24 @@ def get_raw_image():
     return {"image": to_b64(img), "path": str(path), "timestamp": time.time()}
 
 
+@app.post("/api/image/read")
+def read_image(payload: ImagePathPayload):
+    path = Path(payload.path)
+    if not path.exists():
+        raise HTTPException(404, f"Image not found: {path}")
+    img = cv2.imread(str(path))
+    if img is None:
+        raise HTTPException(400, f"Failed to decode image: {path}")
+    return {"image": to_b64(img), "path": str(path), "timestamp": time.time()}
+
+
 @app.post("/api/capture")
 def capture_from_camera(payload: CameraCapturePayload):
     try:
         from charm.vision.transferphoto import fetch_raw_image
 
-        path = fetch_raw_image(payload.url)
+        url = _normalize_camera_url(payload.url)
+        path = fetch_raw_image(url) if url else fetch_raw_image()
         img = cv2.imread(path)
         if img is None:
             raise RuntimeError(f"Failed to decode captured image: {path}")
@@ -921,7 +902,6 @@ def list_annotations():
 
 @app.get("/api/classifier/status")
 def classifier_status():
-    model_exists = DEFAULT_MODEL_PATH.exists()
     last_result = None
     if CLASSIFIER_STATUS_PATH.exists():
         try:
@@ -929,74 +909,15 @@ def classifier_status():
         except Exception:
             pass
     return {
-        "model_trained": model_exists,
-        "model_path": str(DEFAULT_MODEL_PATH),
+        "model_trained": False,
+        "model_path": "",
         "last_result": last_result,
     }
 
 
 @app.post("/api/classifier/retrain")
 def retrain_classifier():
-    global _knn_model
-
-    annotations = _load_annotations()
-    if len(annotations) == 0:
-        raise HTTPException(
-            400,
-            "No annotations found. Save labels with 'Save JSON' or POST to /api/annotations first.",
-        )
-
-    # Default pipeline params for feature extraction
-    default_p = PipelineParams()
-    annotated_images = []
-    missing = []
-
-    for ann in annotations:
-        img_path = ann.get("image_path")
-        if not img_path or not Path(img_path).exists():
-            missing.append(ann["image_id"])
-            continue
-        img = cv2.imread(img_path)
-        if img is None:
-            missing.append(ann["image_id"])
-            continue
-        annotated_images.append(
-            {
-                "image_id": ann["image_id"],
-                "scene_id": ann["scene_id"],
-                "board_64": ann["board_64"],
-                "image_bgr": img,
-            }
-        )
-
-    if len(annotated_images) == 0:
-        raise HTTPException(
-            400,
-            f"Could not load any annotated images. Missing/unreadable: {missing}",
-        )
-
-    def extract_cells_fn(image_bgr: np.ndarray) -> list[np.ndarray]:
-        return _extract_cells_for_training(image_bgr, default_p)
-
-    from charm.vision.piece_color_knn import DEFAULT_DATASET_PATH
-
-    X, y, scene_ids = build_color_dataset(annotated_images, extract_cells_fn, DEFAULT_DATASET_PATH)
-
-    if len(X) == 0:
-        raise HTTPException(400, "Dataset is empty — all labels are 'empty'. Add white/black labels.")
-
-    result = train_color_classifier(X, y, scene_ids)
-    result["missing_images"] = missing
-
-    # Persist last result for status endpoint
-    CLASSIFIER_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLASSIFIER_STATUS_PATH.write_text(json.dumps(result, indent=2))
-
-    # Reload model in process
-    _knn_model = load_color_model()
-    reload_model()
-
-    return result
+    raise HTTPException(501, "kNN classifier has been removed — color detection uses brightness threshold only.")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,28 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Save a camera snapshot and pipeline debug
+
+To capture one ESP32-CAM photo, save it, and run the same Python pipeline used
+by the web UI:
+
+```
+python capture_pipeline_snapshot.py --camera --auto-detect-board --no-inner-warp
+```
+
+To test an existing image:
+
+```
+python capture_pipeline_snapshot.py --image latest_raw.jpg --auto-detect-board --no-inner-warp
+```
+
+Each run creates a folder under `debug_snapshots/` with `raw.jpg`, pipeline
+debug images, and `summary.json`. Override camera IP when needed:
+
+```
+CHARM_ESP32_URL=http://<camera-ip>/capture python capture_pipeline_snapshot.py --camera
+```
+
 ## Project layout
 
 ```

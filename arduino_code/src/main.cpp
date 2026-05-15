@@ -36,6 +36,9 @@ UIController uiController(buttonInput, uiState, lcd, Serial1);
 
 int stepCount = 0;
 static String cmdBuffer = "";
+static String esp32CamIP = "";
+static String serial1Buf  = "";
+static const unsigned long ESP32_REPLY_TIMEOUT_MS = 2000;
 
 // Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `cm`.
 static bool controllerMode  = false;
@@ -44,8 +47,6 @@ static const float JOG_XY_MM     = 3.0f;
 static const float JOG_Z_MM      = 1.5f;
 static const float CAL_JOG_XY_MM = 1.0f;
 static const float CAL_JOG_Z_MM  = 0.5f;
-static const float TRASH_CAL_START_X = 470.0f;  // Default starting position for trash calibration
-static const float TRASH_CAL_START_Y = 70.0f;
 
 // ── Board calibration ────────────────────────────────────────────────────────
 // 3-corner vector decomposition: capture arm (x,y) at H1, A1, H8.
@@ -171,29 +172,27 @@ static void promptCalStep(CalStep s) {
     if (!arm.moveXY(tx, ty))
       Serial.println("  WARNING: saved position unreachable. Jog manually.");
   } else {
-    if (s == CAL_TRASH) {
-      Serial.print("  moving to default trash start position ("); Serial.print(TRASH_CAL_START_X); Serial.print(", "); Serial.print(TRASH_CAL_START_Y); Serial.println(").");
-      if (!arm.moveXY(TRASH_CAL_START_X, TRASH_CAL_START_Y))
-        Serial.println("  WARNING: default trash position unreachable. Jog manually.");
-    } else {
-      Serial.println("  no saved value — move arm here manually.");
-    }
+    Serial.println("  no saved value — move arm here manually.");
   }
   Serial.println("  wasd/uj=jog  v=validate  n=skip  p=prev  q=cancel");
   Serial.println("====================================");
 }
 
-static void enterCalMode() {
+static void enterCalModeAt(CalStep startStep) {
   if (calibrationMode) return;
   calibrationMode = true;
   snapshotCal();
-  calStep = CAL_H1;
+  calStep = startStep;
   Serial.println("Calibration mode ON");
   Serial.print("  H1:    "); Serial.println(h1Calibrated    ? "saved" : "MISSING");
   Serial.print("  A1:    "); Serial.println(a1Calibrated    ? "saved" : "MISSING");
   Serial.print("  H8:    "); Serial.println(h8Calibrated    ? "saved" : "MISSING");
   Serial.print("  Trash: "); Serial.println(trashCalibrated ? "saved" : "MISSING");
   promptCalStep(calStep);
+}
+
+static void enterCalMode() {
+  enterCalModeAt(CAL_H1);
 }
 
 static void finishCalMode() {
@@ -292,6 +291,56 @@ static void printCmHelp() {
   Serial.println("  c/v     : close / open gripper");
   Serial.println("  q       : exit controller mode");
   Serial.println("----------------------------------");
+}
+
+static bool updateEsp32CamIPFromLine(String line) {
+  line.trim();
+
+  if (line.startsWith("WIFI_OK ")) {
+    esp32CamIP = line.substring(8);
+    esp32CamIP.trim();
+    return esp32CamIP.length() > 0;
+  }
+
+  if (line.startsWith("IP ")) {
+    esp32CamIP = line.substring(3);
+    esp32CamIP.trim();
+    return esp32CamIP.length() > 0;
+  }
+
+  return false;
+}
+
+static bool readEsp32Line(String &line, unsigned long timeoutMs) {
+  line = "";
+  unsigned long deadline = millis() + timeoutMs;
+
+  while (millis() < deadline) {
+    if (Serial2.available()) {
+      char c = (char)Serial2.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line.trim();
+        return line.length() > 0;
+      }
+      line += c;
+    }
+  }
+
+  line.trim();
+  return line.length() > 0;
+}
+
+static bool refreshEsp32CamIP() {
+  while (Serial2.available()) Serial2.read();
+  Serial2.println("IP");
+
+  String reply = "";
+  if (!readEsp32Line(reply, ESP32_REPLY_TIMEOUT_MS)) {
+    return false;
+  }
+
+  return updateEsp32CamIPFromLine(reply);
 }
 
 // ── Command handler ───────────────────────────────────────────────────────────
@@ -517,9 +566,41 @@ static void handleCommand(String cmd) {
       else                { Serial.println("Controller mode OFF"); }
       return;
 
+    } else if (cmd.startsWith("injectCal ")) {
+      // injectCal <h1x> <h1y> <a1x> <a1y> <h8x> <h8y> <trashx> <trashy>
+      String vals = cmd.substring(10);
+      float buf[8];
+      int pos = 0;
+      for (int i = 0; i < 8; i++) {
+        int sp = vals.indexOf(' ', pos);
+        String token = (sp < 0) ? vals.substring(pos) : vals.substring(pos, sp);
+        buf[i] = token.toFloat();
+        pos = sp + 1;
+        if (sp < 0 && i < 7) { Serial.println("injectCal ERR: expected 8 values"); return; }
+      }
+      h1X = buf[0]; h1Y = buf[1];
+      a1X = buf[2]; a1Y = buf[3];
+      h8X = buf[4]; h8Y = buf[5];
+      trashX = buf[6]; trashY = buf[7];
+      h1Calibrated = h8Calibrated = a1Calibrated = trashCalibrated = true;
+      saveCalToEEPROM();
+      Serial.print("CAL_INJECTED H1=("); Serial.print(h1X); Serial.print(","); Serial.print(h1Y);
+      Serial.print(") A1=("); Serial.print(a1X); Serial.print(","); Serial.print(a1Y);
+      Serial.print(") H8=("); Serial.print(h8X); Serial.print(","); Serial.print(h8Y);
+      Serial.print(") Trash=("); Serial.print(trashX); Serial.print(","); Serial.print(trashY); Serial.println(")");
+      return;
+
     } else if (cmd == "cal" || cmd == "boardCal") {
       if (controllerMode) { Serial.println("Exit controller mode first (q)."); return; }
       enterCalMode();
+      return;
+
+    } else if (cmd == "calTrash" || cmd == "trashCal") {
+      if (controllerMode) { Serial.println("Exit controller mode first (q)."); return; }
+      if (!boardCalibrated()) { Serial.println("Board points missing. Run `cal` first."); return; }
+      // Force manual/jog flow for trash by ignoring old saved trash point.
+      trashCalibrated = false;
+      enterCalModeAt(CAL_TRASH);
       return;
 
     } else if (cmd == "calClear") {
@@ -591,6 +672,34 @@ static void handleCommand(String cmd) {
       else { Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y()); Serial.println(")"); }
       return;
 
+    } else if (cmd == "esp32status") {
+      Serial.print("Cached IP: ");
+      Serial.println(esp32CamIP.length() > 0 ? esp32CamIP : "(none)");
+      String reply = "";
+      while (Serial2.available()) Serial2.read();
+      Serial2.println("IP");
+      readEsp32Line(reply, ESP32_REPLY_TIMEOUT_MS);
+      updateEsp32CamIPFromLine(reply);
+      Serial.print("ESP32 reply: ");
+      Serial.println(reply.length() > 0 ? reply : "(no response - check Serial2 wiring on Mega pins 16/17)");
+      Serial.print("Resolved IP: ");
+      Serial.println(esp32CamIP.length() > 0 ? esp32CamIP : "(none)");
+      return;
+
+    } else if (cmd == "photo") {
+      if (esp32CamIP.length() == 0) {
+        refreshEsp32CamIP();
+      }
+
+      if (esp32CamIP.length() > 0) {
+        Serial.print("PHOTO_URL http://");
+        Serial.print(esp32CamIP);
+        Serial.println("/capture");
+      } else {
+        Serial.println("PHOTO_ERR ESP32-CAM IP unknown - wait for ESP32 boot or check Serial2 wiring on Mega pins 16/17");
+      }
+      return;
+
     } else if (cmd == "pos") {
       Serial.print("Joint1: "); Serial.print(arm.j1Angle()); Serial.println("°");
       Serial.print("Joint2: "); Serial.print(arm.j2Angle()); Serial.println("°");
@@ -614,9 +723,8 @@ void setup() {
   //digitalWrite(ENABLE_PIN, LOW);
 
   Serial.begin(9600);
+  Serial2.begin(9600);
   arm.begin();
-  //Serial1.begin(115200);
-  //uiController.begin();
 
   if (loadCalFromEEPROM()) {
     Serial.println("Board calibration loaded from EEPROM.");
@@ -629,6 +737,7 @@ void setup() {
   Serial.println("OG/CG = open/close gripper | v/c = open/close gripper | GS = gripper status");
   Serial.println("cm = controller mode (w/a/s/d=XY, u/j=Z, c/v=gripper, q=exit)");
   Serial.println("cal = board calibration wizard | calClear = wipe EEPROM cal");
+  Serial.println("calTrash = calibrate only trash XY (keeps H1/A1/H8)");
   Serial.println("setH1 / setA1 / setH8 / setTrash = capture corners/trash | goto <sq|trash> | boardInfo");
   Serial.println("pick <piece> <sq> | put <piece> <sq|trash>  (pieces: pawn knight bishop rook queen king)");
 }
@@ -660,5 +769,15 @@ void loop() {
     }
   }
 
-  //uiController.loop();
+  while (Serial2.available()) {
+    char c = (char)Serial2.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      serial1Buf.trim();
+      updateEsp32CamIPFromLine(serial1Buf);
+      serial1Buf = "";
+    } else {
+      serial1Buf += c;
+    }
+  }
 }

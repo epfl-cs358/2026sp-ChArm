@@ -208,6 +208,7 @@ export default function RobotArmOverlay({
   mode = move ? "playing" : "idle",
   onDone,
   debugTarget,
+  idleTarget,
   opacity = 0.82,
   expectedOpacity = 0.28,
   onAnglesChange,
@@ -217,6 +218,7 @@ export default function RobotArmOverlay({
   mode?: RobotArmMode;
   onDone?: (move: ArmMove) => void;
   debugTarget?: ArmDebugTarget | null;
+  idleTarget?: ArmDebugTarget | null;
   opacity?: number;
   expectedOpacity?: number;
   onAnglesChange?: (angles: ArmAngles) => void;
@@ -232,10 +234,20 @@ export default function RobotArmOverlay({
 
   useEffect(() => {
     if (debugTarget) {
-      setPose({ x: debugTarget.x, y: debugTarget.y, lift: 1, progress: 1, holding: false, done: true });
+      const frame = requestAnimationFrame(() => {
+        setPose({ x: debugTarget.x, y: debugTarget.y, lift: 1, progress: 1, holding: false, done: true });
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+    if (!move && mode !== "calibrating") {
+      if (idleTarget) {
+        const frame = requestAnimationFrame(() => {
+          setPose({ x: idleTarget.x, y: idleTarget.y, lift: 1, progress: 1, holding: false, done: true });
+        });
+        return () => cancelAnimationFrame(frame);
+      }
       return;
     }
-    if (!move && mode !== "calibrating") return;
     const started = performance.now();
     const duration = mode === "calibrating" ? 2600 : 2800;
     doneRef.current = null;
@@ -257,7 +269,7 @@ export default function RobotArmOverlay({
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [debugTarget, mode, move]);
+  }, [debugTarget, idleTarget, mode, move]);
 
   const gripperY = pose.y - pose.lift * 0.55;
   const ik = inverseKinematics({ x: pose.x, y: gripperY });

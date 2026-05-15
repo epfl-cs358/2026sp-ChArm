@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, Crosshair, Gamepad2, Home, MapPin, Play, RotateCcw, Save, SquareArrowOutUpRight, StepBack, StepForward, Trash2, Unplug, X } from "lucide-react";
+import { AlertTriangle, Cable, Check, Crosshair, Database, Gamepad2, Home, MapPin, Play, RotateCcw, Save, SquareArrowOutUpRight, StepBack, StepForward, Trash2, Unplug, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { RobotCalibration, RobotCalibrationWrite, RobotCommandResult, RobotStatus } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -14,24 +14,34 @@ type PieceKey = "pawn" | "knight" | "bishop" | "rook" | "queen" | "king";
 
 const DEFAULT_SERIAL_PORT = "/dev/ttyUSB0";
 const PIECES: PieceKey[] = ["pawn", "knight", "bishop", "rook", "queen", "king"];
-const DEFAULT_PIECE_HEIGHTS: Record<PieceKey, number> = {
-  pawn: 5,
-  knight: 5,
-  bishop: 5,
-  rook: 5,
-  queen: 5,
-  king: 5,
+const DEFAULT_PICK_Z: Record<PieceKey, number> = {
+  pawn: 3,
+  knight: 0,
+  bishop: 11,
+  rook: 11,
+  queen: 17,
+  king: 19,
+};
+
+const DEFAULT_PLACE_Z: Record<PieceKey, number> = {
+  pawn: 30,
+  knight: 30,
+  bishop: 32,
+  rook: 35,
+  queen: 38,
+  king: 40,
 };
 
 const DEFAULT_FORM: RobotCalibrationWrite = {
   a1: { x: 0, y: 0 },
   h1: { x: 262.5, y: 0 },
   h8: { x: 262.5, y: 262.5 },
-  z_hover: 35,
+  z_hover: 60,
   z_down: 5,
-  home: { x: 0, y: 0, z: 35 },
+  home: { x: 0, y: 0, z: 60 },
   capture_bin: { x: 0, y: 0, z: 5 },
-  piece_heights: DEFAULT_PIECE_HEIGHTS,
+  pick_z: DEFAULT_PICK_Z,
+  place_z: DEFAULT_PLACE_Z,
 };
 
 function numberValue(value: string) {
@@ -236,12 +246,14 @@ export default function RobotPage() {
   const [result, setResult] = useState<RobotCommandResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [eepromLoaded, setEepromLoaded] = useState(false);
+  const eepromAutoLoadRef = useRef(false);
   const jogInFlightRef = useRef(false);
   const lastJogAtRef = useRef(0);
 
   const applyStatus = useCallback((next: RobotStatus) => {
     setStatus(next);
-    setPort((current) => current || next.detected_port || next.active_port || DEFAULT_SERIAL_PORT);
+    setPort((current) => current === DEFAULT_SERIAL_PORT ? next.detected_port || next.active_port || current : current);
 
     const c = next.robot_calibration.calibration;
     setSquareSize(Math.hypot(c.file_vector.x, c.file_vector.y));
@@ -262,8 +274,36 @@ export default function RobotPage() {
       z_down: c.z_down,
       home: c.home,
       capture_bin: c.capture_bin,
-      piece_heights: { ...DEFAULT_PIECE_HEIGHTS, ...c.piece_heights },
+      pick_z: { ...DEFAULT_PICK_Z, ...c.pick_z },
+      place_z: { ...DEFAULT_PLACE_Z, ...c.place_z },
     });
+  }, []);
+
+  const applyBoardInfo = useCallback((response: RobotCommandResult) => {
+    const boardInfo = response.board_info;
+    if (!boardInfo?.calibration) return false;
+
+    const c = boardInfo.calibration;
+    const a1 = c.a1;
+    const h1 = {
+      x: a1.x + c.file_vector.x * 7,
+      y: a1.y + c.file_vector.y * 7,
+    };
+    const h8 = {
+      x: h1.x + c.rank_vector.x * 7,
+      y: h1.y + c.rank_vector.y * 7,
+    };
+    setSquareSize(Math.hypot(c.file_vector.x, c.file_vector.y));
+    setForm((current) => ({
+      ...current,
+      a1,
+      h1,
+      h8,
+      capture_bin: c.capture_bin,
+    }));
+    setEepromLoaded(true);
+    setSaveStatus("Loaded EEPROM calibration from Arduino");
+    return true;
   }, []);
 
   const refresh = useCallback(async () => {
@@ -286,6 +326,37 @@ export default function RobotPage() {
     };
   }, [applyStatus]);
 
+  const readEeprom = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setBusy("read-eeprom");
+      setError(null);
+      setSaveStatus(null);
+      setResult(null);
+    }
+    try {
+      const response = await api.readRobotEeprom(port || undefined, baud);
+      if (!options?.silent) setResult(response);
+      if (response.position) setLivePosition(response.position);
+      if (!applyBoardInfo(response) && !options?.silent) {
+        setError("EEPROM board calibration is incomplete or missing on Arduino");
+      }
+    } catch (e: unknown) {
+      if (!options?.silent) {
+        setError(e instanceof Error ? e.message : "Failed to read Arduino EEPROM");
+      }
+    } finally {
+      if (!options?.silent) setBusy(null);
+    }
+  }, [applyBoardInfo, baud, port]);
+
+  useEffect(() => {
+    if (!status || eepromAutoLoadRef.current) return;
+    const resolvedPort = port || status.detected_port || status.active_port;
+    if (!resolvedPort) return;
+    eepromAutoLoadRef.current = true;
+    void readEeprom({ silent: true });
+  }, [port, readEeprom, status]);
+
   const computedA8 = useMemo(() => ({
     x: form.a1.x + form.h8.x - form.h1.x,
     y: form.a1.y + form.h8.y - form.h1.y,
@@ -299,14 +370,12 @@ export default function RobotPage() {
     setForm((current) => ({ ...current, [key]: { ...current[key], [axis]: numberValue(value) } }));
   };
 
-  const updatePieceHeight = (piece: PieceKey, value: string) => {
-    setForm((current) => ({
-      ...current,
-      piece_heights: {
-        ...current.piece_heights,
-        [piece]: numberValue(value),
-      },
-    }));
+  const updatePickZ = (piece: PieceKey, value: string) => {
+    setForm((current) => ({ ...current, pick_z: { ...current.pick_z, [piece]: numberValue(value) } }));
+  };
+
+  const updatePlaceZ = (piece: PieceKey, value: string) => {
+    setForm((current) => ({ ...current, place_z: { ...current.place_z, [piece]: numberValue(value) } }));
   };
 
   const captureCorner = async (corner: PointKey) => {
@@ -547,7 +616,8 @@ export default function RobotPage() {
       });
       setResult(response);
       if (response.position) setLivePosition(response.position);
-      await refresh();
+      const loadedBoardInfo = command === "board-info" ? applyBoardInfo(response) : false;
+      if (!loadedBoardInfo) await refresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Command failed");
     } finally {
@@ -644,6 +714,7 @@ export default function RobotPage() {
                 <Button onClick={() => runCommand("pos")} disabled={!!busy} variant="outline" className="font-jetbrains"><Crosshair className="size-4" />Pos</Button>
                 <Button onClick={() => runCommand("arm-calibrate")} disabled={!!busy} variant="outline" className="font-jetbrains"><RotateCcw className="size-4" />Arm Calibrate</Button>
                 <Button onClick={() => runCommand("board-info")} disabled={!!busy} variant="outline" className="font-jetbrains"><MapPin className="size-4" />Board Info</Button>
+                <Button onClick={() => readEeprom()} disabled={!!busy} variant="outline" className="font-jetbrains"><Database className="size-4" />Read EEPROM</Button>
                 <Button onClick={startBoardCalibration} disabled={!!busy || jogModeHint} variant="outline" className="font-jetbrains"><MapPin className="size-4" />Start cal</Button>
                 <Button onClick={disconnect} disabled={!!busy} variant="outline" className="font-jetbrains"><Unplug className="size-4" />Disconnect</Button>
               </div>
@@ -687,8 +758,11 @@ export default function RobotPage() {
           </Card>
 
           <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-            <CardHeader className="px-4 pt-4 pb-2">
+            <CardHeader className="px-4 pt-4 pb-2 flex flex-row items-center justify-between">
               <h2 className="text-sm font-jetbrains font-semibold" style={{ color: "var(--charm-text)" }}>Robot Calibration</h2>
+              <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: eepromLoaded ? "var(--charm-cyan)" : "var(--charm-muted)" }}>
+                {eepromLoaded ? "EEPROM loaded" : "local JSON"}
+              </Badge>
             </CardHeader>
             <CardContent className="px-4 pb-4 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -765,19 +839,36 @@ export default function RobotPage() {
                 </label>
               </div>
 
-              <div className="rounded-md border border-border p-3">
-                <p className="text-xs font-jetbrains uppercase mb-2" style={{ color: "var(--charm-muted)" }}>Pickup Z by piece</p>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                  {PIECES.map((piece) => (
-                    <label key={piece} className="space-y-1">
-                      <span className="text-[10px] font-jetbrains uppercase" style={{ color: "var(--charm-muted)" }}>{piece}</span>
-                      <input
-                        value={form.piece_heights[piece]}
-                        onChange={(e) => updatePieceHeight(piece, e.target.value)}
-                        className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm font-jetbrains"
-                      />
-                    </label>
-                  ))}
+              <div className="rounded-md border border-border p-3 space-y-3">
+                <div>
+                  <p className="text-xs font-jetbrains uppercase mb-2" style={{ color: "var(--charm-muted)" }}>Pick Z by piece</p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {PIECES.map((piece) => (
+                      <label key={piece} className="space-y-1">
+                        <span className="text-[10px] font-jetbrains uppercase" style={{ color: "var(--charm-muted)" }}>{piece}</span>
+                        <input
+                          value={form.pick_z[piece]}
+                          onChange={(e) => updatePickZ(piece, e.target.value)}
+                          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm font-jetbrains"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs font-jetbrains uppercase mb-2" style={{ color: "var(--charm-muted)" }}>Place Z by piece</p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {PIECES.map((piece) => (
+                      <label key={piece} className="space-y-1">
+                        <span className="text-[10px] font-jetbrains uppercase" style={{ color: "var(--charm-muted)" }}>{piece}</span>
+                        <input
+                          value={form.place_z[piece]}
+                          onChange={(e) => updatePlaceZ(piece, e.target.value)}
+                          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm font-jetbrains"
+                        />
+                      </label>
+                    ))}
+                  </div>
                 </div>
               </div>
 

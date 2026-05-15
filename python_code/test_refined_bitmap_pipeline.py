@@ -72,6 +72,23 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Rotate the input image by this many degrees to test robustness.",
     )
+    parser.add_argument(
+        "--already-refined",
+        action="store_true",
+        help="Treat --image as an already refined board warp and skip auto-detection/calibration.",
+    )
+    parser.add_argument(
+        "--white-threshold",
+        type=float,
+        default=128.0,
+        help="White piece brightness threshold.",
+    )
+    parser.add_argument(
+        "--black-threshold",
+        type=float,
+        default=128.0,
+        help="Black piece brightness threshold.",
+    )
     return parser.parse_args()
 
 
@@ -92,32 +109,37 @@ def main() -> None:
         image = cv2.warpAffine(image, rotation_matrix, (w, h))
         print(f"Applied rotation of {args.angle} degrees to the input image.")
 
-    auto_quad = find_largest_quadrilateral(image)
-    if auto_quad is not None:
-        print("Board corners successfully auto-detected!")
-        calibration = load_four_point_calibration(calibration_path)
-        calibration.top_left = tuple(map(int, auto_quad[0]))
-        calibration.top_right = tuple(map(int, auto_quad[1]))
-        calibration.bottom_right = tuple(map(int, auto_quad[2]))
-        calibration.bottom_left = tuple(map(int, auto_quad[3]))
+    if args.already_refined:
+        print("Using input as already refined board warp.")
+        refined_warped = cv2.resize(image, (args.output_size, args.output_size), interpolation=cv2.INTER_CUBIC)
+        calibration_warped = refined_warped.copy()
     else:
-        print("Auto-detect failed. Falling back to saved board calibration.")
-        calibration = load_four_point_calibration(calibration_path)
+        auto_quad = find_largest_quadrilateral(image)
+        if auto_quad is not None:
+            print("Board corners successfully auto-detected!")
+            calibration = load_four_point_calibration(calibration_path)
+            calibration.top_left = tuple(map(int, auto_quad[0]))
+            calibration.top_right = tuple(map(int, auto_quad[1]))
+            calibration.bottom_right = tuple(map(int, auto_quad[2]))
+            calibration.bottom_left = tuple(map(int, auto_quad[3]))
+        else:
+            print("Auto-detect failed. Falling back to saved board calibration.")
+            calibration = load_four_point_calibration(calibration_path)
 
-    # Step 1: first warp from saved manual calibration
-    calibration_warped = warp_from_calibration(
-        image,
-        calibration,
-        output_size=args.output_size,
-    )
+        # Step 1: first warp from saved manual calibration
+        calibration_warped = warp_from_calibration(
+            image,
+            calibration,
+            output_size=args.output_size,
+        )
 
-    # Step 2: second refinement
-    inner_calibration = load_four_point_calibration(DEFAULT_INNER_WARP_CALIBRATION_JSON)
-    refined_warped = refine_board_with_inner_corners(
-        calibration_warped,
-        inner_calibration,
-        output_size=args.output_size,
-    )
+        # Step 2: second refinement
+        inner_calibration = load_four_point_calibration(DEFAULT_INNER_WARP_CALIBRATION_JSON)
+        refined_warped = refine_board_with_inner_corners(
+            calibration_warped,
+            inner_calibration,
+            output_size=args.output_size,
+        )
 
     # Step 3: enhance low-contrast board, then draw grid and split into cells
     enhanced_warped = enhance_board_contrast(refined_warped)
@@ -139,7 +161,12 @@ def main() -> None:
     )
 
     # Step 5: piece color detection
-    color_results = detect_piece_colors(color_cells, occupancy_results)
+    color_results = detect_piece_colors(
+        color_cells,
+        occupancy_results,
+        white_threshold=args.white_threshold,
+        black_threshold=args.black_threshold,
+    )
     piece_color_debug = draw_piece_color_debug(
         refined_warped,
         color_cells,
