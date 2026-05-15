@@ -111,8 +111,8 @@ class PipelineParams(BaseModel):
     canny_low: int = 15
     canny_high: int = 50
     occupancy_std_weight: float = 0.4
-    white_threshold: float = 110.5
-    black_threshold: float = 110.0
+    white_threshold: float = 80
+    black_threshold: float = 80
     warp_size: int = 800
     image_path: Optional[str] = None
 
