@@ -10,12 +10,12 @@ const ports = [
 
 function execFileText(command, args) {
   return new Promise((resolve) => {
-    execFile(command, args, { windowsHide: true }, (error, stdout) => {
+    execFile(command, args, { windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
         resolve("");
         return;
       }
-      resolve(stdout.trim());
+      resolve(`${stdout}${stderr}`.trim());
     });
   });
 }
@@ -122,8 +122,45 @@ async function ensurePortsAvailable() {
   }
 }
 
-function runDevServers() {
+async function resolvePythonCommand() {
+  if (process.env.CHARM_PYTHON) {
+    return process.env.CHARM_PYTHON;
+  }
+
+  const candidates =
+    process.platform === "win32" ? ["py", "python3", "python"] : ["python3", "python"];
+
+  for (const candidate of candidates) {
+    const output =
+      candidate === "py"
+        ? await execFileText(candidate, ["-3", "--version"])
+        : await execFileText(candidate, ["--version"]);
+    if (output) {
+      return candidate === "py" ? "py -3" : candidate;
+    }
+  }
+
+  console.error(
+    "Could not find a Python interpreter. Install python3 or set CHARM_PYTHON to the interpreter path.",
+  );
+  process.exit(1);
+}
+
+function shellQuote(command) {
+  if (command === "py -3") {
+    return command;
+  }
+
+  if (process.platform === "win32") {
+    return `"${command.replace(/"/g, '\\"')}"`;
+  }
+
+  return `'${command.replace(/'/g, "'\\''")}'`;
+}
+
+function runDevServers(pythonCommand) {
   const command = process.platform === "win32" ? "npx.cmd" : "npx";
+  const backendCommand = `${shellQuote(pythonCommand)} ../webapp_backend/api_server.py`;
   const child = spawn(
     command,
     [
@@ -133,7 +170,7 @@ function runDevServers() {
       "backend,frontend",
       "-c",
       "cyan,magenta",
-      "python ../webapp_backend/api_server.py",
+      backendCommand,
       "node -e \"setTimeout(()=>{},1000)\" && next dev",
     ],
     {
@@ -153,7 +190,8 @@ function runDevServers() {
 
 async function main() {
   await ensurePortsAvailable();
-  runDevServers();
+  const pythonCommand = await resolvePythonCommand();
+  runDevServers(pythonCommand);
 }
 
 main().catch((error) => {

@@ -291,29 +291,133 @@ const THRESHOLD_SLIDERS: SliderDef[] = [
     description: "Luminosité minimum pour classer une pièce comme blanche.",
     min: 80,
     max: 200,
-    step: 1,
+    step: 0.5,
   },
   {
     key: "black_threshold",
     label: "Black Thresh",
     description: "Luminosité maximum pour classer une pièce comme noire.",
     min: 60,
-    max: 180,
-    step: 1,
+    max: 200,
+    step: 0.5,
   },
 ];
 
 interface Props {
   params: PipelineParams;
   onChange: (p: PipelineParams) => void;
+  onOpenManualCalibration?: () => void;
   children?: React.ReactNode;
 }
 
-export default function ParamControls({ params, onChange, children }: Props) {
+function formatParamValue(value: number) {
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+export default function ParamControls({ params, onChange, onOpenManualCalibration, children }: Props) {
   const set = (key: keyof PipelineParams, val: number) =>
     onChange({ ...params, [key]: val });
   const setBool = (key: "auto_detect_board" | "apply_inner_warp" | "board_hough_refine", val: boolean) =>
     onChange({ ...params, [key]: val });
+  const renderNumericControl = ({ key, label: slLabel, description, min, max, step, unit }: SliderDef) => {
+    const val = params[key] as number;
+    const def = DEFAULT_PARAMS[key] as number;
+    const changed = Math.abs(val - def) > 0.0001;
+    const sliderValue = Math.min(max, Math.max(min, val));
+
+    return (
+      <div key={key}>
+        <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <label className="min-w-0 break-words text-xs font-jetbrains leading-snug" style={{ color: "var(--charm-text)" }}>
+              {slLabel}
+            </label>
+            <Tooltip>
+              <TooltipTrigger
+                type="button"
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-jetbrains font-semibold outline-none transition-colors hover:border-amber-DEFAULT hover:text-amber-DEFAULT focus-visible:ring-2 focus-visible:ring-amber-DEFAULT/40"
+                style={{
+                  borderColor: "var(--charm-border)",
+                  color: "var(--charm-muted)",
+                  background: "var(--charm-bg)",
+                }}
+                aria-label={`Description: ${slLabel}`}
+              >
+                ?
+              </TooltipTrigger>
+              <TooltipContent
+                side="top"
+                align="center"
+                sideOffset={8}
+                className="max-w-64 border px-3 py-2 text-left text-[11px] leading-snug shadow-xl"
+                style={{
+                  borderColor: "var(--charm-border)",
+                  background: "var(--charm-text)",
+                  color: "var(--charm-bg)",
+                }}
+              >
+                {description}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+          <div className="flex w-full items-center gap-2 sm:w-auto sm:justify-end">
+            {changed && (
+              <button
+                onClick={() => set(key, def)}
+                className="shrink-0 text-xs"
+                style={{ color: "var(--charm-muted)" }}
+                title="Reset to default"
+              >
+                ↺
+              </button>
+            )}
+            {unit && (
+              <span className="shrink-0 text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                {unit}
+              </span>
+            )}
+            <input
+              type="number"
+              min={min}
+              max={max}
+              step={step}
+              value={formatParamValue(val)}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (Number.isFinite(next)) set(key, next);
+              }}
+              className="h-8 min-w-0 flex-1 rounded border bg-transparent px-1 text-right font-jetbrains text-xs font-semibold outline-none focus-visible:ring-2 focus-visible:ring-cyan-DEFAULT/40 sm:flex-none"
+              style={{
+                borderColor: changed ? "var(--charm-cyan)" : "var(--charm-border)",
+                color: changed ? "var(--charm-cyan)" : "var(--charm-text)",
+              }}
+              aria-label={`${slLabel} value`}
+            />
+          </div>
+        </div>
+        <Slider
+          min={min}
+          max={max}
+          step={step}
+          value={[sliderValue]}
+          onValueChange={(vals) => set(key, Array.isArray(vals) ? vals[0] : vals)}
+          className="w-full"
+        />
+        <div className="mt-0.5 flex justify-between">
+          <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>
+            {min}
+          </span>
+          <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.3 }}>
+            default: {formatParamValue(def)}
+          </span>
+          <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>
+            {max}
+          </span>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-3">
@@ -327,99 +431,69 @@ export default function ParamControls({ params, onChange, children }: Props) {
           </p>
         </CardHeader>
         <CardContent className="px-3 pb-3">
-          <label className="flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={params.auto_detect_board}
-              onChange={(e) => setBool("auto_detect_board", e.target.checked)}
-              className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
-            />
-            <span className="space-y-1">
-              <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
-                Auto board edges
+          <div className="flex flex-col gap-2">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={params.auto_detect_board}
+                onChange={(e) => setBool("auto_detect_board", e.target.checked)}
+                className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
+              />
+              <span className="space-y-1">
+                <span className="flex items-center gap-2">
+                  <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
+                    Auto board edges
+                  </span>
+                  {!params.auto_detect_board && onOpenManualCalibration && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenManualCalibration(); }}
+                      className="text-[10px] font-mono border border-cyan-DEFAULT/30 text-cyan-DEFAULT px-1.5 py-0.5 rounded hover:bg-cyan-DEFAULT/10"
+                    >
+                      Calibrate manually
+                    </button>
+                  )}
+                </span>
+                <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
+                  Detects the black outer border in each raw image, then falls back to saved corners if detection fails.
+                </span>
               </span>
-              <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
-                Detects the black outer border in each raw image, then falls back to saved corners if detection fails.
+            </label>
+            <label className="mt-3 flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={params.apply_inner_warp}
+                onChange={(e) => setBool("apply_inner_warp", e.target.checked)}
+                className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
+              />
+              <span className="space-y-1">
+                <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
+                  Inner warp refinement
+                </span>
+                <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
+                  Applies the saved inner-corner crop after the first warp. Keep it off when it cuts into the board.
+                </span>
               </span>
-            </span>
-          </label>
-          <label className="mt-3 flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={params.apply_inner_warp}
-              onChange={(e) => setBool("apply_inner_warp", e.target.checked)}
-              className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
-            />
-            <span className="space-y-1">
-              <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
-                Inner warp refinement
+            </label>
+            <label className="mt-3 flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={params.board_hough_refine}
+                onChange={(e) => setBool("board_hough_refine", e.target.checked)}
+                className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
+              />
+              <span className="space-y-1">
+                <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
+                  Hough edge refinement
+                </span>
+                <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
+                  Snaps the contour to long detected lines. Turn it off if it pulls the corners inside the board.
+                </span>
               </span>
-              <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
-                Applies the saved inner-corner crop after the first warp. Keep it off when it cuts into the board.
-              </span>
-            </span>
-          </label>
-          <label className="mt-3 flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={params.board_hough_refine}
-              onChange={(e) => setBool("board_hough_refine", e.target.checked)}
-              className="mt-1 h-4 w-4 accent-cyan-DEFAULT"
-            />
-            <span className="space-y-1">
-              <span className="block text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
-                Hough edge refinement
-              </span>
-              <span className="block text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
-                Snaps the contour to long detected lines. Turn it off if it pulls the corners inside the board.
-              </span>
-            </span>
-          </label>
+            </label>
+          </div>
           <div className="mt-4 space-y-3">
-            {BOARD_DETECTION_SLIDERS.map(({ key, label: slLabel, description, min, max, step, unit }) => {
-              const val = params[key] as number;
-              const def = DEFAULT_PARAMS[key] as number;
-              const changed = Math.abs(val - def) > 0.0001;
-              return (
-                <div key={key}>
-                  <div className="flex items-start justify-between mb-1.5 gap-2">
-                    <div className="pr-3 flex items-center gap-1.5">
-                      <label className="text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
-                        {slLabel}
-                      </label>
-                      <Tooltip>
-                        <TooltipTrigger
-                          type="button"
-                          className="inline-flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-jetbrains font-semibold outline-none transition-colors hover:border-amber-DEFAULT hover:text-amber-DEFAULT"
-                          style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "var(--charm-bg)" }}
-                          aria-label={`Description: ${slLabel}`}
-                        >
-                          ?
-                        </TooltipTrigger>
-                        <TooltipContent side="top" align="center" sideOffset={8} className="max-w-64 border px-3 py-2 text-left text-[11px] leading-snug shadow-xl" style={{ borderColor: "var(--charm-border)", background: "var(--charm-text)", color: "var(--charm-bg)" }}>
-                          {description}
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {changed && (
-                        <button onClick={() => set(key, def)} className="text-xs" style={{ color: "var(--charm-muted)" }} title="Reset to default">↺</button>
-                      )}
-                      <span className="text-xs font-jetbrains font-semibold" style={{ color: changed ? "var(--charm-cyan)" : "var(--charm-text)" }}>
-                        {typeof val === "number" && !Number.isInteger(val) ? val.toFixed(3).replace(/0+$/, "").replace(/\.$/, "") : val}
-                        {unit ? ` ${unit}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                  <Slider min={min} max={max} step={step} value={[val]} onValueChange={(vals) => set(key, Array.isArray(vals) ? vals[0] : vals)} className="w-full" />
-                  <div className="flex justify-between mt-0.5">
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>{min}</span>
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.3 }}>default: {def}</span>
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>{max}</span>
-                  </div>
-                </div>
-              );
-            })}
+            {BOARD_DETECTION_SLIDERS.map(renderNumericControl)}
           </div>
         </CardContent>
       </Card>
@@ -438,192 +512,23 @@ export default function ParamControls({ params, onChange, children }: Props) {
             </p>
           </CardHeader>
           <CardContent className="px-3 pb-3 space-y-3">
-            {sliders.map(({ key, label: slLabel, description, min, max, step, unit }) => {
-              const val = params[key] as number;
-              const def = DEFAULT_PARAMS[key] as number;
-              const changed = Math.abs(val - def) > 0.0001;
-              return (
-                <div key={key}>
-                  <div className="flex items-start justify-between mb-1.5 gap-2">
-                    <div className="pr-3 flex items-center gap-1.5">
-                      <label
-                        className="text-xs font-jetbrains"
-                        style={{ color: "var(--charm-text)" }}
-                      >
-                        {slLabel}
-                      </label>
-                      <Tooltip>
-                        <TooltipTrigger
-                          type="button"
-                          className="inline-flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-jetbrains font-semibold outline-none transition-colors hover:border-amber-DEFAULT hover:text-amber-DEFAULT focus-visible:ring-2 focus-visible:ring-amber-DEFAULT/40"
-                          style={{
-                            borderColor: "var(--charm-border)",
-                            color: "var(--charm-muted)",
-                            background: "var(--charm-bg)",
-                          }}
-                          aria-label={`Description: ${slLabel}`}
-                        >
-                          ?
-                        </TooltipTrigger>
-                        <TooltipContent
-                          side="top"
-                          align="center"
-                          sideOffset={8}
-                          className="max-w-64 border px-3 py-2 text-left text-[11px] leading-snug shadow-xl"
-                          style={{
-                            borderColor: "var(--charm-border)",
-                            background: "var(--charm-text)",
-                            color: "var(--charm-bg)",
-                          }}
-                        >
-                          {description}
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {changed && (
-                        <button
-                          onClick={() => set(key, def)}
-                          className="text-xs"
-                          style={{ color: "var(--charm-muted)" }}
-                          title="Reset to default"
-                        >
-                          ↺
-                        </button>
-                      )}
-                      <span
-                        className="text-xs font-jetbrains font-semibold"
-                        style={{ color: changed ? "var(--charm-cyan)" : "var(--charm-text)" }}
-                      >
-                        {typeof val === "number" && !Number.isInteger(val)
-                          ? val.toFixed(2)
-                          : val}
-                        {unit ? ` ${unit}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                  <Slider
-                    min={min}
-                    max={max}
-                    step={step}
-                    value={[val]}
-                    onValueChange={(vals) => set(key, Array.isArray(vals) ? vals[0] : vals)}
-                    className="w-full"
-                  />
-                  <div className="flex justify-between mt-0.5">
-                    <span
-                      className="text-xs font-jetbrains"
-                      style={{ color: "var(--charm-muted)", opacity: 0.4 }}
-                    >
-                      {min}
-                    </span>
-                    <span
-                      className="text-xs font-jetbrains"
-                      style={{ color: "var(--charm-muted)", opacity: 0.3 }}
-                    >
-                      default: {def}
-                    </span>
-                    <span
-                      className="text-xs font-jetbrains"
-                      style={{ color: "var(--charm-muted)", opacity: 0.4 }}
-                    >
-                      {max}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+            {sliders.map(renderNumericControl)}
           </CardContent>
         </Card>
       ))}
 
-      {/* Piece Color — toggleable threshold vs kNN */}
+      {/* Piece Color */}
       <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
         <CardHeader className="px-3 pt-3 pb-1">
-          <div className="flex items-center justify-between">
-            <p
-              className="text-xs font-jetbrains font-semibold uppercase tracking-widest"
-              style={{ color: "var(--charm-amber)" }}
-            >
-              Piece Color
-            </p>
-            {/* mode toggle */}
-            <div className="flex rounded overflow-hidden border text-[10px] font-jetbrains" style={{ borderColor: "var(--charm-border)" }}>
-              {(["threshold", "knn"] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => onChange({ ...params, color_mode: m })}
-                  className="px-2 py-0.5 transition-colors"
-                  style={{
-                    background: params.color_mode === m ? "var(--charm-cyan-glow, oklch(0.25 0.08 200))" : "transparent",
-                    color: params.color_mode === m ? "var(--charm-cyan)" : "var(--charm-muted)",
-                  }}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-          </div>
+          <p
+            className="text-xs font-jetbrains font-semibold uppercase tracking-widest"
+            style={{ color: "var(--charm-amber)" }}
+          >
+            Piece Color
+          </p>
         </CardHeader>
         <CardContent className="px-3 pb-3 space-y-3">
-          {params.color_mode === "threshold" ? (
-            THRESHOLD_SLIDERS.map(({ key, label: slLabel, description, min, max, step, unit }) => {
-              const val = params[key] as number;
-              const def = DEFAULT_PARAMS[key] as number;
-              const changed = Math.abs(val - def) > 0.0001;
-              return (
-                <div key={key}>
-                  <div className="flex items-start justify-between mb-1.5 gap-2">
-                    <div className="pr-3 flex items-center gap-1.5">
-                      <label className="text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>
-                        {slLabel}
-                      </label>
-                      <Tooltip>
-                        <TooltipTrigger
-                          type="button"
-                          className="inline-flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-jetbrains font-semibold outline-none transition-colors hover:border-amber-DEFAULT hover:text-amber-DEFAULT"
-                          style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "var(--charm-bg)" }}
-                          aria-label={`Description: ${slLabel}`}
-                        >
-                          ?
-                        </TooltipTrigger>
-                        <TooltipContent side="top" align="center" sideOffset={8} className="max-w-64 border px-3 py-2 text-left text-[11px] leading-snug shadow-xl" style={{ borderColor: "var(--charm-border)", background: "var(--charm-text)", color: "var(--charm-bg)" }}>
-                          {description}
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {changed && (
-                        <button onClick={() => set(key, def)} className="text-xs" style={{ color: "var(--charm-muted)" }} title="Reset to default">↺</button>
-                      )}
-                      <span className="text-xs font-jetbrains font-semibold" style={{ color: changed ? "var(--charm-cyan)" : "var(--charm-text)" }}>
-                        {val}{unit ? ` ${unit}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                  <Slider min={min} max={max} step={step} value={[val]} onValueChange={(vals) => set(key, Array.isArray(vals) ? vals[0] : vals)} className="w-full" />
-                  <div className="flex justify-between mt-0.5">
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>{min}</span>
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.3 }}>default: {def}</span>
-                    <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)", opacity: 0.4 }}>{max}</span>
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-jetbrains" style={{ color: "var(--charm-text)" }}>k neighbors</span>
-                <span className="text-xs font-jetbrains font-semibold" style={{ color: "var(--charm-cyan)" }}>
-                  {params.knn_n_neighbors}{" "}
-                  <span style={{ color: "var(--charm-muted)", fontWeight: 400 }}>(auto)</span>
-                </span>
-              </div>
-              <p className="text-[10px] font-jetbrains leading-snug" style={{ color: "var(--charm-muted)" }}>
-                kNN entraîné sur annotations. Utiliser <em>Retrain classifier</em> dans le panneau Supervision.
-              </p>
-            </div>
-          )}
+          {THRESHOLD_SLIDERS.map(renderNumericControl)}
         </CardContent>
       </Card>
 

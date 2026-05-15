@@ -24,6 +24,8 @@ export default function DebugImages({
 }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
 
+  const fileNameFor = (key: string) => `${key}.jpg`;
+
   return (
     <div>
       <div className={gridClassName}>
@@ -38,11 +40,24 @@ export default function DebugImages({
               <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
                 {label}
               </span>
-              {b64 && (
-                <span className="text-xs font-jetbrains" style={{ color: "var(--charm-cyan)" }}>
-                  ▸ expand
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {b64 && (
+                  <a
+                    href={imageSrc(b64)}
+                    download={fileNameFor(key)}
+                    className="text-xs font-jetbrains hover:underline"
+                    style={{ color: "var(--charm-cyan)" }}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    download
+                  </a>
+                )}
+                {b64 && (
+                  <span className="text-xs font-jetbrains" style={{ color: "var(--charm-cyan)" }}>
+                    expand
+                  </span>
+                )}
+              </div>
             </CardHeader>
             <CardContent className="p-0">
               {b64 ? (
@@ -80,19 +95,29 @@ export default function DebugImages({
                 onClick={(e) => e.stopPropagation()}
               >
                 <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-                  <CardHeader className="px-4 py-3 flex-row items-center justify-between">
-                    <span className="font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>
-                      {panel.label}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setSelected(null)}
-                      style={{ color: "var(--charm-muted)" }}
-                    >
-                      ✕
-                    </Button>
-                  </CardHeader>
+	                  <CardHeader className="px-4 py-3 flex-row items-center justify-between">
+	                    <span className="font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>
+	                      {panel.label}
+	                    </span>
+	                    <div className="flex items-center gap-2">
+	                      <a
+	                        href={imageSrc(panel.b64)}
+	                        download={fileNameFor(panel.key)}
+	                        className="px-3 py-1.5 rounded-md border border-border text-xs font-jetbrains hover:border-border-bright"
+	                        style={{ color: "var(--charm-cyan)" }}
+	                      >
+	                        download
+	                      </a>
+	                      <Button
+	                        variant="ghost"
+	                        size="sm"
+	                        onClick={() => setSelected(null)}
+	                        style={{ color: "var(--charm-muted)" }}
+	                      >
+	                        close
+	                      </Button>
+	                    </div>
+	                  </CardHeader>
                   <CardContent className="p-0">
                     <img
                       src={imageSrc(panel.b64)}

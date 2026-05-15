@@ -3,6 +3,7 @@ import {
   ClassifierTrainResult,
   PipelineParams,
   PipelineResult,
+  PipelineSnapshotSaveResult,
   CalibrationData,
   RobotCalibrationWrite,
   RobotCommandResult,
@@ -71,7 +72,26 @@ export const api = {
   updateCalibration: (data: Partial<CalibrationData>) =>
     put<{ status: string }>("/api/calibration", data),
 
+  calibrateBoardCorners: (payload: {
+    top_left: [number, number];
+    top_right: [number, number];
+    bottom_right: [number, number];
+    bottom_left: [number, number];
+    image_path?: string;
+    warp_size?: number;
+  }) =>
+    post<{
+      status: string;
+      path: string;
+      image_path: string;
+      board: NonNullable<CalibrationData["board"]>;
+      first_warp: string;
+      debug: string;
+    }>("/api/calibration/board-corners", payload),
+
   getRawImage: () => get<{ image: string; path: string }>("/api/image/raw"),
+
+  readImage: (path: string) => post<{ image: string; path: string }>("/api/image/read", { path }),
 
   captureFromCamera: (url?: string) => post<{ status: string; image: string; path: string }>("/api/capture", { url }),
 
@@ -96,6 +116,15 @@ export const api = {
     labels?: string[][];
     source_image?: string;
   }) => put<{ status: string; path: string }>("/api/params/saved", payload),
+
+  savePipelineSnapshot: (payload: {
+    params: PipelineParams;
+    images: Record<string, string | undefined>;
+    result?: Record<string, unknown>;
+    labels?: string[][];
+    source_image?: string;
+    name?: string;
+  }) => post<PipelineSnapshotSaveResult>("/api/pipeline/snapshot", payload),
 
   getClassifierStatus: () => get<ClassifierStatus>("/api/classifier/status"),
 
@@ -141,6 +170,13 @@ export const api = {
     if (port) params.set("port", port);
     params.set("baud", String(baud));
     return get<RobotCommandResult>(`/api/robot/position?${params.toString()}`);
+  },
+
+  readRobotEeprom: (port?: string, baud = 9600) => {
+    const params = new URLSearchParams();
+    if (port) params.set("port", port);
+    params.set("baud", String(baud));
+    return get<RobotCommandResult>(`/api/robot/eeprom?${params.toString()}`);
   },
 
   disconnectRobot: () => post<{ status: string }>("/api/robot/disconnect", {}),

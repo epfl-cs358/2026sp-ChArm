@@ -32,8 +32,6 @@ export interface PipelineParams {
   occupancy_std_weight: number;
   white_threshold: number;
   black_threshold: number;
-  knn_n_neighbors: number;
-  color_mode: "threshold" | "knn";
   warp_size: number;
   image_path?: string;
 }
@@ -67,6 +65,13 @@ export interface PipelineResult {
   timestamp: number;
   warp_error?: string;
   board_detection_mode?: "auto" | "saved" | "none";
+}
+
+export interface PipelineSnapshotSaveResult {
+  status: string;
+  path: string;
+  summary_path: string;
+  refined_warp_path?: string;
 }
 
 export interface CalibrationData {
@@ -117,6 +122,8 @@ export interface RobotPoint3D {
   z: number;
 }
 
+export type PieceHeights = Record<"pawn" | "knight" | "bishop" | "rook" | "queen" | "king", number>;
+
 export interface RobotCalibration {
   a1: RobotPoint2D;
   file_vector: RobotPoint2D;
@@ -125,7 +132,8 @@ export interface RobotCalibration {
   z_down: number;
   home: RobotPoint3D;
   capture_bin: RobotPoint3D;
-  piece_heights: Record<"pawn" | "knight" | "bishop" | "rook" | "queen" | "king", number>;
+  pick_z: PieceHeights;
+  place_z: PieceHeights;
 }
 
 export interface RobotCalibrationWrite {
@@ -136,7 +144,8 @@ export interface RobotCalibrationWrite {
   z_down: number;
   home: RobotPoint3D;
   capture_bin: RobotPoint3D;
-  piece_heights: Record<"pawn" | "knight" | "bishop" | "rook" | "queen" | "king", number>;
+  pick_z: PieceHeights;
+  place_z: PieceHeights;
 }
 
 export interface RobotStatus {
@@ -152,10 +161,18 @@ export interface RobotStatus {
   };
 }
 
+export interface RobotBoardInfo {
+  points: Partial<Record<"a1" | "h1" | "h8" | "trash", RobotPoint2D>>;
+  current_z: number | null;
+  complete: boolean;
+  calibration: RobotCalibration | null;
+}
+
 export interface RobotCommandResult {
   status: string;
   responses: string[];
   position?: RobotPoint3D | null;
+  board_info?: RobotBoardInfo | null;
   timestamp: number;
 }
 
@@ -173,17 +190,17 @@ export interface GameStepResult {
 }
 
 export const DEFAULT_PARAMS: PipelineParams = {
-  auto_detect_board: true,
-  apply_inner_warp: false,
+  auto_detect_board: false,
+  apply_inner_warp: true,
   board_canny_low: 50,
   board_canny_high: 150,
   board_dilation_iterations: 1,
   board_min_area: 5000.0,
-  board_max_side_ratio: 1.18,
+  board_max_side_ratio: 1.35,
   board_min_area_ratio: 0.08,
   board_max_area_ratio: 0.80,
   board_min_color_ratio: 0.12,
-  board_padding_ratio: 0.006,
+  board_padding_ratio: 0.015,
   board_hough_refine: false,
   board_hough_canny_low: 30,
   board_hough_canny_high: 100,
@@ -200,13 +217,11 @@ export const DEFAULT_PARAMS: PipelineParams = {
   brightness_boost: 1.05,
   sharpen_alpha: 1.35,
   sharpen_beta: -0.35,
-  occupancy_threshold: 25.0,
+  occupancy_threshold: 11.0, // Adjusted from 4.0 to 6.0 based on empirical testing to better distinguish occupied squares while minimizing false positives.
   canny_low: 15,
   canny_high: 50,
   occupancy_std_weight: 0.4,
-  white_threshold: 125.0,
-  black_threshold: 110.0,
-  knn_n_neighbors: 5,
-  color_mode: "threshold",
+  white_threshold: 80.0,
+  black_threshold: 70.0,
   warp_size: 800,
 };

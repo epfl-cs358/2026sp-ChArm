@@ -90,7 +90,6 @@ function randomizeParams(currentParams: PipelineParams): PipelineParams {
 
   return {
     ...DEFAULT_PARAMS,
-    // preserve user-chosen color_mode — don't switch during random search
     auto_detect_board: currentParams.auto_detect_board,
     apply_inner_warp: currentParams.apply_inner_warp,
     board_canny_low: currentParams.board_canny_low,
@@ -112,8 +111,6 @@ function randomizeParams(currentParams: PipelineParams): PipelineParams {
     board_hough_min_area_keep: currentParams.board_hough_min_area_keep,
     board_hough_max_area_grow: currentParams.board_hough_max_area_grow,
     board_hough_max_corner_shift_ratio: currentParams.board_hough_max_corner_shift_ratio,
-    color_mode: currentParams.color_mode,
-    knn_n_neighbors: currentParams.knn_n_neighbors,
     warp_size: 800,
     saturation_boost: 1.0,
     brightness_boost: 1.0,
@@ -125,9 +122,8 @@ function randomizeParams(currentParams: PipelineParams): PipelineParams {
     canny_high: roundToStep(cannyLow * cannyHighRatio, 5),
     occupancy_std_weight: randomBetween(0.0, 1.2, 0.05),
     occupancy_threshold: randomBetween(2.0, 50.0, 0.5),
-    // threshold params — only varied in threshold mode, otherwise kept at default
-    white_threshold: currentParams.color_mode === "threshold" ? whiteThreshold : DEFAULT_PARAMS.white_threshold,
-    black_threshold: currentParams.color_mode === "threshold" ? whiteThreshold - blackMargin : DEFAULT_PARAMS.black_threshold,
+    white_threshold: whiteThreshold,
+    black_threshold: whiteThreshold - blackMargin,
   };
 }
 
@@ -346,6 +342,7 @@ function SupervisionPanel({
   onSetDetected,
   onPauseToggle,
   onSaveParams,
+  onSaveSnapshot,
   onLoadParams,
   onSearch,
 }: {
@@ -359,6 +356,7 @@ function SupervisionPanel({
   onSetDetected: () => void;
   onPauseToggle: () => void;
   onSaveParams: () => void;
+  onSaveSnapshot: () => void;
   onLoadParams: () => void;
   onSearch: () => void;
 }) {
@@ -408,6 +406,13 @@ function SupervisionPanel({
             className={`${compactButtonClass} w-full`}
           >
             Save JSON
+          </button>
+          <button
+            onClick={onSaveSnapshot}
+            disabled={result === null || searching}
+            className={`${compactButtonClass} w-full`}
+          >
+            Save Images
           </button>
           <button
             onClick={onLoadParams}
@@ -597,6 +602,7 @@ function ConfigColumn({
   loading,
   run,
   runDisabled,
+  onOpenManualCalibration,
 }: {
   label: string;
   params: PipelineParams;
@@ -605,6 +611,7 @@ function ConfigColumn({
   loading: boolean;
   run: () => void;
   runDisabled: boolean;
+  onOpenManualCalibration?: () => void;
 }) {
   return (
     <div className="space-y-4">
@@ -617,10 +624,10 @@ function ConfigColumn({
         >
           {loading ? (
             <span className="w-3 h-3 border-2 border-cyan-DEFAULT border-t-transparent rounded-full animate-spin" />
-          ) : "▶"} Refresh {label}
+          ) : "▶"} Pipeline {label}
         </button>
       </div>
-      <ParamControls params={params} onChange={setParams} />
+      <ParamControls params={params} onChange={setParams} onOpenManualCalibration={onOpenManualCalibration} />
       {result && <ResultPanel result={result} label={`Result ${label}`} />}
     </div>
   );
@@ -645,6 +652,7 @@ export default function LabPage() {
   const [resultAParams, setResultAParams] = useState<PipelineParams>(() => ({ ...DEFAULT_PARAMS }));
   const [loadingA, setLoadingA] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
+  const [cameraPipelineLoading, setCameraPipelineLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [searchPaused, setSearchPaused] = useState(false);
   const [savedStatus, setSavedStatus] = useState<string | null>(null);
@@ -666,6 +674,7 @@ export default function LabPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const runASeq = useRef(0);
   const runBSeq = useRef(0);
+  const skipAutoRunRef = useRef(false);
   const searchPausedRef = useRef(false);
 
   useEffect(() => {
@@ -744,6 +753,59 @@ export default function LabPage() {
       }
     }
   }, [paramsB, runWithParams]);
+
+  const runCameraPipeline = useCallback(async () => {
+    if (cameraPipelineLoading || loadingA || loadingB || searching) return;
+
+    const requestAId = runASeq.current + 1;
+    const requestBId = runBSeq.current + 1;
+    runASeq.current = requestAId;
+    if (compareMode) {
+      runBSeq.current = requestBId;
+    }
+
+    setCameraPipelineLoading(true);
+    setLoadingA(true);
+    if (compareMode) setLoadingB(true);
+    setError(null);
+
+    try {
+      const capture = await api.captureFromCamera();
+      setSource("raw");
+      setUploadedFile(null);
+      skipAutoRunRef.current = true;
+      setSelectedRawImage(capture.path);
+      setRawImages((current) => {
+        if (current.some((img) => img.path === capture.path)) return current;
+        return [{ name: capture.path.split("/").pop() ?? "latest capture", path: capture.path }, ...current];
+      });
+
+      const [resultAResponse, resultBResponse] = await Promise.all([
+        api.runPipeline({ ...paramsA, image_path: capture.path }),
+        compareMode ? api.runPipeline({ ...paramsB, image_path: capture.path }) : Promise.resolve(null),
+      ]);
+
+      if (runASeq.current === requestAId) {
+        setResultA(resultAResponse);
+        setResultAParams({ ...paramsA, image_path: capture.path });
+      }
+      if (compareMode && runBSeq.current === requestBId && resultBResponse) {
+        setResultB(resultBResponse);
+      }
+    } catch (e: unknown) {
+      if (runASeq.current === requestAId) {
+        setError(e instanceof Error ? e.message : "Camera pipeline failed");
+      }
+    } finally {
+      if (runASeq.current === requestAId) {
+        setLoadingA(false);
+      }
+      if (compareMode && runBSeq.current === requestBId) {
+        setLoadingB(false);
+      }
+      setCameraPipelineLoading(false);
+    }
+  }, [cameraPipelineLoading, compareMode, loadingA, loadingB, paramsA, paramsB, searching]);
 
   const setSupervisedLabel = useCallback((row: number, col: number, color: "black" | "white" | "clear") => {
     setSupervisedLabels((current) =>
@@ -836,6 +898,41 @@ export default function LabPage() {
     }
   }, [paramsA, resultA, supervisedLabels]);
 
+  const saveCurrentSnapshot = useCallback(async () => {
+    if (!resultA) return;
+    try {
+      const response = await api.savePipelineSnapshot({
+        params: resultAParams,
+        images: {
+          original: resultA.original,
+          board_edges_debug: resultA.board_edges_debug,
+          first_warp: resultA.first_warp,
+          refined_warp: resultA.refined_warp,
+          preprocessed: resultA.preprocessed,
+          grid_debug: resultA.grid_debug,
+          occupancy_debug: resultA.occupancy_debug,
+          piece_color_debug: resultA.piece_color_debug,
+        },
+        result: {
+          board_detection_mode: resultA.board_detection_mode,
+          warp_error: resultA.warp_error,
+          occupancy_matrix: resultA.occupancy_matrix,
+          white_bitmap: resultA.white_bitmap,
+          black_bitmap: resultA.black_bitmap,
+          brightness_scores: resultA.brightness_scores,
+          color_labels: resultA.color_labels,
+          stats: resultA.stats,
+          timings: resultA.timings,
+        },
+        labels: toBoardLabels(supervisedLabels),
+        source_image: resultA.image_path,
+      });
+      setSavedStatus(`Saved images: ${response.refined_warp_path ?? response.path}`);
+    } catch {
+      setSavedStatus("Could not save images");
+    }
+  }, [resultA, resultAParams, supervisedLabels]);
+
   const loadSavedParamsJson = useCallback(async () => {
     try {
       const response = await api.getSavedParams();
@@ -865,9 +962,6 @@ export default function LabPage() {
     try {
       const result = await api.retrainClassifier();
       setRetrainResult(result);
-      // Update knn_n_neighbors in UI to reflect selected k
-      setParamsA((p) => ({ ...p, knn_n_neighbors: result.best_k }));
-      setParamsB((p) => ({ ...p, knn_n_neighbors: result.best_k }));
     } catch (e: unknown) {
       setRetrainError(e instanceof Error ? e.message : "Retrain failed");
     } finally {
@@ -876,6 +970,11 @@ export default function LabPage() {
   }, []);
 
   useEffect(() => {
+    if (skipAutoRunRef.current) {
+      skipAutoRunRef.current = false;
+      return;
+    }
+
     if (searching) {
       return;
     }
@@ -907,6 +1006,14 @@ export default function LabPage() {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={runCameraPipeline}
+            disabled={cameraPipelineLoading || loadingA || loadingB || searching}
+            className="btn-cyan px-4 py-2 rounded-md text-sm font-mono font-semibold disabled:opacity-50"
+          >
+            {cameraPipelineLoading ? "Capturing..." : "▶"} Pipeline
+          </button>
           <button
             type="button"
             onClick={() => setShowManualCalibration((current) => !current)}
@@ -988,7 +1095,7 @@ export default function LabPage() {
 
       {showManualCalibration && (
         <div className="mb-6 rounded-md border border-border">
-          <ManualCalibration />
+          <ManualCalibration imagePath={selectedRawImage} />
         </div>
       )}
 
@@ -1046,11 +1153,11 @@ export default function LabPage() {
                   >
                     {loadingA ? (
                       <span className="w-3 h-3 border-2 border-cyan-DEFAULT border-t-transparent rounded-full animate-spin" />
-                    ) : "▶"} Refresh
+                    ) : "▶"} Pipeline
                   </button>
                 </div>
               </div>
-              <ParamControls params={paramsA} onChange={setParamsA}>
+              <ParamControls params={paramsA} onChange={setParamsA} onOpenManualCalibration={() => setShowManualCalibration(true)}>
                 <SupervisionPanel
                   labels={supervisedLabels}
                   result={resultA}
@@ -1069,6 +1176,7 @@ export default function LabPage() {
                   }}
                   onPauseToggle={() => setSearchPaused((current) => !current)}
                   onSaveParams={saveCurrentParams}
+                  onSaveSnapshot={saveCurrentSnapshot}
                   onLoadParams={loadSavedParamsJson}
                   onSearch={randomSearch}
                 />

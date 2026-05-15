@@ -43,7 +43,7 @@ function cloneBoard(params: PipelineParams): ColorLabel[][] {
     board[2][1] = "unknown";
     board[5][7] = "white";
   }
-  if (params.color_mode === "threshold" && params.white_threshold > DEFAULT_PARAMS.white_threshold + 20) {
+  if (params.white_threshold > DEFAULT_PARAMS.white_threshold + 20) {
     board[3][3] = "unknown";
   }
   return board;

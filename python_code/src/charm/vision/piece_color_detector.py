@@ -23,167 +23,78 @@ class PieceColorResult:
 
 def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
     """
-    Compute a brightness score from the center ROI after a saturation boost.
-    This is the threshold classifier's baseline score and is robust to
-    slightly off-white pieces on board squares.
+    Compute a brightness score from the center ROI using CLAHE + Otsu binarization.
+    Returns mean of the binary image: ~255 for white pieces, ~0 for black pieces.
+    This approach is robust to absolute lighting changes since it relies on local contrast.
     """
     h, w = cell_image.shape[:2]
-    x1, x2 = int(w * 0.25), int(w * 0.75)
-    y1, y2 = int(h * 0.25), int(h * 0.75)
+
+    x1 = int(w * 0.25)
+    x2 = int(w * 0.75)
+    y1 = int(h * 0.25)
+    y2 = int(h * 0.75)
+
     roi = cell_image[y1:y2, x1:x2]
 
+    # Boost saturation so slightly off-white pieces separate from flat board squares
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 2.5, 0, 255)
     roi_enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
     gray = cv2.cvtColor(roi_enhanced, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
     return float(np.mean(blurred))
-
-
-# ---------------------------------------------------------------------------
-# Threshold-based classifier (original approach)
-# ---------------------------------------------------------------------------
-
-
-def _compute_brightness_score(cell_image: np.ndarray) -> float:
-    return compute_piece_brightness_score(cell_image)
-
-
-def classify_piece_color_threshold(
-    cell_image: np.ndarray,
-    white_threshold: float,
-    black_threshold: float,
-) -> tuple[PieceColorLabel, float]:
-    """Original threshold-based color classification."""
-    h, w = cell_image.shape[:2]
-    gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    x1, x2 = int(w * 0.15), int(w * 0.85)
-    y1, y2 = int(h * 0.15), int(h * 0.85)
-    roi = blurred[y1:y2, x1:x2]
-
-    if roi.size == 0:
-        score = _compute_brightness_score(cell_image)
-        if score >= white_threshold:
-            return "white", score
-        if score <= black_threshold:
-            return "black", score
-        return "unknown", score
-
-    border_width = max(2, int(min(roi.shape[:2]) * 0.12))
-    border = np.concatenate(
-        [
-            roi[:border_width, :].ravel(),
-            roi[-border_width:, :].ravel(),
-            roi[:, :border_width].ravel(),
-            roi[:, -border_width:].ravel(),
-        ]
-    )
-    background = float(np.median(border))
-    diff = roi.astype(np.float32) - background
-
-    bright_mask = diff > 18
-    dark_mask = diff < -18
-    bright_area = float(np.mean(bright_mask))
-    dark_area = float(np.mean(dark_mask))
-
-    bright_score = float(np.mean(roi[bright_mask])) if bright_area > 0.03 else 0.0
-    dark_score = float(np.mean(roi[dark_mask])) if dark_area > 0.03 else 255.0
-    center_score = _compute_brightness_score(cell_image)
-
-    if bright_area >= 0.04 and bright_score >= white_threshold and bright_area >= dark_area * 0.7:
-        return "white", bright_score
-    if dark_area >= 0.04 and dark_score <= black_threshold:
-        return "black", dark_score
-    if center_score >= white_threshold:
-        return "white", center_score
-    if center_score <= black_threshold:
-        return "black", center_score
-    return "unknown", center_score
-
-
-# ---------------------------------------------------------------------------
-# kNN-based classifier
-# ---------------------------------------------------------------------------
-
-_model_cache = None
-
-
-def _get_model():
-    global _model_cache
-    if _model_cache is None:
-        from charm.vision.piece_color_knn import load_color_model
-
-        _model_cache = load_color_model()
-    return _model_cache
-
-
-def reload_model() -> None:
-    """Force reload of the kNN model from disk (call after retraining)."""
-    global _model_cache
-    from charm.vision.piece_color_knn import load_color_model
-
-    _model_cache = load_color_model()
-
-
-# ---------------------------------------------------------------------------
-# Unified entry point (used by pipeline.py — defaults to threshold)
-# ---------------------------------------------------------------------------
 
 
 def detect_piece_colors(
     cells: list[SquareCell],
     occupancy_results: list[OccupancyResult],
-    white_threshold: float = 125.0,
-    black_threshold: float = 110.0,
-    color_mode: str = "threshold",
-    model=None,
+    white_threshold: float = 128.0,
+    black_threshold: float = 128.0,
 ) -> list[PieceColorResult]:
     """
-    Classify color of occupied cells.
-
-    color_mode="threshold": original brightness-threshold logic (default, always available).
-    color_mode="knn": kNN classifier (requires trained model on disk).
+    Only classify occupied cells.
+    - score >= white_threshold -> white
+    - score <= black_threshold -> black
+    - otherwise -> unknown
     """
     occupancy_map = {(r.row, r.col): r for r in occupancy_results}
     results: list[PieceColorResult] = []
 
-    if color_mode == "knn":
-        from charm.vision.piece_color_knn import classify_piece_colors, compute_image_median_L
+    for cell in cells:
+        occ = occupancy_map[(cell.row, cell.col)]
 
-        if model is None:
-            model = _get_model()
-
-        crops = [c.image for c in cells]
-        occupancy_mask = [occupancy_map[(c.row, c.col)].occupied for c in cells]
-
-        if model is not None:
-            median_L = compute_image_median_L(crops)
-            labels = classify_piece_colors(crops, occupancy_mask, model, {"median_L": median_L})
-        else:
-            labels = ["empty" if not occ else "unknown" for occ in occupancy_mask]
-
-        for i, cell in enumerate(cells):
-            occ = occupancy_map[(cell.row, cell.col)]
-            raw = labels[i]
-            color: PieceColorLabel = raw if raw in ("white", "black") else "unknown"
+        if not occ.occupied:
             results.append(
-                PieceColorResult(row=cell.row, col=cell.col, occupied=occ.occupied, color=color, brightness_score=0.0)
+                PieceColorResult(
+                    row=cell.row,
+                    col=cell.col,
+                    occupied=False,
+                    color="unknown",
+                    brightness_score=0.0,
+                )
             )
-    else:
-        for cell in cells:
-            occ = occupancy_map[(cell.row, cell.col)]
-            if not occ.occupied:
-                results.append(
-                    PieceColorResult(row=cell.row, col=cell.col, occupied=False, color="unknown", brightness_score=0.0)
-                )
-            else:
-                label, score = classify_piece_color_threshold(cell.image, white_threshold, black_threshold)
-                results.append(
-                    PieceColorResult(row=cell.row, col=cell.col, occupied=True, color=label, brightness_score=score)
-                )
+            continue
+
+        score = compute_piece_brightness_score(cell.image)
+
+        if score >= white_threshold:
+            label: PieceColorLabel = "white"
+        elif score <= black_threshold:
+            label = "black"
+        else:
+            label = "unknown"
+
+        results.append(
+            PieceColorResult(
+                row=cell.row,
+                col=cell.col,
+                occupied=True,
+                color=label,
+                brightness_score=score,
+            )
+        )
 
     return results
 
@@ -233,7 +144,7 @@ def draw_piece_color_debug(
         result = result_map[(cell.row, cell.col)]
 
         if not result.occupied:
-            color = (0, 0, 255)
+            color = (0, 0, 255)  # red
             label = "E"
             thickness = 1
         else:
@@ -244,11 +155,18 @@ def draw_piece_color_debug(
                 color = (0, 255, 0)
                 label = f"B:{result.brightness_score:.0f}"
             else:
-                color = (0, 255, 255)
+                color = (0, 255, 255)  # yellow
                 label = f"U:{result.brightness_score:.0f}"
             thickness = 3
 
-        cv2.rectangle(debug_image, (cell.x1, cell.y1), (cell.x2, cell.y2), color, thickness)
+        cv2.rectangle(
+            debug_image,
+            (cell.x1, cell.y1),
+            (cell.x2, cell.y2),
+            color,
+            thickness,
+        )
+
         text_color = color if result.color != "white" else (0, 0, 0)
         cv2.putText(
             debug_image,

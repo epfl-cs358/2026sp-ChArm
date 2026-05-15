@@ -6,11 +6,7 @@ import cv2
 import numpy as np
 
 from charm.utils.bitmap import build_white_black_bitmaps
-from charm.vision.grid_splitter import (
-    detect_8x8_grid_lines,
-    draw_8x8_grid,
-    extract_8x8_cells,
-)
+from charm.vision.grid_splitter import draw_8x8_grid, extract_8x8_cells
 from charm.vision.occupancy_detector import (
     detect_occupancy,
     draw_occupancy_debug,
@@ -20,7 +16,6 @@ from charm.vision.piece_color_detector import (
     detect_piece_colors,
     draw_piece_color_debug,
 )
-from charm.vision.preprocessing import enhance_board_contrast
 
 
 @dataclass
@@ -65,7 +60,7 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     # are no longer used in this simplified pipeline.
     roi_debug_image = image.copy()
     cropped_board_image = image.copy()
-    preprocessing_debug_image = enhance_board_contrast(image)
+    preprocessing_debug_image = image.copy()
     corners_debug_image = image.copy()
 
     # Placeholder debug images to keep the result structure stable
@@ -79,28 +74,29 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
         interpolation=cv2.INTER_CUBIC,
     )
 
-    enhanced_warped_board = enhance_board_contrast(warped_board)
-    x_lines, y_lines = detect_8x8_grid_lines(enhanced_warped_board)
-
     # Draw grid and split cells
-    grid_debug_image = draw_8x8_grid(enhanced_warped_board, x_lines, y_lines)
-    occupancy_cells = extract_8x8_cells(enhanced_warped_board, x_lines, y_lines)
-    color_cells = extract_8x8_cells(warped_board, x_lines, y_lines)
+    grid_debug_image = draw_8x8_grid(warped_board)
+    cells = extract_8x8_cells(warped_board)
 
     # Occupancy detection
-    occupancy_results = detect_occupancy(occupancy_cells, threshold=2.5)
+    occupancy_results = detect_occupancy(cells, threshold=4.0)
     occupancy_matrix = occupancy_to_matrix(occupancy_results)
     occupancy_debug_image = draw_occupancy_debug(
-        enhanced_warped_board,
-        occupancy_cells,
+        warped_board,
+        cells,
         occupancy_results,
     )
 
     # Piece color detection
-    color_results = detect_piece_colors(color_cells, occupancy_results)
+    color_results = detect_piece_colors(
+        cells,
+        occupancy_results,
+        white_threshold=110.5,
+        black_threshold=110.0,
+    )
     piece_color_debug_image = draw_piece_color_debug(
         warped_board,
-        color_cells,
+        cells,
         color_results,
     )
     # Final bitmaps
