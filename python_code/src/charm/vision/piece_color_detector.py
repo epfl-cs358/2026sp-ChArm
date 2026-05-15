@@ -22,29 +22,20 @@ class PieceColorResult:
 
 
 def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
-    """
-    Compute a brightness score from the center ROI using CLAHE + Otsu binarization.
-    Returns mean of the binary image: ~255 for white pieces, ~0 for black pieces.
-    This approach is robust to absolute lighting changes since it relies on local contrast.
-    """
     h, w = cell_image.shape[:2]
 
-    x1 = int(w * 0.25)
-    x2 = int(w * 0.75)
-    y1 = int(h * 0.25)
-    y2 = int(h * 0.75)
+    x1 = int(w * 0.35)
+    x2 = int(w * 0.65)
+    y1 = int(h * 0.30)
+    y2 = int(h * 0.65)
 
     roi = cell_image[y1:y2, x1:x2]
 
-    # Boost saturation so slightly off-white pieces separate from flat board squares
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 2.5, 0, 255)
-    roi_enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    gray = cv2.cvtColor(roi_enhanced, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    return float(np.percentile(gray, 75))
 
-    return float(np.mean(blurred))
+
 
 
 def detect_piece_colors(
