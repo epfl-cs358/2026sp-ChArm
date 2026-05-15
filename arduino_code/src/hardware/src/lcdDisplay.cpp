@@ -5,6 +5,7 @@ LCDDisplay::LCDDisplay(int rsPin, int ePin, int d4Pin, int d5Pin, int d6Pin, int
     : lcd(rsPin, ePin, d4Pin, d5Pin, d6Pin, d7Pin) {
     memset(lastLine1, 0, sizeof(lastLine1));
     memset(lastLine2, 0, sizeof(lastLine2));
+    lastResyncMs = 0;
 }
 
 void LCDDisplay::begin() {
@@ -12,6 +13,7 @@ void LCDDisplay::begin() {
     lcd.clear();
     memset(lastLine1, 0, sizeof(lastLine1));
     memset(lastLine2, 0, sizeof(lastLine2));
+    lastResyncMs = millis();
 }
 
 // Writes s into buf as exactly 16 chars (padded with spaces), null-terminated.
@@ -41,6 +43,20 @@ void LCDDisplay::update(const String& line1, const String& line2) {
         lcd.print(p2);
         memcpy(lastLine2, p2, 17);
     }
+}
+
+void LCDDisplay::tick() {
+    unsigned long now = millis();
+    if (now - lastResyncMs < RESYNC_INTERVAL_MS) return;
+    lastResyncMs = now;
+
+    // Re-run the HD44780 init sequence to re-sync the 4-bit interface, then
+    // redraw the current content. Recovers from a noise-induced nibble desync.
+    lcd.begin(16, 2);
+    lcd.setCursor(0, 0);
+    lcd.print(lastLine1);
+    lcd.setCursor(0, 1);
+    lcd.print(lastLine2);
 }
 
 void LCDDisplay::clear() {
