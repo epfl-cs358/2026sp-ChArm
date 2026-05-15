@@ -620,7 +620,7 @@ void setup() {
   Serial.begin(9600);
   arm.begin();
   //Serial1.begin(115200);
-  //uiController.begin();
+  uiController.begin();
 
   if (loadCalFromEEPROM()) {
     Serial.println("Board calibration loaded from EEPROM.");
@@ -665,5 +665,6 @@ void loop() {
     }
   }
 
-  //uiController.loop();
+  uiController.loop();
+  lcd.tick();
 }

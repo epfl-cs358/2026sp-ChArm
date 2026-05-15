@@ -3,7 +3,7 @@ from __future__ import annotations
 import serial
 import chess
 
-manual_serial = serial.Serial('/dev/cu.usbmodem1401', 9600, timeout=2)
+manual_serial = serial.Serial('/dev/cu.usbserial-130', 9600, timeout=2)
 
 def execute_move(uci_move: str, board: chess.Board):
     move = chess.Move.from_uci(uci_move)
