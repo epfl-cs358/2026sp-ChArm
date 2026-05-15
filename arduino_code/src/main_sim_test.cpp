@@ -217,6 +217,7 @@ void loop() {
     simStream.tick();
     simStream.tickBoardOk();
     uiController.loop();
+    lcd.tick();   // periodically re-sync the LCD to recover from noise glitches
 
     UIMode mode = uiState.getMode();
     if (mode != lastMode) {
