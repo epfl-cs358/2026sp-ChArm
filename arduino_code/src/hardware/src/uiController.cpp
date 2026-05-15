@@ -5,8 +5,8 @@
 #include "leadScrew.h"
 #include "scaraArm.h"
 #include "gripper.h"
+#include "enableDriver.h"
 
-//extern void calibrate();
 extern ScaraJoint joint1;
 extern ScaraJoint joint2;
 extern LeadScrew leadScrew;
@@ -38,7 +38,7 @@ void UIController::loop() {
         if (currentMode == CALIBRATION) {
             // auto-start calibration immediately on entering CALIBRATION
             sendMessage("CALIBRATE_START");
-            //calibrate();
+            arm.calibrate();
             sendMessage("CALIBRATE_DONE");
             uiState.setMode(MENU);
             currentMode = uiState.getMode();
@@ -110,24 +110,21 @@ void UIController::loop() {
 
             case MANUAL_ACTIVE:
                 if (uiState.getSelectedControlTarget() == JOINT1) {
-                    if (ev == INPUT_NEXT); //joint1.moveBy(MANUAL_JOINT_STEP_DEG);
-                    else if (ev == INPUT_PREV); //joint1.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    if (ev == INPUT_NEXT) { beforeMove(); joint1.moveBy(MANUAL_JOINT_STEP_DEG); arm.sync(); afterMove(); }
+                    else if (ev == INPUT_PREV) { beforeMove(); joint1.moveBy(-MANUAL_JOINT_STEP_DEG); arm.sync(); afterMove(); }
                     else if (ev == INPUT_SELECT) {
-                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == JOINT2) {
-                    if (ev == INPUT_NEXT); //joint2.moveBy(MANUAL_JOINT_STEP_DEG);
-                    else if (ev == INPUT_PREV); //joint2.moveBy(-MANUAL_JOINT_STEP_DEG);
+                    if (ev == INPUT_NEXT) { beforeMove(); joint2.moveBy(MANUAL_JOINT_STEP_DEG); arm.sync(); afterMove(); }
+                    else if (ev == INPUT_PREV) { beforeMove(); joint2.moveBy(-MANUAL_JOINT_STEP_DEG); arm.sync(); afterMove(); }
                     else if (ev == INPUT_SELECT) {
-                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == LEADSCREW) {
-                    if (ev == INPUT_NEXT); //leadScrew.moveBy_mm(MANUAL_Z_STEP_MM);
-                    else if (ev == INPUT_PREV); //leadScrew.moveBy_mm(-MANUAL_Z_STEP_MM);
+                    if (ev == INPUT_NEXT) { beforeMove(); leadScrew.moveBy_mm(MANUAL_Z_STEP_MM); afterMove(); }
+                    else if (ev == INPUT_PREV) { beforeMove(); leadScrew.moveBy_mm(-MANUAL_Z_STEP_MM); afterMove(); }
                     else if (ev == INPUT_SELECT) {
-                        //arm.sync();
                         uiState.setMode(MANUAL_CONTROL);
                     }
                 } else if (uiState.getSelectedControlTarget() == GRIPPER) {
@@ -137,9 +134,9 @@ void UIController::loop() {
                         uiState.gripperPrev();
                     } else if (ev == INPUT_SELECT) {
                         if (uiState.getGripperAction() == GRIPPER_OPEN) {
-                            //gripper.open();
+                            gripper.open();
                         } else {
-                            //gripper.close();
+                            gripper.close();
                         }
                         uiState.setMode(MANUAL_CONTROL);
                     }

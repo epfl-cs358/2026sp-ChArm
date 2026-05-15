@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const unsigned int DEFAULT_STEP_DELAY_US = 600;
+const unsigned int DEFAULT_STEP_DELAY_US = 300;
 
 // Motor
 const int MICROSTEPS = 16;
@@ -45,26 +45,26 @@ enum ChessPiece {
 
 // Pick/place Z presets per piece type (mm)
 // Common hover/travel height (safe for all pieces)
-const float PICKPLACE_HOVER_Z_MM = 60.0f;
+const float PICKPLACE_HOVER_Z_MM = 90.0f;
 
 // Pick Z (lower to grip) per piece type
 const float PICK_Z[6] = {
-  20.0f,  // PAWN
-  20.0f,  // KNIGHT
-  22.0f,  // BISHOP
-  25.0f,  // ROOK
-  28.0f,  // QUEEN
-  30.0f   // KING
+  4.0f,  // PAWN
+  0.0f,  // KNIGHT
+  8.0f,  // BISHOP
+  7.0f,  // ROOK
+  11.0f,  // QUEEN
+  11.0f   // KING
 };
 
 // Place Z (lower to set down) per piece type
 const float PLACE_Z[6] = {
-  30.0f,  // PAWN
-  30.0f,  // KNIGHT
-  32.0f,  // BISHOP
-  35.0f,  // ROOK
-  38.0f,  // QUEEN
-  40.0f   // KING
+  14.0f,  // PAWN
+  10.0f,  // KNIGHT
+  18.0f,  // BISHOP
+  17.0f,  // ROOK
+  21.0f,  // QUEEN
+  21.0f   // KING
 };
 
 // Trash position Z (hardcoded, not calibrated)

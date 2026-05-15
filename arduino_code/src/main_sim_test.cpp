@@ -202,9 +202,9 @@ static const char* modeName(UIMode m) {
 
 void setup() {
     Serial.begin(115200);
-    //pinMode(ENABLE_PIN, OUTPUT);
-    //digitalWrite(ENABLE_PIN, HIGH);   // drivers disabled — arm won't move
+    pinMode(ENABLE_PIN, OUTPUT);
 
+    arm.begin();
     uiController.begin();
 
     Serial.println(F("=== SIM TEST READY ==="));
