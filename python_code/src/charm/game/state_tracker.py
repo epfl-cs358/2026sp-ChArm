@@ -105,6 +105,12 @@ def infer_move_from_bitmaps(
     )
 
     for move in board.legal_moves:
+        # Bitmaps are occupancy-only (no piece type), so all promotion variants
+        # produce identical bitmaps.  Keep only queen promotions to avoid a
+        # spurious ambiguous_observation when a human promotes.
+        if move.promotion and move.promotion != chess.QUEEN:
+            continue
+
         candidate_board = board.copy(stack=False)
         candidate_board.push(move)
 

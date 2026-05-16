@@ -54,7 +54,7 @@ void LeadScrew::calibrate() {
         stepper_.step();
     }
     stepper_.setDirection(true);
-    moveBy_mm(5.0f); // back off a bit to avoid wearing out the switch
+    moveBy_mm(1.0f); // back off a bit to avoid wearing out the switch
     setZero();
 }
 

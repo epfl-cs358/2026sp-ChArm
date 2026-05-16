@@ -13,6 +13,7 @@ type Point3DKey = "home" | "capture_bin";
 type PieceKey = "pawn" | "knight" | "bishop" | "rook" | "queen" | "king";
 
 const DEFAULT_SERIAL_PORT = "/dev/ttyUSB0";
+const ROBOT_PORT_STORAGE_KEY = "charm.robot.port";
 const PIECES: PieceKey[] = ["pawn", "knight", "bishop", "rook", "queen", "king"];
 const DEFAULT_PICK_Z: Record<PieceKey, number> = {
   pawn: 3,
@@ -227,7 +228,10 @@ function OutputLog({ result, error }: { result: RobotCommandResult | null; error
 export default function RobotPage() {
   const [status, setStatus] = useState<RobotStatus | null>(null);
   const [form, setForm] = useState<RobotCalibrationWrite>(DEFAULT_FORM);
-  const [port, setPort] = useState(DEFAULT_SERIAL_PORT);
+  const [port, setPort] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_SERIAL_PORT;
+    return window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) || DEFAULT_SERIAL_PORT;
+  });
   const [baud, setBaud] = useState(9600);
   const [square, setSquare] = useState("e4");
   const [uci, setUci] = useState("e2e4");
@@ -250,6 +254,10 @@ export default function RobotPage() {
   const eepromAutoLoadRef = useRef(false);
   const jogInFlightRef = useRef(false);
   const lastJogAtRef = useRef(0);
+
+  useEffect(() => {
+    window.localStorage.setItem(ROBOT_PORT_STORAGE_KEY, port);
+  }, [port]);
 
   const applyStatus = useCallback((next: RobotStatus) => {
     setStatus(next);

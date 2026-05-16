@@ -8,6 +8,7 @@ import serial
 OnCheckBoard = Callable[[], bool]
 OnPlayerDone = Callable[[], None]
 OnSetDifficulty = Callable[[int], None]
+OnSetColor = Callable[[str], None]  # called with "white" or "black"
 OnLine = Callable[[str], None]
 
 
@@ -39,12 +40,14 @@ class ArduinoUIControllerLink:
         on_check_board: Optional[OnCheckBoard] = None,
         on_player_done: Optional[OnPlayerDone] = None,
         on_set_difficulty: Optional[OnSetDifficulty] = None,
+        on_set_color: Optional[OnSetColor] = None,
         on_line: Optional[OnLine] = None,
     ) -> None:
         self.serial = serial.Serial(port, baud, timeout=timeout)
         self._on_check_board = on_check_board
         self._on_player_done = on_player_done
         self._on_set_difficulty = on_set_difficulty
+        self._on_set_color = on_set_color
         self._on_line = on_line
 
         self._stop_event = threading.Event()
@@ -56,11 +59,13 @@ class ArduinoUIControllerLink:
         on_check_board: Optional[OnCheckBoard] = None,
         on_player_done: Optional[OnPlayerDone] = None,
         on_set_difficulty: Optional[OnSetDifficulty] = None,
+        on_set_color: Optional[OnSetColor] = None,
         on_line: Optional[OnLine] = None,
     ) -> None:
         self._on_check_board = on_check_board
         self._on_player_done = on_player_done
         self._on_set_difficulty = on_set_difficulty
+        self._on_set_color = on_set_color
         self._on_line = on_line
 
     def start(self) -> None:
@@ -146,3 +151,12 @@ class ArduinoUIControllerLink:
                     return
                 self._on_set_difficulty(difficulty)
                 self.send("OK")
+        elif line.startswith("SET_COLOR "):
+            if self._on_set_color is not None:
+                try:
+                    value = int(line.split(maxsplit=1)[1])
+                except (IndexError, ValueError):
+                    return
+                # Arduino sends 0=WHITE, 1=BLACK (matches PlayerTurn enum)
+                color = "white" if value == 0 else "black"
+                self._on_set_color(color)

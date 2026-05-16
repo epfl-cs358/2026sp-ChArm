@@ -12,7 +12,8 @@ enum UIMode {
     MANUAL_ACTIVE,
     CALIBRATION,
     GAME,
-    ERROR
+    ERROR,
+    COLOR_SELECT  // 8 — added at end so ERROR stays 7
 };
 
 enum MenuItem {
@@ -97,6 +98,10 @@ public:
     void setGameStatus(GameStatus status);
     GameStatus getGameStatus() const;
 
+    // Color selection (COLOR_SELECT mode)
+    void colorToggle();
+    PlayerTurn getSelectedColor() const;
+
     void clearError();
 
     // Display methods
@@ -113,6 +118,7 @@ private:
     PlayerTurn currentTurn;
     GameStatus gameStatus;
     UIMode modeBeforeError;
+    PlayerTurn selectedColor;
     
     static const int MENU_COUNT = 4;
     static const int DIFFICULTY_COUNT = 3;

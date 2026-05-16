@@ -65,6 +65,13 @@ export interface PipelineResult {
   timestamp: number;
   warp_error?: string;
   board_detection_mode?: "auto" | "saved" | "none";
+  board_validation_debug?: {
+    expected_fen: string;
+    mismatch_count: number;
+    observed_white_bitmap: number[][];
+    observed_black_bitmap: number[][];
+    color_labels: ColorLabel[][];
+  };
 }
 
 export interface PipelineSnapshotSaveResult {
@@ -189,6 +196,37 @@ export interface GameStepResult {
   };
 }
 
+export interface GameSessionMove {
+  success: boolean;
+  message: string;
+  move_uci: string | null;
+  san?: string | null;
+  mismatch_count?: number | null;
+  error_code?: "unchanged" | "illegal_move" | "in_check" | "ambiguous" | null;
+}
+
+export interface GameSessionRobotCommand {
+  status: string;
+  responses: string[];
+  position?: RobotPoint3D | null;
+  board_info?: RobotBoardInfo | null;
+  timestamp: number;
+} 
+
+export interface GameSessionResult {
+  status: string;
+  player_color: "white" | "black" | null;
+  robot_color: "white" | "black" | null;
+  fen: string | null;
+  moves: string[];
+  pipeline?: PipelineResult;
+  started?: GameSessionMove;
+  human_move?: GameSessionMove;
+  robot_move?: GameSessionMove;
+  robot_command?: GameSessionRobotCommand | null;
+  timestamp: number;
+}
+
 export const DEFAULT_PARAMS: PipelineParams = {
   auto_detect_board: false,
   apply_inner_warp: true,
@@ -217,7 +255,7 @@ export const DEFAULT_PARAMS: PipelineParams = {
   brightness_boost: 1.05,
   sharpen_alpha: 1.35,
   sharpen_beta: -0.35,
-  occupancy_threshold: 11.0, // Adjusted from 4.0 to 6.0 based on empirical testing to better distinguish occupied squares while minimizing false positives.
+  occupancy_threshold: 4.0,
   canny_low: 15,
   canny_high: 50,
   occupancy_std_weight: 0.4,

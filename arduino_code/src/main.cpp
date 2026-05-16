@@ -32,13 +32,10 @@ ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
 UIState uiState;
 ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
 LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
-UIController uiController(buttonInput, uiState, lcd, Serial1);
+UIController uiController(buttonInput, uiState, lcd, Serial);
 
 int stepCount = 0;
 static String cmdBuffer = "";
-static String esp32CamIP = "";
-static String serial1Buf  = "";
-static const unsigned long ESP32_REPLY_TIMEOUT_MS = 2000;
 
 // Cartesian jog mode: w/a/s/d move XY, u/j move Z. Toggle with `cm`.
 static bool controllerMode  = false;
@@ -293,56 +290,6 @@ static void printCmHelp() {
   Serial.println("----------------------------------");
 }
 
-static bool updateEsp32CamIPFromLine(String line) {
-  line.trim();
-
-  if (line.startsWith("WIFI_OK ")) {
-    esp32CamIP = line.substring(8);
-    esp32CamIP.trim();
-    return esp32CamIP.length() > 0;
-  }
-
-  if (line.startsWith("IP ")) {
-    esp32CamIP = line.substring(3);
-    esp32CamIP.trim();
-    return esp32CamIP.length() > 0;
-  }
-
-  return false;
-}
-
-static bool readEsp32Line(String &line, unsigned long timeoutMs) {
-  line = "";
-  unsigned long deadline = millis() + timeoutMs;
-
-  while (millis() < deadline) {
-    if (Serial2.available()) {
-      char c = (char)Serial2.read();
-      if (c == '\r') continue;
-      if (c == '\n') {
-        line.trim();
-        return line.length() > 0;
-      }
-      line += c;
-    }
-  }
-
-  line.trim();
-  return line.length() > 0;
-}
-
-static bool refreshEsp32CamIP() {
-  while (Serial2.available()) Serial2.read();
-  Serial2.println("IP");
-
-  String reply = "";
-  if (!readEsp32Line(reply, ESP32_REPLY_TIMEOUT_MS)) {
-    return false;
-  }
-
-  return updateEsp32CamIPFromLine(reply);
-}
-
 // ── Command handler ───────────────────────────────────────────────────────────
 static void handleCommand(String cmd) {
   cmd.trim();
@@ -566,30 +513,6 @@ static void handleCommand(String cmd) {
       else                { Serial.println("Controller mode OFF"); }
       return;
 
-    } else if (cmd.startsWith("injectCal ")) {
-      // injectCal <h1x> <h1y> <a1x> <a1y> <h8x> <h8y> <trashx> <trashy>
-      String vals = cmd.substring(10);
-      float buf[8];
-      int pos = 0;
-      for (int i = 0; i < 8; i++) {
-        int sp = vals.indexOf(' ', pos);
-        String token = (sp < 0) ? vals.substring(pos) : vals.substring(pos, sp);
-        buf[i] = token.toFloat();
-        pos = sp + 1;
-        if (sp < 0 && i < 7) { Serial.println("injectCal ERR: expected 8 values"); return; }
-      }
-      h1X = buf[0]; h1Y = buf[1];
-      a1X = buf[2]; a1Y = buf[3];
-      h8X = buf[4]; h8Y = buf[5];
-      trashX = buf[6]; trashY = buf[7];
-      h1Calibrated = h8Calibrated = a1Calibrated = trashCalibrated = true;
-      saveCalToEEPROM();
-      Serial.print("CAL_INJECTED H1=("); Serial.print(h1X); Serial.print(","); Serial.print(h1Y);
-      Serial.print(") A1=("); Serial.print(a1X); Serial.print(","); Serial.print(a1Y);
-      Serial.print(") H8=("); Serial.print(h8X); Serial.print(","); Serial.print(h8Y);
-      Serial.print(") Trash=("); Serial.print(trashX); Serial.print(","); Serial.print(trashY); Serial.println(")");
-      return;
-
     } else if (cmd == "cal" || cmd == "boardCal") {
       if (controllerMode) { Serial.println("Exit controller mode first (q)."); return; }
       enterCalMode();
@@ -672,34 +595,6 @@ static void handleCommand(String cmd) {
       else { Serial.print("  arrived at ("); Serial.print(arm.x()); Serial.print(", "); Serial.print(arm.y()); Serial.println(")"); }
       return;
 
-    } else if (cmd == "esp32status") {
-      Serial.print("Cached IP: ");
-      Serial.println(esp32CamIP.length() > 0 ? esp32CamIP : "(none)");
-      String reply = "";
-      while (Serial2.available()) Serial2.read();
-      Serial2.println("IP");
-      readEsp32Line(reply, ESP32_REPLY_TIMEOUT_MS);
-      updateEsp32CamIPFromLine(reply);
-      Serial.print("ESP32 reply: ");
-      Serial.println(reply.length() > 0 ? reply : "(no response - check Serial2 wiring on Mega pins 16/17)");
-      Serial.print("Resolved IP: ");
-      Serial.println(esp32CamIP.length() > 0 ? esp32CamIP : "(none)");
-      return;
-
-    } else if (cmd == "photo") {
-      if (esp32CamIP.length() == 0) {
-        refreshEsp32CamIP();
-      }
-
-      if (esp32CamIP.length() > 0) {
-        Serial.print("PHOTO_URL http://");
-        Serial.print(esp32CamIP);
-        Serial.println("/capture");
-      } else {
-        Serial.println("PHOTO_ERR ESP32-CAM IP unknown - wait for ESP32 boot or check Serial2 wiring on Mega pins 16/17");
-      }
-      return;
-
     } else if (cmd == "pos") {
       Serial.print("Joint1: "); Serial.print(arm.j1Angle()); Serial.println("°");
       Serial.print("Joint2: "); Serial.print(arm.j2Angle()); Serial.println("°");
@@ -723,8 +618,9 @@ void setup() {
   //digitalWrite(ENABLE_PIN, LOW);
 
   Serial.begin(9600);
-  Serial2.begin(9600);
   arm.begin();
+  //Serial1.begin(115200);
+  //uiController.begin();
 
   if (loadCalFromEEPROM()) {
     Serial.println("Board calibration loaded from EEPROM.");
@@ -769,15 +665,6 @@ void loop() {
     }
   }
 
-  while (Serial2.available()) {
-    char c = (char)Serial2.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      serial1Buf.trim();
-      updateEsp32CamIPFromLine(serial1Buf);
-      serial1Buf = "";
-    } else {
-      serial1Buf += c;
-    }
-  }
+  //uiController.loop();
+  //lcd.tick();
 }

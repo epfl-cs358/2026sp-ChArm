@@ -5,6 +5,7 @@ import {
   PipelineResult,
   PipelineSnapshotSaveResult,
   CalibrationData,
+  GameSessionResult,
   RobotCalibrationWrite,
   RobotCommandResult,
   RobotStatus,
@@ -66,6 +67,35 @@ export const api = {
     capture?: boolean;
     max_mismatches?: number;
   }) => post<GameStepResult>("/api/game/step", payload),
+
+  startGameSession: (payload: {
+    player_color?: "white" | "black";
+    difficulty?: 0 | 1 | 2;
+    params?: PipelineParams;
+    capture?: boolean;
+    max_mismatches?: number;
+    engine_path?: string;
+    think_time?: number;
+    port?: string;
+    baud?: number;
+    execute_robot?: boolean;
+  }) => post<GameSessionResult>("/api/game/session/start", payload),
+
+  processGameSessionTurn: (payload: {
+    params?: PipelineParams;
+    capture?: boolean;
+    max_mismatches?: number;
+    difficulty?: 0 | 1 | 2;
+    engine_path?: string;
+    think_time?: number;
+    port?: string;
+    baud?: number;
+    execute_robot?: boolean;
+  }) => post<GameSessionResult>("/api/game/session/player-done", payload),
+
+  resetGameSession: () => post<GameSessionResult>("/api/game/session/reset", {}),
+
+  getGameSession: () => get<GameSessionResult>("/api/game/session"),
 
   getCalibration: () => get<CalibrationData>("/api/calibration"),
 

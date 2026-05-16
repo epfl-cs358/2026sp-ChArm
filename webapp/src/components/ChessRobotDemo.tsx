@@ -6,8 +6,8 @@ import { RotateCcw } from "lucide-react";
 import RobotArmOverlay, { ArmMove } from "@/components/RobotArmOverlay";
 import { Button } from "@/components/ui/button";
 
-const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
-const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
+const FILES = ["h", "g", "f", "e", "d", "c", "b", "a"];
+const RANKS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 const PIECES: Record<string, string> = {
   wp: "♙", wn: "♘", wb: "♗", wr: "♖", wq: "♕", wk: "♔",
   bp: "♟", bn: "♞", bb: "♝", br: "♜", bq: "♛", bk: "♚",
