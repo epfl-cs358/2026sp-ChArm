@@ -12,6 +12,8 @@ ButtonInput::ButtonInput(int pinCLK, int pinDT, int pinSW) {
 }
 
 void ButtonInput::begin() {
+    // INPUT_PULLUP gives the encoder/button pins a defined HIGH idle level so
+    // floating lines and electrical noise can't register as spurious events.
     pinMode(pinCLK, INPUT_PULLUP);
     pinMode(pinDT, INPUT_PULLUP);
     pinMode(pinSW, INPUT_PULLUP);

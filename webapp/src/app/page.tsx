@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { Chess, Square } from "chess.js";
+import { Chess } from "chess.js";
 import {
   ArrowRight,
   Bot,
@@ -77,9 +77,6 @@ const COORDINATE_COLORS = {
   light: "var(--charm-board-light)",
   dark: "var(--charm-board-dark)",
 } as const;
-const PIECE_NAMES: Record<string, string> = {
-  p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen", k: "king",
-};
 const PIECE_IMAGE_PATHS: Record<string, string> = {
   wp: "/chesscom-pieces/wp.png",
   wn: "/chesscom-pieces/wn.png",
@@ -94,6 +91,8 @@ const PIECE_IMAGE_PATHS: Record<string, string> = {
   bq: "/chesscom-pieces/bq.png",
   bk: "/chesscom-pieces/bk.png",
 };
+const DEFAULT_SERIAL_PORT = "/dev/ttyUSB0";
+const ROBOT_PORT_STORAGE_KEY = "charm.robot.port";
 
 type TurnState =
   | "arm_calibrate"
@@ -146,21 +145,6 @@ function robotPositionToBoardTarget(
     x: fileIndex + 0.5,
     y: 7.5 - rankIndex,
   };
-}
-
-function moveFromUci(game: Chess, uci: string) {
-  return game.move({
-    from: uci.slice(0, 2) as Square,
-    to: uci.slice(2, 4) as Square,
-    promotion: (uci[4] as "q" | "r" | "b" | "n" | undefined) ?? "q",
-  });
-}
-
-function fallbackMove(game: Chess) {
-  const moves = game.moves({ verbose: true });
-  const captures = moves.filter((move) => move.captured);
-  const checks = moves.filter((move) => move.san.includes("+"));
-  return (checks[0] ?? captures[0] ?? moves[0])?.lan ?? null;
 }
 
 function ChessComCoordinates({ svgBoardUnits = false }: { svgBoardUnits?: boolean }) {
@@ -364,9 +348,9 @@ function HeaderSystemStatus({ robotStatus, calibration }: { robotStatus: RobotSt
 
 export default function Dashboard() {
   const [game, setGame] = useState(() => new Chess());
-  const [moves, setMoves] = useState<string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>("arm_calibrate");
   const [armCalibrated, setArmCalibrated] = useState(false);
+  const [gameSessionStarted, setGameSessionStarted] = useState(false);
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [stepResult, setStepResult] = useState<GameStepResult | null>(null);
   const [robotMove, setRobotMove] = useState<ArmMove | null>(null);
@@ -386,6 +370,10 @@ export default function Dashboard() {
   const [lastCapturePath, setLastCapturePath] = useState<string | null>(null);
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
+  const [robotPort, setRobotPort] = useState<string>(() => {
+    if (typeof window === "undefined") return DEFAULT_SERIAL_PORT;
+    return window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) || DEFAULT_SERIAL_PORT;
+  });
   const [calibration, setCalibration] = useState<CalibrationData | null>(null);
   const [params, setParams] = useState<typeof DEFAULT_PARAMS>(() => ({ ...DEFAULT_PARAMS }));
   const [showParamsModal, setShowParamsModal] = useState(false);
@@ -398,6 +386,10 @@ export default function Dashboard() {
       .then(([robot, vision, saved]) => {
         if (cancelled) return;
         setRobotStatus(robot);
+        setRobotPort((current) => {
+          const stored = typeof window !== "undefined" ? window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) : null;
+          return stored || robot.active_port || robot.detected_port || current;
+        });
         setCalibration(vision);
         setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
         if (saved.exists && saved.data?.params) {
@@ -410,23 +402,16 @@ export default function Dashboard() {
     };
   }, []);
 
-  const requestBestMove = useCallback(async (fen: string) => {
-    const response = await fetch("/api/stockfish", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fen, depth: 8 }),
-    });
-    if (!response.ok) throw new Error("Stockfish request failed");
-    const data = (await response.json()) as { bestMove?: string };
-    return data.bestMove ?? null;
-  }, []);
-
   const runStartupCalibrate = useCallback(async () => {
     if (turnState === "arm_calibrating") return;
     setError(null);
     setTurnState("arm_calibrating");
     try {
-      const response = await api.sendRobotCommand({ command: "arm-calibrate" });
+      const response = await api.sendRobotCommand({
+        command: "arm-calibrate",
+        port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
+        baud: 9600,
+      });
       setMoveLog((current) => [
         ...current,
         response.responses.length > 0 ? `Calibrate: ${response.responses.at(-1)}` : "Calibrate: command sent",
@@ -438,12 +423,13 @@ export default function Dashboard() {
         )
       );
       setArmCalibrated(true);
+      setGameSessionStarted(false);
       setTurnState("human_turn");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Arm calibration failed");
       setTurnState("error");
     }
-  }, [robotStatus, turnState]);
+  }, [robotPort, robotStatus, turnState]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const finishRobotMove = useCallback((_finishedMove: ArmMove) => {
@@ -464,90 +450,117 @@ export default function Dashboard() {
     setTurnState("capturing");
 
     try {
-      const response = await api.processGameStep({
-        moves,
+      if (!gameSessionStarted) {
+        const session = await api.startGameSession({
+          player_color: "white",
+          difficulty: 1,
+          params,
+          capture: true,
+          max_mismatches: 0,
+          port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
+          baud: 9600,
+        });
+        if (session.pipeline) {
+          setResult(session.pipeline);
+          setLastCapturePath(session.pipeline.image_path ?? null);
+          if (session.status !== "ok" && session.pipeline.board_validation_debug) {
+            const debug = session.pipeline.board_validation_debug;
+            console.log(
+              "%c=== BOARD VALIDATION FAILED ===",
+              "color: red; font-size: 14px; font-weight: bold"
+            );
+            console.log(
+              "%cExpected FEN: %c" + debug.expected_fen,
+              "color: blue; font-weight: bold",
+              "color: green"
+            );
+            console.log(
+              "%cTotal mismatches: %c" + debug.mismatch_count,
+              "color: red; font-weight: bold",
+              "color: orange"
+            );
+            console.log("%cObserved White bitmap:", "color: blue; font-weight: bold", debug.observed_white_bitmap);
+            console.log("%cObserved Black bitmap:", "color: red; font-weight: bold", debug.observed_black_bitmap);
+            console.log("%cColor labels:", "color: purple; font-weight: bold", debug.color_labels);
+          }
+        }
+        if (session.status !== "ok") {
+          setError(session.started?.message ?? "Initial board validation failed");
+          setTurnState("error");
+          return;
+        }
+        if (session.fen) setGame(new Chess(session.fen));
+        setGameSessionStarted(true);
+        setMoveLog((current) => [
+          ...current,
+          session.started?.message ?? "Game session started",
+          ...(session.robot_move?.move_uci ? [`Robot: ${session.robot_move.san ?? session.robot_move.move_uci}`] : []),
+        ]);
+        if (session.robot_move?.move_uci) {
+          armMoveId.current += 1;
+          setRobotMove(uciToArmMove(session.robot_move.move_uci, session.robot_move.san ?? session.robot_move.move_uci, armMoveId.current));
+        }
+        setTurnState("human_turn");
+        return;
+      }
+
+      const response = await api.processGameSessionTurn({
         params,
         capture: true,
         max_mismatches: 0,
+        difficulty: 1,
+        port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
+        baud: 9600,
       });
-      setLastCapturePath(response.pipeline.image_path ?? null);
-      setStepResult(response);
-      setResult(response.pipeline);
+      if (response.pipeline) {
+        setLastCapturePath(response.pipeline.image_path ?? null);
+        setResult(response.pipeline);
+      }
+      setStepResult(null);
       setTurnState("processing");
 
-      if (!response.inference.accepted || !response.inference.move_uci) {
-        setError(`Vision could not accept a move: ${response.inference.status}, mismatches=${response.inference.mismatch_count}`);
+      if (response.status !== "ok" && response.status !== "game_over") {
+        const humanMove = response.human_move;
+        const errorPrefix: Record<string, string> = {
+          unchanged: "[BOARD UNCHANGED]",
+          illegal_move: "[ILLEGAL MOVE]",
+          in_check: "[IN CHECK]",
+          ambiguous: "[AMBIGUOUS]",
+        };
+        const prefix = humanMove?.error_code ? errorPrefix[humanMove.error_code] ?? "" : "";
+        const baseMsg = humanMove?.message ?? response.robot_move?.message ?? `Game session failed: ${response.status}`;
+        setError(prefix ? `${prefix} ${baseMsg}` : baseMsg);
         setTurnState("error");
         return;
       }
 
-      const afterHuman = new Chess(game.fen());
-      const humanMove = moveFromUci(afterHuman, response.inference.move_uci);
-      if (!humanMove) {
-        setError(`Move detected but illegal in UI state: ${response.inference.move_uci}`);
-        setTurnState("error");
-        return;
+      if (response.fen) setGame(new Chess(response.fen));
+      if (response.human_move?.move_uci) {
+        setMoveLog((current) => [...current, `You: ${response.human_move?.san ?? response.human_move?.move_uci}`]);
+        setLastMove(response.human_move.move_uci);
       }
-
-      const humanUci = `${humanMove.from}${humanMove.to}${humanMove.promotion ?? ""}`;
-      setGame(afterHuman);
-      setMoves((current) => [...current, humanUci]);
-      setMoveLog((current) => [...current, `You: ${humanMove.san}`]);
-      setLastMove(humanUci);
       setTurnState("human_move_found");
 
-      if (afterHuman.isGameOver()) {
+      if (response.status === "game_over") {
         setTurnState("human_turn");
         return;
       }
 
       setTurnState("robot_thinking");
-      const best = (await requestBestMove(afterHuman.fen())) ?? fallbackMove(afterHuman);
-      if (!best) {
-        setError("Stockfish did not return a robot move.");
-        setTurnState("error");
-        return;
+      if (response.robot_move?.move_uci) {
+        armMoveId.current += 1;
+        setRobotMove(uciToArmMove(response.robot_move.move_uci, response.robot_move.san ?? response.robot_move.move_uci, armMoveId.current));
+        setTurnState("robot_moving");
+        setMoveLog((current) => [...current, `Robot: ${response.robot_move?.san ?? response.robot_move?.move_uci}`]);
+        setLastMove(response.robot_move.move_uci);
       }
-
-      const robotPreview = new Chess(afterHuman.fen());
-      const robotChessMove = moveFromUci(robotPreview, best);
-      if (!robotChessMove) {
-        setError(`Robot move is illegal: ${best}`);
-        setTurnState("error");
-        return;
-      }
-
-      const robotUci = `${robotChessMove.from}${robotChessMove.to}${robotChessMove.promotion ?? ""}`;
-      const isCapture = !!robotChessMove.captured;
-      const isCastling = robotChessMove.piece === "k" &&
-        Math.abs(robotChessMove.from.charCodeAt(0) - robotChessMove.to.charCodeAt(0)) === 2;
-      const isPromotion = !!robotChessMove.promotion;
-      const pieceType = PIECE_NAMES[robotChessMove.piece] ?? "pawn";
-
-      armMoveId.current += 1;
-      setRobotMove(uciToArmMove(best, robotChessMove.san, armMoveId.current));
-      setTurnState("robot_moving");
-
-      await api.sendRobotCommand({
-        command: "move",
-        uci: best,
-        capture: isCapture,
-        castling: isCastling,
-        promotion: isPromotion,
-        piece_type: pieceType,
-      });
-
-      setGame(robotPreview);
-      setMoves((current) => [...current, robotUci]);
-      setMoveLog((current) => [...current, `Robot: ${robotChessMove.san}`]);
-      setLastMove(robotUci);
       setRobotMove(null);
       setTurnState("human_turn");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to process turn");
       setTurnState("error");
     }
-  }, [armCalibrated, game, moves, params, requestBestMove, turnState]);
+  }, [armCalibrated, gameSessionStarted, params, robotPort, robotStatus, turnState]);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -649,7 +662,7 @@ export default function Dashboard() {
             style={{ background: "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
-            Player done
+            {gameSessionStarted ? "Player done" : "Start game"}
           </Button>
         </div>
       </div>
@@ -901,7 +914,16 @@ export default function Dashboard() {
                 <Settings className="size-4" style={{ color: "var(--charm-cyan)" }} />
                 <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Pipeline Parameters</span>
               </div>
-              <button onClick={() => setShowParamsModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setParams({ ...DEFAULT_PARAMS })}
+                  className="font-jetbrains text-xs"
+                  style={{ color: "var(--charm-cyan)" }}
+                >
+                  Reset
+                </button>
+                <button onClick={() => setShowParamsModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+              </div>
             </div>
             <div className="max-h-[85vh] overflow-y-auto p-4 ">
               <ParamControls params={params} onChange={setParams} onOpenManualCalibration={() => { setShowParamsModal(false); setShowManualCalibrationModal(true); }} />

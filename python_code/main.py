@@ -6,7 +6,6 @@ import sys
 
 import cv2
 import chess
-import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 SRC_PATH = ROOT / "src"
@@ -15,18 +14,11 @@ sys.path.insert(0, str(SRC_PATH))
 # from charm.game import BoardStateTracker, update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
 from charm.vision.transferphoto import fetch_raw_image
-from charm.vision.board_detector import (
-    find_largest_quadrilateral,
-    draw_black_mask_debug,
-    draw_color_mask_debug,
-    draw_detected_corners,
-)
 from charm.vision.calibration_config import (
     DEFAULT_BOARD_CALIBRATION_JSON,
     DEFAULT_INNER_WARP_CALIBRATION_JSON,
 )
 from charm.vision.four_point_calibration import (
-    FourPointCalibration,
     load_four_point_calibration,
     load_inner_warp_calibration,
     refine_board_with_inner_corners,
@@ -48,20 +40,8 @@ def save_debug_images(result) -> None:
     cv2.imwrite(str(ROOT / "output_piece_color_debug.jpg"), result.piece_color_debug_image)
 
 
-def save_detection_debug_images(
-    original_image: np.ndarray,
-    corners: np.ndarray,
-) -> None:
-    cv2.imwrite(str(ROOT / "output_black_mask_debug.jpg"), draw_black_mask_debug(original_image))
-    cv2.imwrite(str(ROOT / "output_color_mask_debug.jpg"), draw_color_mask_debug(original_image))
-    cv2.imwrite(str(ROOT / "output_corners_debug.jpg"), draw_detected_corners(original_image, corners))
-
-
 def print_saved_outputs() -> None:
     print("Saved:")
-    print("- output_black_mask_debug.jpg")
-    print("- output_color_mask_debug.jpg")
-    print("- output_corners_debug.jpg")
     print("- output_first_warp.jpg")
     print("- output_refined_warp.jpg")
     print("- output_warped_board.jpg")
@@ -142,32 +122,11 @@ def main() -> None:
     if original_image is None:
         raise FileNotFoundError(f"Could not read image from path: {original_image_path}")
 
-    # --- AUTO-DETECT BOARD CORNERS ---
-    auto_quad = find_largest_quadrilateral(original_image)
-    if auto_quad is not None:
-        print("Board corners successfully auto-detected!")
-        board_calibration = FourPointCalibration(
-            top_left=tuple(map(int, auto_quad[0])),
-            top_right=tuple(map(int, auto_quad[1])),
-            bottom_right=tuple(map(int, auto_quad[2])),
-            bottom_left=tuple(map(int, auto_quad[3])),
+    if not board_calibration_path.exists():
+        raise FileNotFoundError(
+            f"Could not find board calibration file: {board_calibration_path}\n"
+            "Run calibrate_board_corners.py first."
         )
-    else:
-        if not board_calibration_path.exists():
-            raise FileNotFoundError(
-                f"Could not find board calibration file and auto-detect failed: {board_calibration_path}\n"
-                "Run calibrate_board_corners.py first."
-            )
-        print("Auto-detect failed. Falling back to saved board calibration.")
-        board_calibration = load_four_point_calibration(board_calibration_path)
-
-    detected_corners = auto_quad if auto_quad is not None else np.array([
-        board_calibration.top_left,
-        board_calibration.top_right,
-        board_calibration.bottom_right,
-        board_calibration.bottom_left,
-    ], dtype=np.float32)
-    save_detection_debug_images(original_image, detected_corners)
 
     if not inner_calibration_path.exists():
         raise FileNotFoundError(
@@ -175,6 +134,7 @@ def main() -> None:
             "Run calibrate_inner_warp_corners.py first."
         )
 
+    board_calibration = load_four_point_calibration(board_calibration_path)
     inner_calibration = load_inner_warp_calibration(inner_calibration_path)
 
     first_warp = warp_from_calibration(

@@ -16,12 +16,7 @@ class OccupancyResult:
     score: float
 
 
-def compute_occupancy_score(
-    cell_image: np.ndarray,
-    canny_low: int = 15,
-    canny_high: int = 50,
-    std_weight: float = 0.4,
-) -> float:
+def compute_occupancy_score(cell_image: np.ndarray) -> float:
     """
     Compute a simple edge-density score on the center ROI of the cell.
     Higher score -> more likely occupied.
@@ -38,20 +33,20 @@ def compute_occupancy_score(
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Lower thresholds catch weak edges from white pieces on light squares.
-    edges = cv2.Canny(blurred, canny_low, canny_high)
+    # Lower thresholds to catch weak edges from white pieces on light squares
+    edges = cv2.Canny(blurred, 15, 50)
     edge_score = float(np.mean(edges))
 
     # White pieces are 3D with shadows; empty squares are flat and uniform.
     # Std dev captures this variance even when edges are weak.
-    std_score = float(np.std(blurred)) * std_weight
+    std_score = float(np.std(blurred)) * 0.4
 
     return edge_score + std_score
 
 
 def detect_occupancy(
     cells: list[SquareCell],
-    threshold: float = 4.0,
+    threshold: float = 8,
 ) -> list[OccupancyResult]:
     results: list[OccupancyResult] = []
 

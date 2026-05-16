@@ -27,30 +27,28 @@ void ScaraArm::calibrate() {
     Serial.println("Gripper openned for calibration");
     gripper.open();
 
-
     Serial.println("Calbrating lead screw");
     leadScrew.calibrate();
+    Serial.println("Lead screw calibration complete");
     leadScrew.moveBy_mm(60.0f); //go up to clear king and box during rest of calibration
 
-
     Serial.println("Calibrating base joint");
-    //set new soft limits 
+    //set new soft limits
     joint1.calibrate();
+    Serial.println("Base joint calibration complete");
     joint1.moveBy(137.0f);
     joint1.setZero();
     joint1.setMinAngle(-137.0f);
     joint1.setMaxAngle(137.0f);
 
-
     Serial.println("Calibrating forearm joint");
     joint2.calibrate();
+    Serial.println("Forearm joint calibration complete");
     //once j1 is calibrated need to move it in the middle so it straight along the axis
     joint2.moveTo(joint2.maxAngleDeg() / 2.0f);
     joint2.setZero(); // set zero to the middle of the range so IK is centered on straight configuration
     joint2.setMinAngle(-joint2.maxAngleDeg() / 2.0f -2);
     joint2.setMaxAngle(joint2.maxAngleDeg() / 2.0f + 2);
-
-
 
     sync();
     Serial.println("Calibration done");
@@ -107,8 +105,9 @@ void ScaraArm::moveByZ(float mm) {
 bool ScaraArm::moveXYZ(float x, float y, float z) {
     beforeMove();
     leadScrew.moveTo_mm(z);
-    return moveXY(x, y);
+    bool result = moveXY(x, y);
     afterMove();
+    return result;
 }
 
 void ScaraArm::moveJ1(float deg) { joint1.moveTo(deg); sync(); }

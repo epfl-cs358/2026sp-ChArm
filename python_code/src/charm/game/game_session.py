@@ -21,6 +21,7 @@ class SessionResult:
     move_uci: Optional[str] = None
     motion_step: Optional[str] = None
     mismatch_count: Optional[int] = None
+    error_code: Optional[str] = None
 
 
 @dataclass
@@ -32,6 +33,7 @@ class SessionStep:
     move_uci: Optional[str] = None
     motion_step: Optional[str] = None
     mismatch_count: Optional[int] = None
+    error_code: Optional[str] = None
 
 
 class GameSession:
@@ -58,6 +60,7 @@ class GameSession:
     def __init__(self) -> None:
         self.initialized = False
         self.game_started = False
+        self.flip_180 = False
 
         self.player_color: Optional[PlayerColor] = None
         self.robot_color: Optional[PlayerColor] = None
@@ -78,6 +81,7 @@ class GameSession:
                 move_uci=result.move_uci,
                 motion_step=result.motion_step,
                 mismatch_count=result.mismatch_count,
+                error_code=result.error_code,
             )
         )
 
@@ -111,6 +115,7 @@ class GameSession:
         """
         self.initialized = False
         self.game_started = False
+        self.flip_180 = False
         self.player_color = None
         self.robot_color = None
         self.tracker = None
@@ -123,6 +128,7 @@ class GameSession:
         self,
         image_path: str,
         max_mismatches: int = 0,
+        flip_180: bool = False,
     ) -> SessionResult:
         """
         Validate the standard initial chess position from a calibrated board image.
@@ -138,11 +144,17 @@ class GameSession:
         """
         pipeline_result = run_board_pipeline(image_path)
 
+        white_bitmap = pipeline_result.white_bitmap
+        black_bitmap = pipeline_result.black_bitmap
+        if flip_180:
+            white_bitmap = [list(reversed(row)) for row in reversed(white_bitmap)]
+            black_bitmap = [list(reversed(row)) for row in reversed(black_bitmap)]
+
         expected_board = chess.Board()
         mismatch_count = compare_board_to_bitmaps(
             expected_board,
-            pipeline_result.white_bitmap,
-            pipeline_result.black_bitmap,
+            white_bitmap,
+            black_bitmap,
         )
 
         if mismatch_count > max_mismatches:
@@ -160,6 +172,7 @@ class GameSession:
         self.tracker = BoardStateTracker(expected_board)
         self.initialized = True
         self.game_started = False
+        self.flip_180 = flip_180
         self.player_color = None
         self.robot_color = None
 
@@ -279,15 +292,43 @@ class GameSession:
             tracker=self.tracker,
             image_path=image_path,
             max_mismatches=max_mismatches,
+            flip_180=self.flip_180,
         )
 
         inference_result = update_result.inference_result
 
         if inference_result.move is None:
+            assert self.tracker is not None
+            board = self.tracker.board
+            status = inference_result.status
+
+            if status == "unchanged_position":
+                error_code = "unchanged"
+                message = "Board unchanged — did you complete your move before pressing done?"
+            elif status == "ambiguous_observation":
+                error_code = "ambiguous"
+                n = inference_result.matching_move_count
+                message = (
+                    f"Ambiguous: {n} legal moves match the observed position. "
+                    "Reposition your piece precisely and try again."
+                )
+            else:
+                if board.is_check():
+                    legal_count = board.legal_moves.count()
+                    error_code = "in_check"
+                    message = (
+                        f"You are in check ({legal_count} escaping move{'s' if legal_count != 1 else ''} available) "
+                        "— your move must resolve the check."
+                    )
+                else:
+                    error_code = "illegal_move"
+                    message = "Illegal move: the piece position does not match any legal move from the current position."
+
             result = SessionResult(
                 success=False,
-                message="No valid move could be inferred from the current image.",
+                message=message,
                 mismatch_count=inference_result.mismatch_count,
+                error_code=error_code,
             )
             self._record_step(image_path, result)
             return result
@@ -538,6 +579,7 @@ class GameSession:
             print(
                 f"[{step.step_index}] "
                 f"success={step.success}, "
+                f"error_code={step.error_code}, "
                 f"image={step.image_path}, "
                 f"move={step.move_uci}, "
                 f"motion={step.motion_step}, "

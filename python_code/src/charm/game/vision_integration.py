@@ -31,11 +31,17 @@ def update_tracker_from_image(
     tracker: BoardStateTracker,
     image_path: str,
     max_mismatches: int = 0,
+    flip_180: bool = False,
 ) -> VisionStateUpdateResult:
     pipeline_result = run_board_pipeline(image_path)
+    white_bitmap = pipeline_result.white_bitmap
+    black_bitmap = pipeline_result.black_bitmap
+    if flip_180:
+        white_bitmap = [list(reversed(row)) for row in reversed(white_bitmap)]
+        black_bitmap = [list(reversed(row)) for row in reversed(black_bitmap)]
     inference_result = tracker.update_from_bitmaps(
-        pipeline_result.white_bitmap,
-        pipeline_result.black_bitmap,
+        white_bitmap,
+        black_bitmap,
         max_mismatches=max_mismatches,
     )
     return VisionStateUpdateResult(

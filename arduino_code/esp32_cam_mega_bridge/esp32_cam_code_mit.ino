@@ -221,15 +221,9 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  if (psramFound()) {
-    config.frame_size = FRAMESIZE_VGA; // 640x480, better board/cell detail than QVGA
-    config.jpeg_quality = 8;           // Lower number = less JPEG compression
-    config.fb_count = 2;
-  } else {
-    config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 10;
-    config.fb_count = 1;
-  }
+  config.frame_size = FRAMESIZE_QVGA;   // 320x240
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
 
@@ -240,20 +234,9 @@ bool initCamera() {
   sensor_t *s = esp_camera_sensor_get();
 
   if (s) {
-    s->set_framesize(s, psramFound() ? FRAMESIZE_VGA : FRAMESIZE_QVGA);
-    s->set_quality(s, 8);
     s->set_brightness(s, 1);
-    s->set_contrast(s, 1);
-    s->set_saturation(s, 1);
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_gainceiling(s, (gainceiling_t)2);
-    s->set_bpc(s, 1);
-    s->set_wpc(s, 1);
-    s->set_lenc(s, 1);
+    s->set_saturation(s, 0);
+    s->set_framesize(s, FRAMESIZE_QVGA);
   }
 
   return true;

@@ -36,8 +36,6 @@ def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
     return float(np.percentile(gray, 75))
 
 
-
-
 def detect_piece_colors(
     cells: list[SquareCell],
     occupancy_results: list[OccupancyResult],

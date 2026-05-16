@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_PATH))
 
 from webapp_backend import robot_adapter
+from charm.game.game_session import GameSession, SessionResult
 
 from charm.vision.four_point_calibration import (
     FourPointCalibration,
@@ -35,17 +36,84 @@ from charm.vision.four_point_calibration import (
     save_inner_warp_calibration,
     warp_from_calibration,
 )
-from charm.vision.board_detector import (
-    BoardDetectionParams,
-    draw_board_detection_step,
-    find_largest_quadrilateral,
-)
-from charm.vision.grid_splitter import (
-    detect_8x8_grid_lines,
-    draw_8x8_grid,
-    extract_8x8_cells,
-)
+try:
+    from charm.vision.board_detector import (
+        BoardDetectionParams,
+        draw_board_detection_step,
+        find_largest_quadrilateral,
+    )
+except ImportError:
+    from dataclasses import dataclass
+
+    from charm.vision.board_detector import (
+        draw_detected_corners,
+        find_largest_quadrilateral as _find_largest_quadrilateral,
+    )
+
+    @dataclass
+    class BoardDetectionParams:
+        canny_low: int = 50
+        canny_high: int = 150
+        dilation_iterations: int = 1
+        min_area: float = 5000.0
+        max_side_ratio: float = 1.35
+        min_area_ratio: float = 0.08
+        max_area_ratio: float = 0.80
+        min_color_ratio: float = 0.12
+        padding_ratio: float = 0.015
+        hough_refine: bool = False
+        hough_canny_low: int = 30
+        hough_canny_high: int = 100
+        hough_threshold: int = 40
+        hough_min_line_ratio: float = 0.33
+        hough_max_line_gap: int = 18
+        hough_max_line_distance: float = 35.0
+        hough_min_area_keep: float = 0.97
+        hough_max_area_grow: float = 1.08
+        hough_max_corner_shift_ratio: float = 0.08
+
+    def find_largest_quadrilateral(image: np.ndarray, params: BoardDetectionParams | None = None):
+        return _find_largest_quadrilateral(image)
+
+    def draw_board_detection_step(
+        image: np.ndarray,
+        corners: np.ndarray,
+        output_size: int = 800,
+    ) -> np.ndarray:
+        return draw_detected_corners(image, corners)
+try:
+    from charm.vision.grid_splitter import (
+        detect_8x8_grid_lines,
+        draw_8x8_grid,
+        extract_8x8_cells,
+    )
+except ImportError:
+    from charm.vision.grid_splitter import (
+        draw_8x8_grid as _draw_8x8_grid,
+        extract_8x8_cells as _extract_8x8_cells,
+    )
+
+    def detect_8x8_grid_lines(board_image: np.ndarray):
+        height, width = board_image.shape[:2]
+        x_lines = [round(i * width / 8) for i in range(9)]
+        y_lines = [round(i * height / 8) for i in range(9)]
+        return x_lines, y_lines
+
+    def draw_8x8_grid(
+        board_image: np.ndarray,
+        x_lines: list[int] | None = None,
+        y_lines: list[int] | None = None,
+    ) -> np.ndarray:
+        return _draw_8x8_grid(board_image)
+
+    def extract_8x8_cells(
+        board_image: np.ndarray,
+        x_lines: list[int] | None = None,
+        y_lines: list[int] | None = None,
+    ):
+        return _extract_8x8_cells(board_image)
 from charm.vision.occupancy_detector import (
+    detect_occupancy,
     OccupancyResult,
     compute_occupancy_score,
     draw_occupancy_debug,
@@ -70,6 +138,10 @@ LEGACY_RAW_IMAGE_PATH = PYTHON_CODE_DIR / "latest_raw.jpg"
 SAVED_PARAMS_PATH = REPO_ROOT / "saved_pipeline_params.json"
 ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
+LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
+DIFFICULTY_SKILL_LEVEL = {0: 5, 1: 12, 2: 20}
+
+_GAME_SESSION = GameSession()
 
 app = FastAPI(title="ChArm Vision API", version="1.0.0")
 app.add_middleware(
@@ -193,6 +265,7 @@ class RobotCommandPayload(BaseModel):
     z: Optional[float] = None
     corner: Optional[str] = None
     piece_type: Optional[str] = None
+    captured_piece_type: Optional[str] = None
     down: bool = False
     capture: bool = False
     castling: bool = False
@@ -204,6 +277,31 @@ class GameStepPayload(BaseModel):
     params: PipelineParams = Field(default_factory=PipelineParams)
     capture: bool = False
     max_mismatches: int = 0
+
+
+class GameSessionPayload(BaseModel):
+    player_color: str = "white"
+    difficulty: int = 1
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    capture: bool = True
+    max_mismatches: int = 0
+    engine_path: str = "stockfish"
+    think_time: float = 0.5
+    port: Optional[str] = None
+    baud: int = 9600
+    execute_robot: bool = True
+
+
+class GameSessionTurnPayload(BaseModel):
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    capture: bool = True
+    max_mismatches: int = 0
+    difficulty: int = 1
+    engine_path: str = "stockfish"
+    think_time: float = 0.5
+    port: Optional[str] = None
+    baud: int = 9600
+    execute_robot: bool = True
 
 
 class CameraCapturePayload(BaseModel):
@@ -363,43 +461,26 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
     timings["warp_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
     t = time.perf_counter()
-    preprocessed = preprocess(warped, p)
+    preprocessed = warped.copy()
     results["preprocessed"] = to_b64(preprocessed)
     timings["preprocess_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
     t = time.perf_counter()
-    x_lines, y_lines = detect_8x8_grid_lines(preprocessed)
-    results["grid_debug"] = to_b64(draw_8x8_grid(preprocessed.copy(), x_lines, y_lines))
+    x_lines, y_lines = detect_8x8_grid_lines(warped)
+    results["grid_debug"] = to_b64(draw_8x8_grid(warped.copy(), x_lines, y_lines))
     timings["grid_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
     t = time.perf_counter()
-    occupancy_cells = extract_8x8_cells(preprocessed, x_lines, y_lines)
-    color_cells = extract_8x8_cells(warped, x_lines, y_lines)
-    scores = [
-        compute_occupancy_score(
-            c.image,
-            canny_low=p.canny_low,
-            canny_high=p.canny_high,
-            std_weight=p.occupancy_std_weight,
-        )
-        for c in occupancy_cells
-    ]
-    occupancy_results = [
-        OccupancyResult(
-            row=occupancy_cells[i].row,
-            col=occupancy_cells[i].col,
-            occupied=scores[i] > p.occupancy_threshold,
-            score=scores[i],
-        )
-        for i in range(len(occupancy_cells))
-    ]
+    occupancy_cells = extract_8x8_cells(warped, x_lines, y_lines)
+    color_cells = occupancy_cells
+    occupancy_results = detect_occupancy(occupancy_cells, threshold=p.occupancy_threshold)
     results["occupancy_debug"] = to_b64(
-        draw_occupancy_debug(preprocessed.copy(), occupancy_cells, occupancy_results)
+        draw_occupancy_debug(warped.copy(), occupancy_cells, occupancy_results)
     )
     results["occupancy_matrix"] = occupancy_to_matrix(occupancy_results)
     scores_grid = [[0.0] * 8 for _ in range(8)]
-    for i, c in enumerate(occupancy_cells):
-        scores_grid[c.row][c.col] = round(scores[i], 3)
+    for r in occupancy_results:
+        scores_grid[r.row][r.col] = round(r.score, 3)
     results["occupancy_scores"] = scores_grid
     timings["occupancy_ms"] = round((time.perf_counter() - t) * 1000, 1)
 
@@ -448,6 +529,116 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
         results["warp_error"] = warp_error
 
     return results
+
+
+def _capture_or_resolve_image(params: PipelineParams, capture: bool) -> Path:
+    if capture:
+        try:
+            from charm.vision.transferphoto import fetch_raw_image
+
+            return Path(fetch_raw_image())
+        except Exception as e:
+            raise HTTPException(500, f"Capture failed: {e}")
+    return Path(params.image_path) if params.image_path else resolve_latest_raw_path()
+
+
+def _flip_bitmap_180(bitmap: list[list[int]]) -> list[list[int]]:
+    """Flip a bitmap 180 degrees (rotate board 180°)."""
+    return [[bitmap[7 - r][7 - c] for c in range(8)] for r in range(8)]
+
+
+def _run_pipeline_and_write_calibrated(params: PipelineParams, capture: bool) -> tuple[Path, dict, Path]:
+    path = _capture_or_resolve_image(params, capture)
+    if not path.exists():
+        raise HTTPException(404, f"Image not found: {path}")
+
+    img = cv2.imread(str(path))
+    if img is None:
+        raise HTTPException(400, f"Failed to decode image: {path}")
+
+    pipeline_result = run_pipeline(img, params)
+    pipeline_result["image_path"] = str(path)
+    pipeline_result["timestamp"] = time.time()
+
+    try:
+        _write_b64_image(LATEST_CALIBRATED_PATH, pipeline_result["refined_warp"])
+    except Exception as e:
+        raise HTTPException(500, f"Failed to write calibrated board image: {e}")
+
+    return path, pipeline_result, LATEST_CALIBRATED_PATH
+
+
+def _session_result_payload(result: Optional[SessionResult], board_before: Optional[chess.Board] = None) -> Optional[dict]:
+    if result is None:
+        return None
+
+    san = None
+    if result.move_uci and board_before is not None:
+        try:
+            move = chess.Move.from_uci(result.move_uci)
+            san = board_before.san(move) if move in board_before.legal_moves else None
+        except Exception:
+            san = None
+
+    return {
+        "success": result.success,
+        "message": result.message,
+        "move_uci": result.move_uci,
+        "san": san,
+        "mismatch_count": result.mismatch_count,
+        "error_code": result.error_code,
+    }
+
+
+def _game_session_payload(
+    status: str,
+    pipeline_result: Optional[dict] = None,
+    started: Optional[SessionResult] = None,
+    human_move: Optional[SessionResult] = None,
+    human_board_before: Optional[chess.Board] = None,
+    robot_move: Optional[SessionResult] = None,
+    robot_board_before: Optional[chess.Board] = None,
+    robot_command: Optional[dict] = None,
+) -> dict:
+    board = _GAME_SESSION.get_current_board()
+    return {
+        "status": status,
+        "player_color": _GAME_SESSION.get_player_color(),
+        "robot_color": _GAME_SESSION.get_robot_color(),
+        "fen": board.fen() if board is not None else None,
+        "moves": _GAME_SESSION.get_move_history(),
+        "pipeline": pipeline_result,
+        "started": _session_result_payload(started),
+        "human_move": _session_result_payload(human_move, human_board_before),
+        "robot_move": _session_result_payload(robot_move, robot_board_before),
+        "robot_command": robot_command,
+        "timestamp": time.time(),
+    }
+
+
+def _robot_move_request(move_uci: str, board: chess.Board) -> dict:
+    move = chess.Move.from_uci(move_uci)
+    piece = board.piece_at(move.from_square)
+    captured_piece = board.piece_at(move.to_square)
+    if board.is_en_passant(move):
+        captured_square = chess.square(chess.square_file(move.to_square), chess.square_rank(move.from_square))
+        captured_piece = board.piece_at(captured_square)
+    return {
+        "command": "move",
+        "uci": move_uci,
+        "capture": board.is_capture(move),
+        "castling": board.is_castling(move),
+        "promotion": bool(move.promotion),
+        "piece_type": chess.piece_name(piece.piece_type).lower() if piece else "pawn",
+        "captured_piece_type": chess.piece_name(captured_piece.piece_type).lower() if captured_piece else None,
+    }
+
+
+def _execute_robot_session_move(move_uci: str, board: chess.Board, port: Optional[str], baud: int) -> dict:
+    payload = _robot_move_request(move_uci, board)
+    commands = robot_adapter.commands_for_request(payload)
+    responses = robot_adapter.send_commands(commands, port, baud)
+    return robot_adapter.response(responses, ROBOT_CAL_PATH)
 
 
 @app.get("/health")
@@ -508,7 +699,30 @@ def robot_command(payload: RobotCommandPayload):
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         commands = robot_adapter.commands_for_request(payload_data)
-        responses = robot_adapter.send_commands(commands, payload.port, payload.baud)
+        max_wait = 180.0 if payload.command == "arm-calibrate" else 8.0
+        idle_timeout = 30.0 if payload.command == "arm-calibrate" else 0.25
+        print(
+            f"[robot] command={payload.command} port={payload.port or 'auto'} "
+            f"baud={payload.baud} commands={commands}",
+            flush=True,
+        )
+        stop_on = "Calibration done" if payload.command == "arm-calibrate" else None
+        responses = robot_adapter.send_commands(
+            commands,
+            payload.port,
+            payload.baud,
+            max_wait=max_wait,
+            idle_timeout=idle_timeout,
+            stop_on=stop_on,
+        )
+        print(f"[robot] responses={responses}", flush=True)
+        if payload.command == "arm-calibrate" and not any("Calibration done" in line for line in responses):
+            raise HTTPException(
+                502,
+                "Arduino did not report calibration progress. "
+                "Expected firmware to print 'Gripper openned for calibration' and 'Calibration done'. "
+                f"Responses: {responses}",
+            )
     except ValueError as e:
         raise HTTPException(400, str(e))
     except HTTPException:
@@ -673,6 +887,163 @@ def game_step(payload: GameStepPayload):
     }
 
 
+@app.get("/api/game/session")
+def game_session_status():
+    return _game_session_payload("ok")
+
+
+@app.post("/api/game/session/reset")
+def game_session_reset():
+    _GAME_SESSION.reset()
+    return _game_session_payload("reset")
+
+
+@app.post("/api/game/session/start")
+def game_session_start(payload: GameSessionPayload):
+    if payload.player_color not in {"white", "black"}:
+        raise HTTPException(400, "player_color must be 'white' or 'black'")
+    if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
+        raise HTTPException(400, "difficulty must be 0, 1, or 2")
+
+    _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
+
+    # Flip bitmaps 180° to handle board orientation (board is physically rotated 180°)
+    pipeline_result["white_bitmap"] = _flip_bitmap_180(pipeline_result["white_bitmap"])
+    pipeline_result["black_bitmap"] = _flip_bitmap_180(pipeline_result["black_bitmap"])
+    pipeline_result["color_labels"] = [list(reversed(row)) for row in reversed(pipeline_result["color_labels"])]
+
+    _GAME_SESSION.reset()
+    initial = _GAME_SESSION.initialize_from_image(str(calibrated_path), max_mismatches=payload.max_mismatches, flip_180=True)
+    if not initial.success:
+        # Add board validation debug info
+        expected_board = chess.Board()
+        pipeline_result["board_validation_debug"] = {
+            "expected_fen": expected_board.fen(),
+            "mismatch_count": initial.mismatch_count,
+            "observed_white_bitmap": pipeline_result["white_bitmap"],
+            "observed_black_bitmap": pipeline_result["black_bitmap"],
+            "color_labels": pipeline_result.get("color_labels"),
+        }
+        return _game_session_payload("board_failed", pipeline_result=pipeline_result, started=initial)
+
+    started = _GAME_SESSION.start_game(payload.player_color)
+    if not started.success:
+        return _game_session_payload("start_failed", pipeline_result=pipeline_result, started=started)
+
+    robot_result = None
+    robot_board_before = None
+    robot_command = None
+    if _GAME_SESSION.robot_moves_first():
+        robot_board_before = _GAME_SESSION.get_current_board()
+        robot_board_copy = robot_board_before.copy(stack=True) if robot_board_before is not None else None
+        robot_result = _GAME_SESSION.compute_robot_move(
+            engine_path=payload.engine_path,
+            think_time=payload.think_time,
+            skill_level=DIFFICULTY_SKILL_LEVEL[payload.difficulty],
+        )
+        if robot_result.success and robot_result.move_uci and robot_board_copy is not None:
+            if payload.execute_robot:
+                try:
+                    robot_command = _execute_robot_session_move(
+                        robot_result.move_uci,
+                        robot_board_copy,
+                        payload.port,
+                        payload.baud,
+                    )
+                except Exception as e:
+                    robot_adapter.close()
+                    raise HTTPException(500, f"Robot command failed: {e}")
+            commit_result = _GAME_SESSION.commit_robot_move(robot_result.move_uci)
+            if not commit_result.success:
+                robot_result = commit_result
+
+    return _game_session_payload(
+        "ok",
+        pipeline_result=pipeline_result,
+        started=started,
+        robot_move=robot_result,
+        robot_board_before=robot_board_before,
+        robot_command=robot_command,
+    )
+
+
+@app.post("/api/game/session/player-done")
+def game_session_player_done(payload: GameSessionTurnPayload):
+    if not _GAME_SESSION.is_game_started():
+        raise HTTPException(400, "Game session has not started. Run /api/game/session/start first.")
+    if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
+        raise HTTPException(400, "difficulty must be 0, 1, or 2")
+
+    _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
+
+    human_board_before = _GAME_SESSION.get_current_board()
+    human_board_copy = human_board_before.copy(stack=True) if human_board_before is not None else None
+    human_result = _GAME_SESSION.process_player_move_from_image(
+        str(calibrated_path),
+        max_mismatches=payload.max_mismatches,
+    )
+    if not human_result.success:
+        return _game_session_payload(
+            "player_move_failed",
+            pipeline_result=pipeline_result,
+            human_move=human_result,
+            human_board_before=human_board_copy,
+        )
+
+    current_board = _GAME_SESSION.get_current_board()
+    if current_board is not None and current_board.is_game_over():
+        return _game_session_payload(
+            "game_over",
+            pipeline_result=pipeline_result,
+            human_move=human_result,
+            human_board_before=human_board_copy,
+        )
+
+    robot_board_before = _GAME_SESSION.get_current_board()
+    robot_board_copy = robot_board_before.copy(stack=True) if robot_board_before is not None else None
+    robot_result = _GAME_SESSION.compute_robot_move(
+        engine_path=payload.engine_path,
+        think_time=payload.think_time,
+        skill_level=DIFFICULTY_SKILL_LEVEL[payload.difficulty],
+    )
+    robot_command = None
+    if not robot_result.success or not robot_result.move_uci or robot_board_copy is None:
+        return _game_session_payload(
+            "robot_move_failed",
+            pipeline_result=pipeline_result,
+            human_move=human_result,
+            human_board_before=human_board_copy,
+            robot_move=robot_result,
+            robot_board_before=robot_board_copy,
+        )
+
+    if payload.execute_robot:
+        try:
+            robot_command = _execute_robot_session_move(
+                robot_result.move_uci,
+                robot_board_copy,
+                payload.port,
+                payload.baud,
+            )
+        except Exception as e:
+            robot_adapter.close()
+            raise HTTPException(500, f"Robot command failed: {e}")
+
+    commit_result = _GAME_SESSION.commit_robot_move(robot_result.move_uci)
+    if not commit_result.success:
+        robot_result = commit_result
+
+    return _game_session_payload(
+        "ok",
+        pipeline_result=pipeline_result,
+        human_move=human_result,
+        human_board_before=human_board_copy,
+        robot_move=robot_result,
+        robot_board_before=robot_board_copy,
+        robot_command=robot_command,
+    )
+
+
 @app.get("/api/calibration")
 def get_calibration():
     result: dict = {}
@@ -736,20 +1107,24 @@ def calibrate_board_corners(payload: BoardCornerCalibrationPayload):
 
 @app.get("/api/images/list")
 def list_raw_images():
-    candidates = sorted(
-        PYTHON_CODE_DIR.glob("latest_raw*.jpg"),
-        key=lambda p: p.name,
-    )
-    repo_candidates = sorted(
-        REPO_ROOT.glob("latest_raw*.jpg"),
-        key=lambda p: p.name,
-    )
+    candidates = [
+        *sorted(PYTHON_CODE_DIR.glob("latest_raw*.jpg"), key=lambda p: p.name),
+        *sorted(REPO_ROOT.glob("latest_raw*.jpg"), key=lambda p: p.name),
+        *sorted(PYTHON_CODE_DIR.glob("game_*/*.jpg"), key=lambda p: (p.parent.name, p.name)),
+        *sorted(PYTHON_CODE_DIR.glob("game_*/*.jpeg"), key=lambda p: (p.parent.name, p.name)),
+        *sorted(PYTHON_CODE_DIR.glob("game_*/*.png"), key=lambda p: (p.parent.name, p.name)),
+    ]
     seen: set[str] = set()
     images: list[dict] = []
-    for path in list(candidates) + list(repo_candidates):
-        if path.name not in seen and path.exists():
-            seen.add(path.name)
-            images.append({"name": path.name, "path": str(path)})
+    for path in candidates:
+        resolved = str(path.resolve())
+        if resolved not in seen and path.exists():
+            seen.add(resolved)
+            try:
+                name = str(path.relative_to(PYTHON_CODE_DIR))
+            except ValueError:
+                name = path.name
+            images.append({"name": name, "path": str(path)})
     return {"images": images}
 
 

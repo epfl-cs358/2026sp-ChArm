@@ -159,10 +159,17 @@ def _get_serial(port: Optional[str], baud: int):
             close()
             _serial = serial.Serial(resolved_port, baud, timeout=2)
             _serial_key = key
+            # Opening the Arduino USB serial port resets the Mega. Let setup()
+            # finish and discard the boot/menu output before sending commands.
+            time.sleep(2.5)
+            try:
+                _serial.reset_input_buffer()
+            except Exception:
+                pass
         return _serial
 
 
-def _read_lines(ser, idle_timeout: float = 0.25, max_wait: float = 8.0) -> list[str]:
+def _read_lines(ser, idle_timeout: float = 0.25, max_wait: float = 8.0, stop_on_marker: Optional[str] = None) -> list[str]:
     deadline = time.monotonic() + max_wait
     idle_deadline = time.monotonic() + idle_timeout
     lines: list[str] = []
@@ -172,6 +179,8 @@ def _read_lines(ser, idle_timeout: float = 0.25, max_wait: float = 8.0) -> list[
             line = raw.decode(errors="ignore").strip()
             if line:
                 lines.append(line)
+                if stop_on_marker and stop_on_marker in line:
+                    break
             idle_deadline = time.monotonic() + idle_timeout
             continue
         if time.monotonic() >= idle_deadline:
@@ -179,14 +188,43 @@ def _read_lines(ser, idle_timeout: float = 0.25, max_wait: float = 8.0) -> list[
     return lines
 
 
-def send_commands(commands: list[str], port: Optional[str], baud: int, max_wait: float = 8.0, idle_timeout: float = 0.25) -> list[str]:
+def _looks_like_garbage(line: str) -> bool:
+    if not line:
+        return False
+    non_printable = sum(1 for c in line if ord(c) < 32 and c not in ('\t', '\n', '\r'))
+    return non_printable > len(line) * 0.3
+
+
+def send_commands(commands: list[str], port: Optional[str], baud: int, max_wait: float = 8.0, idle_timeout: float = 0.25, stop_on: Optional[str] = None) -> list[str]:
     with _serial_lock:
         ser = _get_serial(port, baud)
         responses: list[str] = []
         for command in commands:
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
             ser.write(f"{command}\n".encode())
             responses.append(f"> {command}")
-            responses.extend(_read_lines(ser, idle_timeout=idle_timeout, max_wait=max_wait))
+            lines = _read_lines(ser, idle_timeout=idle_timeout, max_wait=max_wait, stop_on_marker=stop_on)
+            # If only garbage came back (Arduino was in bootloader), reopen and retry once
+            if lines and all(_looks_like_garbage(l) for l in lines):
+                global _serial, _serial_key
+                close()
+                import serial as _serial_mod
+                resolved = port or find_port() or os.getenv("CHARM_SERIAL_PORT", "/dev/cu.usbmodem1401")
+                _serial = _serial_mod.Serial(resolved, baud, timeout=2)
+                _serial_key = (resolved, baud)
+                ser = _serial
+                time.sleep(3.0)
+                try:
+                    ser.reset_input_buffer()
+                except Exception:
+                    pass
+                ser.write(f"{command}\n".encode())
+                responses[-1] = f"> {command} [retried after garbage]"
+                lines = _read_lines(ser, idle_timeout=idle_timeout, max_wait=max_wait, stop_on_marker=stop_on)
+            responses.extend(lines)
         return responses
 
 
@@ -251,14 +289,21 @@ def parse_board_info(responses: list[str], calibration_path: Path) -> Optional[d
     }
 
 
-def move_commands(uci: str, piece_type: Optional[str], capture: bool, castling: bool) -> list[str]:
+def move_commands(
+    uci: str,
+    piece_type: Optional[str],
+    capture: bool,
+    castling: bool,
+    captured_piece_type: Optional[str] = None,
+) -> list[str]:
     move = chess.Move.from_uci(uci)
     from_square = chess.square_name(move.from_square)
     to_square = chess.square_name(move.to_square)
     piece = piece_type or "pawn"
     commands: list[str] = []
     if capture:
-        commands.extend([f"pick {piece} {to_square}", f"put {piece} trash"])
+        captured_piece = captured_piece_type or piece
+        commands.extend([f"pick {captured_piece} {to_square}", f"put {captured_piece} trash"])
     commands.extend([f"pick {piece} {from_square}", f"put {piece} {to_square}"])
     if castling:
         if to_square == "g1":
@@ -278,7 +323,7 @@ def commands_for_request(payload: dict) -> list[str]:
     if command == "pos":
         return ["pos"]
     if command == "arm-calibrate":
-        return ["calibrate", "pos"]
+        return ["calibrate"]
     if command == "board-info":
         return ["boardInfo"]
     if command == "board-calibrate":
@@ -322,6 +367,7 @@ def commands_for_request(payload: dict) -> list[str]:
             payload.get("piece_type"),
             bool(payload.get("capture")),
             bool(payload.get("castling")),
+            payload.get("captured_piece_type"),
         )
     if command == "raw":
         raw = payload.get("raw")

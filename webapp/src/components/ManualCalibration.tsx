@@ -295,6 +295,50 @@ export default function ManualCalibration({ imagePath: initialImagePath }: { ima
     setWarpPreview(result.refined_warp);
   }, [currentImagePath]);
 
+  const savePipelineSnapshotFromCalibration = useCallback(async (applyInnerWarp: boolean) => {
+    const result = await api.runPipeline({
+      ...DEFAULT_PARAMS,
+      auto_detect_board: false,
+      apply_inner_warp: applyInnerWarp,
+      image_path: currentImagePath ?? undefined,
+    });
+    setFirstWarpImage(result.first_warp);
+    setWarpPreview(result.refined_warp);
+
+    return api.savePipelineSnapshot({
+      params: {
+        ...DEFAULT_PARAMS,
+        auto_detect_board: false,
+        apply_inner_warp: applyInnerWarp,
+        image_path: currentImagePath ?? undefined,
+      },
+      images: {
+        original: result.original,
+        board_edges_debug: result.board_edges_debug,
+        first_warp: result.first_warp,
+        refined_warp: result.refined_warp,
+        preprocessed: result.preprocessed,
+        grid_debug: result.grid_debug,
+        occupancy_debug: result.occupancy_debug,
+        piece_color_debug: result.piece_color_debug,
+      },
+      result: {
+        board_detection_mode: result.board_detection_mode,
+        warp_error: result.warp_error,
+        occupancy_matrix: result.occupancy_matrix,
+        white_bitmap: result.white_bitmap,
+        black_bitmap: result.black_bitmap,
+        brightness_scores: result.brightness_scores,
+        color_labels: result.color_labels,
+        stats: result.stats,
+        timings: result.timings,
+      },
+      labels: undefined,
+      source_image: result.image_path ?? currentImagePath ?? undefined,
+      name: `manual_calibration_${new Date().toISOString().replace(/[^0-9T]/g, "_")}`,
+    });
+  }, [currentImagePath]);
+
   const handleClick = useCallback((x: number, y: number) => {
     if (!activeCorner) return;
     const nextCorner: Record<Corner, Corner | null> = {
@@ -376,16 +420,12 @@ export default function ManualCalibration({ imagePath: initialImagePath }: { ima
         await api.updateCalibration({ inner: innerPoints as CalibrationData["inner"] });
         setCalibration((current) => ({ ...current, inner: innerPoints as CalibrationData["inner"] }));
       }
-      setSaveStatus("Saved ✓");
-      setTimeout(() => setSaveStatus(null), 3000);
-
-      // Run warp preview
       if (rawImage && isComplete(boardPoints)) {
-        setLoading(true);
-        try {
-          await refreshWarpPreview(isComplete(innerPoints));
-        } catch { /* no preview */ }
-        setLoading(false);
+        const snapshot = await savePipelineSnapshotFromCalibration(isComplete(innerPoints));
+        setSaveStatus(`Saved JSON: ${snapshot.summary_path}`);
+      } else {
+        setSaveStatus("Saved ✓");
+        setTimeout(() => setSaveStatus(null), 3000);
       }
     } catch (e: unknown) {
       setSaveStatus(`Error: ${e instanceof Error ? e.message : "failed"}`);
@@ -603,10 +643,10 @@ export default function ManualCalibration({ imagePath: initialImagePath }: { ima
               disabled={saving || (!isComplete(boardPoints) && !isComplete(innerPoints))}
               className="btn-cyan w-full py-4 rounded-md text-sm font-mono font-bold tracking-wider uppercase shadow-cyan"
             >
-              {saving ? "Saving..." : "Save Calibration"}
+              {saving ? "Saving..." : "Save Calibration + Snapshot"}
             </button>
             {saveStatus && (
-              <p className={`text-xs font-mono text-center py-2 rounded ${saveStatus.startsWith("Error") ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400"}`}>
+              <p className={`text-xs font-mono text-center py-2 px-2 rounded break-all ${saveStatus.startsWith("Error") ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400"}`}>
                 {saveStatus}
               </p>
             )}
