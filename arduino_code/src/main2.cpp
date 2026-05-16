@@ -15,5 +15,5 @@ void setup() {
 }
 
 void loop() {
-  Serial.println(digitalRead(Z_LIMIT_BOTTOM_PIN));
+  Serial.println(digitalRead(Y_LIMIT_PIN));
 }
