@@ -37,6 +37,9 @@ import { BASE as ARM_BASE, type ArmAngles, type ArmDebugTarget, type ArmMove } f
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Slider } from "@/components/ui/slider";
+
+const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
 
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
 
@@ -378,6 +381,7 @@ export default function Dashboard() {
   const [params, setParams] = useState<typeof DEFAULT_PARAMS>(() => ({ ...DEFAULT_PARAMS }));
   const [showParamsModal, setShowParamsModal] = useState(false);
   const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
+  const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
   const armMoveId = useRef(0);
 
   useEffect(() => {
@@ -453,7 +457,7 @@ export default function Dashboard() {
       if (!gameSessionStarted) {
         const session = await api.startGameSession({
           player_color: "white",
-          difficulty: 1,
+          difficulty,
           params,
           capture: true,
           max_mismatches: 0,
@@ -508,7 +512,7 @@ export default function Dashboard() {
         params,
         capture: true,
         max_mismatches: 0,
-        difficulty: 1,
+        difficulty,
         port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
         baud: 9600,
       });
@@ -560,7 +564,7 @@ export default function Dashboard() {
       setError(e instanceof Error ? e.message : "Failed to process turn");
       setTurnState("error");
     }
-  }, [armCalibrated, gameSessionStarted, params, robotPort, robotStatus, turnState]);
+  }, [armCalibrated, difficulty, gameSessionStarted, params, robotPort, robotStatus, turnState]);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -643,6 +647,25 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex min-w-[260px] items-center justify-end gap-2 flex-wrap">
+          <div
+            className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs"
+            style={{ borderColor: "var(--charm-border)", background: "oklch(from var(--charm-cyan) l c h / 0.06)", color: "var(--charm-muted)" }}
+            title="Stockfish difficulty. Applies to the next robot move."
+          >
+            <span style={{ color: "var(--charm-muted)" }}>Difficulty</span>
+            <Slider
+              value={[difficulty]}
+              min={0}
+              max={2}
+              step={1}
+              onValueChange={(v) => {
+                const next = Array.isArray(v) ? v[0] : v;
+                if (next === 0 || next === 1 || next === 2) setDifficulty(next);
+              }}
+              className="w-24"
+            />
+            <span style={{ color: "var(--charm-cyan)", minWidth: "3.5rem" }}>{DIFFICULTY_LABELS[difficulty]}</span>
+          </div>
           <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: turnState === "error" ? "oklch(0.65 0.22 25)" : "var(--charm-cyan)" }}>
             {statusLabel}
           </Badge>
