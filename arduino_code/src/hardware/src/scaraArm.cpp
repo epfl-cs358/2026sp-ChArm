@@ -60,8 +60,8 @@ void ScaraArm::goHome() {
     beforeMove();
     leadScrew.moveTo_mm(PICKPLACE_HOVER_Z_MM);
     // Rest position: X=0, Y=500 (arm along Y axis, 90° from X-axis home)
-    joint1.moveTo(90.0f);
-    joint2.moveTo(0.0f);
+    joint1.moveTo(120.0f);
+    joint2.moveTo(60.0f);
     afterMove();
     sync();
 }
