@@ -30,7 +30,7 @@ UIState uiState;
 
 ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
 LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
-UIController uiController(buttonInput, uiState, lcd, Serial1);
+UIController uiController(buttonInput, uiState, lcd, Serial);
 static unsigned long buttonEventCount = 0;
 
 static const char* eventName(InputEvent event) {
