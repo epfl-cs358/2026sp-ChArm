@@ -495,7 +495,7 @@ static void handleCommand(String cmd) {
       if (toTrash) {
         Serial.print("Put "); Serial.print(pieceName); Serial.print(" to trash -> XYZ(");
         Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.print(", "); Serial.print(TRASH_Z); Serial.println(")");
-        if (!arm.moveXYZ(tx, ty, TRASH_Z)) Serial.println("Put failed");
+        if (!arm.moveXYZ(tx, ty, PICKPLACE_HOVER_Z_MM)) Serial.println("Put failed");
         else { arm.openGripper(); Serial.println("Put done"); }
       } else {
         Serial.print("Put "); Serial.print(pieceName); Serial.print(" to "); Serial.print(sq);
@@ -615,11 +615,9 @@ static void handleCommand(String cmd) {
 // ── Setup & loop ─────────────────────────────────────────────────────────────
 void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
-  //digitalWrite(ENABLE_PIN, LOW);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   arm.begin();
-  //Serial1.begin(115200);
   uiController.begin();
 
   if (loadCalFromEEPROM()) {

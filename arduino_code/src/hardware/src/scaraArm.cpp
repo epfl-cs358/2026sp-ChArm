@@ -61,8 +61,8 @@ void ScaraArm::calibrate() {
 void ScaraArm::goHome() {
     beforeMove();
     leadScrew.moveTo_mm(PICKPLACE_HOVER_Z_MM);
-    joint1.moveTo(0.0f);
-    joint2.moveTo(0.0f);
+    joint1.moveTo(120.0f);
+    joint2.moveTo(60.0f);
     afterMove();
     sync();
 }
@@ -126,6 +126,8 @@ float ScaraArm::j2Angle() const  { return joint2.angle(); }
 bool ScaraArm::pickAt(float x, float y, int pieceType) {
     // Clamp piece type to valid range
     if (pieceType < 0 || pieceType > 5) pieceType = 0;
+
+    openGripper();
     
     // Move to hover above target (sets Z then XY).
     if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;
