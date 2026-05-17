@@ -13,6 +13,46 @@ from charm.vision.pipeline import run_board_pipeline
 
 PlayerColor = Literal["white", "black"]
 
+def print_occupancy_bitmaps(white_bitmap, black_bitmap) -> None:
+
+    print("========== DETECTED BOARD BITMAP ==========")
+
+    print("Legend: W=white, B=black, .=empty, X=both")
+
+    print("    a b c d e f g h")
+
+    for row in range(8):
+
+        rank = 8 - row
+
+        symbols = []
+
+        for col in range(8):
+
+            is_white = bool(white_bitmap[row][col])
+
+            is_black = bool(black_bitmap[row][col])
+
+            if is_white and is_black:
+
+                symbols.append("X")
+
+            elif is_white:
+
+                symbols.append("W")
+
+            elif is_black:
+
+                symbols.append("B")
+
+            else:
+
+                symbols.append(".")
+
+        print(f"{rank} | " + " ".join(symbols))
+
+    print("==========================================")
+
 
 @dataclass
 class SessionResult:
@@ -126,24 +166,36 @@ class GameSession:
     ) -> SessionResult:
         """
         Validate the standard initial chess position from a calibrated board image.
-
-        This should be called after:
-          raw photo
-          -> calibration method 1
-          -> calibration method 2
-          -> refined board image
-
-        If the board matches the standard initial position, this creates the
-        BoardStateTracker and the session becomes initialized.
         """
+        print("\n========== INITIAL BOARD CHECK DEBUG ==========")
+        print("[DEBUG] image_path =", image_path)
+        print("[DEBUG] max_mismatches =", max_mismatches)
+
         pipeline_result = run_board_pipeline(image_path)
 
+        print("[DEBUG] pipeline_result type =", type(pipeline_result))
+        print("[DEBUG] white_bitmap raw =", pipeline_result.white_bitmap)
+        print("[DEBUG] black_bitmap raw =", pipeline_result.black_bitmap)
+
+        print_occupancy_bitmaps(
+            pipeline_result.white_bitmap,
+            pipeline_result.black_bitmap,
+        )
+
         expected_board = chess.Board()
+
+        print("[DEBUG] expected initial board FEN =", expected_board.fen())
+        print("[DEBUG] expected white squares =", chess.SquareSet(expected_board.occupied_co[chess.WHITE]))
+        print("[DEBUG] expected black squares =", chess.SquareSet(expected_board.occupied_co[chess.BLACK]))
+
         mismatch_count = compare_board_to_bitmaps(
             expected_board,
             pipeline_result.white_bitmap,
             pipeline_result.black_bitmap,
         )
+
+        print("[DEBUG] mismatch_count =", mismatch_count)
+        print("===============================================\n")
 
         if mismatch_count > max_mismatches:
             result = SessionResult(
@@ -544,3 +596,50 @@ class GameSession:
                 f"mismatch={step.mismatch_count}, "
                 f"message={step.message}"
             )
+    def print_occupancy_bitmaps(white_bitmap, black_bitmap) -> None:
+        """
+        Print detected white/black occupancy bitmaps in terminal.
+
+        Board coordinates:
+        top row = rank 8
+        bottom row = rank 1
+        left to right = file a to h
+
+        Output symbols:
+        W = detected white piece
+        B = detected black piece
+        . = empty
+        X = both white and black detected on same square
+        """
+        print("========== DETECTED BOARD BITMAP ==========")
+        print("Legend: W=white, B=black, .=empty, X=both")
+        print("    a b c d e f g h")
+
+        for rank in range(8, 0, -1):
+            row_symbols = []
+
+            for file_index in range(8):
+                square = chess.square(file_index, rank - 1)
+
+                is_white = bool(white_bitmap & chess.BB_SQUARES[square])
+                is_black = bool(black_bitmap & chess.BB_SQUARES[square])
+
+                if is_white and is_black:
+                    symbol = "X"
+                elif is_white:
+                    symbol = "W"
+                elif is_black:
+                    symbol = "B"
+                else:
+                    symbol = "."
+
+                row_symbols.append(symbol)
+
+            print(f"{rank} | " + " ".join(row_symbols))
+
+        print("==========================================")
+        print("[DEBUG] white_bitmap =", white_bitmap)
+        print("[DEBUG] black_bitmap =", black_bitmap)
+        print("[DEBUG] white squares =", chess.SquareSet(white_bitmap))
+        print("[DEBUG] black squares =", chess.SquareSet(black_bitmap))
+        print("==========================================")

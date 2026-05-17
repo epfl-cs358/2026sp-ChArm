@@ -70,29 +70,62 @@ class GameController:
         """Called by the bridge when Arduino sends CHECK_BOARD.
 
         Returns True/False only — the bridge sends BOARD_OK or BOARD_FAIL
-        based on this return value, so we must NOT call board_ok/board_fail here.
+        based on this return value.
         """
-        image_path = self.config.board_image_provider()
-        result = self.session.initialize_from_image(image_path)
+        print("\n========== GAME CONTROLLER CHECK_BOARD DEBUG ==========", flush=True)
 
-        if not result.success:
+        try:
+            print("[DEBUG] Step 1: board_image_provider()", flush=True)
+            image_path = self.config.board_image_provider()
+            print("[DEBUG] image_path =", image_path, flush=True)
+
+            print("[DEBUG] Step 2: initialize_from_image()", flush=True)
+            result = self.session.initialize_from_image(image_path)
+
+            print("[DEBUG] initialize result =", result, flush=True)
+            print("[DEBUG] result.success =", result.success, flush=True)
+            print("[DEBUG] result.message =", result.message, flush=True)
+            print("[DEBUG] result.mismatch_count =", result.mismatch_count, flush=True)
+            print("[DEBUG] session.initialized =", self.session.is_initialized(), flush=True)
+            print("[DEBUG] session.current_fen =", self.session.get_current_fen(), flush=True)
+
+            if not result.success:
+                print("[DEBUG] RETURN FALSE: initialize_from_image failed", flush=True)
+                print("=======================================================\n", flush=True)
+                return False
+
+            print("[DEBUG] Step 3: start_game()", flush=True)
+            print("[DEBUG] config.player_color =", self.config.player_color, flush=True)
+
+            start_result = self.session.start_game(self.config.player_color)
+
+            print("[DEBUG] start_result =", start_result, flush=True)
+            print("[DEBUG] start_result.success =", start_result.success, flush=True)
+            print("[DEBUG] start_result.message =", start_result.message, flush=True)
+            print("[DEBUG] session.game_started =", self.session.is_game_started(), flush=True)
+            print("[DEBUG] player_color =", self.session.get_player_color(), flush=True)
+            print("[DEBUG] robot_color =", self.session.get_robot_color(), flush=True)
+            print("[DEBUG] robot_moves_first =", self.session.robot_moves_first(), flush=True)
+
+            if not start_result.success:
+                print("[DEBUG] RETURN FALSE: start_game failed", flush=True)
+                print("=======================================================\n", flush=True)
+                return False
+
+            print("[DEBUG] Step 4: skip extra UI turn command during debug", flush=True)
+            print("[DEBUG] RETURN TRUE: check_board success", flush=True)
+            print("=======================================================\n", flush=True)
+            return True
+
+        except Exception as e:
+            print("[DEBUG] EXCEPTION in check_board:", repr(e), flush=True)
+            import traceback
+
+            traceback.print_exc()
+            print("[DEBUG] RETURN FALSE because exception occurred", flush=True)
+            print("=======================================================\n", flush=True)
             return False
 
-        start_result = self.session.start_game(self.config.player_color)
-        if not start_result.success:
-            return False
-
-        # If the robot plays white it moves first.
-        # BOARD_OK is sent by the bridge after this returns True, then we move.
-        if self.session.robot_moves_first():
-            self._do_robot_move()
-        else:
-            if self.config.player_color == "white":
-                self.ui_link.player_turn_white()
-            else:
-                self.ui_link.player_turn_black()
-
-        return True
 
     def player_done(self) -> None:
         """Called by the bridge when Arduino sends PLAYER_DONE (button press)."""

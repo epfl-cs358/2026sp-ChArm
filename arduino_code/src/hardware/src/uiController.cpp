@@ -30,6 +30,10 @@ void UIController::begin(unsigned long baud) {
     lcd.update(uiState.getLine1(), uiState.getLine2());
 }
 
+bool UIController::isWaitingForBoard() const {
+    return waitingForBoard;
+}
+
 void UIController::loop() {
 
     // detect mode entry for one-shot actions (e.g., auto-start calibration)
@@ -82,10 +86,11 @@ void UIController::loop() {
             case COLOR_SELECT:
                 if (ev == INPUT_NEXT || ev == INPUT_PREV) uiState.colorToggle();
                 else if (ev == INPUT_SELECT) {
-                    sendMessage(String("SET_COLOR ") + String((int)uiState.getSelectedColor()));
-                    sendMessage("CHECK_BOARD");
                     waitingForBoard = true;
                     boardRequestTs = millis();
+
+                    sendMessage(String("SET_COLOR ") + String((int)uiState.getSelectedColor()));
+                    sendMessage("CHECK_BOARD");
                 }
                 break;
 
@@ -167,6 +172,7 @@ void UIController::loop() {
         sendMessage("BOARD_TIMEOUT");
         pendingLcdUpdate = true;
     }
+    
 
     if (pendingLcdUpdate) {
         lcd.update(uiState.getLine1(), uiState.getLine2());
@@ -175,7 +181,9 @@ void UIController::loop() {
 }
 
 void UIController::processLine(const String& line) {
-    if (line.equalsIgnoreCase("GET_STATE")) {
+    if (line.equalsIgnoreCase("OK")) {
+        return;
+    } else if (line.equalsIgnoreCase("GET_STATE")) {
         sendState();
     } else if (line.startsWith("SET_MODE ")) {
         int n = line.substring(9).toInt();

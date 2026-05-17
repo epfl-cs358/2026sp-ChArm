@@ -639,6 +639,13 @@ void setup() {
 void loop() {
   updateDrivers();
 
+  uiController.loop();
+  lcd.tick();
+
+  if (uiController.isWaitingForBoard()) {
+    return;
+  }
+
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
@@ -662,7 +669,4 @@ void loop() {
       cmdBuffer += c;
     }
   }
-
-  uiController.loop();
-  lcd.tick();
 }
