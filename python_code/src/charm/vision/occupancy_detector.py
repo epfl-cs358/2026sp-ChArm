@@ -23,10 +23,10 @@ def compute_occupancy_score(cell_image: np.ndarray) -> float:
     """
     h, w = cell_image.shape[:2]
 
-    x1 = int(w * 0.2)
-    x2 = int(w * 0.8)
-    y1 = int(h * 0.2)
-    y2 = int(h * 0.8)
+    x1 = int(w * 0.3)
+    x2 = int(w * 0.7)
+    y1 = int(h * 0.3)
+    y2 = int(h * 0.7)
 
     roi = cell_image[y1:y2, x1:x2]
 

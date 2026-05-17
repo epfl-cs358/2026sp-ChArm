@@ -52,6 +52,37 @@ export const api = {
   runPipeline: (params: PipelineParams) =>
     post<PipelineResult>("/api/pipeline/run", params),
 
+  tuneCv: (payload: {
+    annotations: { row: number; col: number; label: "empty" | "white" | "black" }[];
+    params: PipelineParams;
+    image_path?: string;
+  }) =>
+    post<{
+      status: string;
+      path: string;
+      tuning: {
+        occupancy_threshold: number;
+        white_threshold: number;
+        black_threshold: number;
+        saved_at: number;
+        samples: Record<string, { row: number; col: number; occupancy_score: number; brightness_score: number }[]>;
+      };
+    }>("/api/pipeline/tune", payload),
+
+  getCvTuning: () =>
+    get<{
+      exists: boolean;
+      tuning: {
+        occupancy_threshold: number;
+        white_threshold: number;
+        black_threshold: number;
+        saved_at?: number;
+      } | null;
+    }>("/api/pipeline/tuning"),
+
+  clearCvTuning: () =>
+    fetch(`${API}/api/pipeline/tuning`, { method: "DELETE" }).then((r) => r.json()),
+
   uploadAndRun: async (file: File, params: PipelineParams): Promise<PipelineResult> => {
     const fd = new FormData();
     fd.append("file", file);

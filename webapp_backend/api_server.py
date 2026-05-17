@@ -119,7 +119,10 @@ from charm.vision.occupancy_detector import (
     draw_occupancy_debug,
     occupancy_to_matrix,
 )
-from charm.vision.piece_color_detector import draw_piece_color_debug
+from charm.vision.piece_color_detector import (
+    compute_piece_brightness_score,
+    draw_piece_color_debug,
+)
 
 _STATE_TRACKER_PATH = SRC_PATH / "charm" / "game" / "state_tracker.py"
 _STATE_TRACKER_SPEC = importlib.util.spec_from_file_location("charm_webapp_state_tracker", _STATE_TRACKER_PATH)
@@ -133,6 +136,7 @@ infer_move_from_bitmaps = _STATE_TRACKER_MODULE.infer_move_from_bitmaps
 BOARD_CAL_PATH = PYTHON_CODE_DIR / "board_calibration.json"
 INNER_CAL_PATH = PYTHON_CODE_DIR / "inner_warp_calibration.json"
 ROBOT_CAL_PATH = PYTHON_CODE_DIR / "robot_calibration.json"
+CV_TUNING_PATH = PYTHON_CODE_DIR / "cv_tuning.json"
 RAW_IMAGE_PATH = REPO_ROOT / "latest_raw.jpg"
 LEGACY_RAW_IMAGE_PATH = PYTHON_CODE_DIR / "latest_raw.jpg"
 SAVED_PARAMS_PATH = REPO_ROOT / "saved_pipeline_params.json"
@@ -310,6 +314,18 @@ class CameraCapturePayload(BaseModel):
     baud: int = 9600
 
 
+class TuneAnnotation(BaseModel):
+    row: int
+    col: int
+    label: str  # "empty" | "white" | "black"
+
+
+class CvTunePayload(BaseModel):
+    annotations: list[TuneAnnotation]
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    image_path: Optional[str] = None
+
+
 def _normalize_camera_url(url: Optional[str]) -> Optional[str]:
     if url is None:
         return None
@@ -430,6 +446,50 @@ def _resolve_board_calibration(
     board_cal = load_four_point_calibration(str(BOARD_CAL_PATH))
     return board_cal, "saved", draw_calibration_points(image, board_cal)
 
+
+
+def _load_cv_tuning() -> Optional[dict]:
+    if not CV_TUNING_PATH.exists():
+        return None
+    try:
+        return json.loads(CV_TUNING_PATH.read_text())
+    except Exception:
+        return None
+
+
+def _save_cv_tuning(tuning: dict) -> None:
+    CV_TUNING_PATH.write_text(json.dumps(tuning, indent=2))
+
+
+def _apply_cv_tuning(params: PipelineParams) -> PipelineParams:
+    """Overlay persisted tuning on params for fields still at defaults."""
+    tuning = _load_cv_tuning()
+    if not tuning:
+        return params
+    defaults = PipelineParams()
+    for field in ("occupancy_threshold", "white_threshold", "black_threshold"):
+        if field in tuning and getattr(params, field) == getattr(defaults, field):
+            setattr(params, field, float(tuning[field]))
+    return params
+
+
+def _warped_board_for_tuning(params: PipelineParams, image_path: Optional[str]) -> np.ndarray:
+    path = Path(image_path) if image_path else resolve_latest_raw_path()
+    if not path.exists():
+        raise HTTPException(404, f"Image not found: {path}")
+    image = cv2.imread(str(path))
+    if image is None:
+        raise HTTPException(400, f"Failed to decode image: {path}")
+
+    try:
+        board_cal, _, _ = _resolve_board_calibration(image, params)
+        warped = warp_from_calibration(image, board_cal, params.warp_size)
+        if params.apply_inner_warp:
+            inner_cal = load_inner_warp_calibration(str(INNER_CAL_PATH))
+            warped = refine_board_with_inner_corners(warped, inner_cal, params.warp_size)
+        return warped
+    except Exception as e:
+        raise HTTPException(500, f"Failed to warp board: {e}")
 
 
 def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
@@ -767,10 +827,99 @@ def pipeline_run(params: PipelineParams):
     img = cv2.imread(str(path))
     if img is None:
         raise HTTPException(400, "Failed to decode image")
+    params = _apply_cv_tuning(params)
     result = run_pipeline(img, params)
     result["image_path"] = str(path)
     result["timestamp"] = time.time()
     return result
+
+
+@app.get("/api/pipeline/tuning")
+def get_cv_tuning():
+    tuning = _load_cv_tuning()
+    return {"exists": tuning is not None, "tuning": tuning}
+
+
+@app.delete("/api/pipeline/tuning")
+def clear_cv_tuning():
+    if CV_TUNING_PATH.exists():
+        CV_TUNING_PATH.unlink()
+    return {"status": "cleared"}
+
+
+@app.post("/api/pipeline/tune")
+def tune_cv(payload: CvTunePayload):
+    if not payload.annotations:
+        raise HTTPException(400, "At least one annotation is required")
+
+    buckets: dict[str, list[TuneAnnotation]] = {"empty": [], "white": [], "black": []}
+    for ann in payload.annotations:
+        if ann.label not in buckets:
+            raise HTTPException(400, f"Unknown label: {ann.label}")
+        if not (0 <= ann.row < 8 and 0 <= ann.col < 8):
+            raise HTTPException(400, f"Cell out of range: ({ann.row},{ann.col})")
+        buckets[ann.label].append(ann)
+
+    missing = [label for label, items in buckets.items() if not items]
+    if missing:
+        raise HTTPException(
+            400,
+            f"Need at least one annotation per label; missing: {', '.join(missing)}",
+        )
+
+    warped = _warped_board_for_tuning(payload.params, payload.image_path)
+    x_lines, y_lines = detect_8x8_grid_lines(warped)
+    cells = extract_8x8_cells(warped, x_lines, y_lines)
+    cell_map = {(c.row, c.col): c for c in cells}
+
+    samples: dict[str, list[dict]] = {"empty": [], "white": [], "black": []}
+    for label, items in buckets.items():
+        for ann in items:
+            cell = cell_map.get((ann.row, ann.col))
+            if cell is None:
+                raise HTTPException(500, f"Cell not extracted: ({ann.row},{ann.col})")
+            occ = float(compute_occupancy_score(cell.image))
+            bright = float(compute_piece_brightness_score(cell.image))
+            samples[label].append({
+                "row": ann.row,
+                "col": ann.col,
+                "occupancy_score": round(occ, 3),
+                "brightness_score": round(bright, 2),
+            })
+
+    empty_occ = [s["occupancy_score"] for s in samples["empty"]]
+    occupied_occ = [
+        s["occupancy_score"]
+        for label in ("white", "black")
+        for s in samples[label]
+    ]
+    max_empty = max(empty_occ)
+    min_occ = min(occupied_occ)
+    if min_occ <= max_empty:
+        occupancy_threshold = (max_empty + min_occ) / 2.0
+    else:
+        occupancy_threshold = (max_empty + min_occ) / 2.0
+
+    white_bright = [s["brightness_score"] for s in samples["white"]]
+    black_bright = [s["brightness_score"] for s in samples["black"]]
+    midpoint = (max(black_bright) + min(white_bright)) / 2.0
+    white_threshold = midpoint
+    black_threshold = midpoint
+
+    tuning = {
+        "occupancy_threshold": round(float(occupancy_threshold), 3),
+        "white_threshold": round(float(white_threshold), 2),
+        "black_threshold": round(float(black_threshold), 2),
+        "saved_at": time.time(),
+        "samples": samples,
+    }
+    _save_cv_tuning(tuning)
+
+    return {
+        "status": "saved",
+        "path": str(CV_TUNING_PATH),
+        "tuning": tuning,
+    }
 
 
 @app.post("/api/pipeline/upload")

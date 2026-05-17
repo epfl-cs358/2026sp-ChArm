@@ -12,6 +12,7 @@ import {
   Cpu,
   Eye,
   Gauge,
+  Sliders,
   Grid3X3,
   Loader2,
   Settings,
@@ -33,6 +34,7 @@ import ChessBoard from "@/components/ChessBoard";
 import DebugImages from "@/components/DebugImages";
 import ParamControls from "@/components/ParamControls";
 import ManualCalibration from "@/components/ManualCalibration";
+import { TuneCvModal } from "@/components/TuneCvModal";
 import { BASE as ARM_BASE, type ArmAngles, type ArmDebugTarget, type ArmMove } from "@/components/RobotArmOverlay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -381,13 +383,14 @@ export default function Dashboard() {
   const [params, setParams] = useState<typeof DEFAULT_PARAMS>(() => ({ ...DEFAULT_PARAMS }));
   const [showParamsModal, setShowParamsModal] = useState(false);
   const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
+  const [showTuneCvModal, setShowTuneCvModal] = useState(false);
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
   const armMoveId = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams()])
-      .then(([robot, vision, saved]) => {
+    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams(), api.getCvTuning()])
+      .then(([robot, vision, saved, tuningResp]) => {
         if (cancelled) return;
         setRobotStatus(robot);
         setRobotPort((current) => {
@@ -396,9 +399,13 @@ export default function Dashboard() {
         });
         setCalibration(vision);
         setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
-        if (saved.exists && saved.data?.params) {
-          setParams({ ...DEFAULT_PARAMS, ...saved.data.params });
+        const base = saved.exists && saved.data?.params ? { ...DEFAULT_PARAMS, ...saved.data.params } : { ...DEFAULT_PARAMS };
+        if (tuningResp.exists && tuningResp.tuning) {
+          base.occupancy_threshold = tuningResp.tuning.occupancy_threshold;
+          base.white_threshold = tuningResp.tuning.white_threshold;
+          base.black_threshold = tuningResp.tuning.black_threshold;
         }
+        setParams(base);
       })
       .catch(() => undefined);
     return () => {
@@ -851,7 +858,7 @@ export default function Dashboard() {
             </div>
           </CardHeader>
           <CardContent className="px-4 pb-4 space-y-4">
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               <Button variant="outline" size="sm" className="font-jetbrains" onClick={testCapture} disabled={busy || Boolean(testBusy)}>
                 {testBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
                 Capture
@@ -859,6 +866,10 @@ export default function Dashboard() {
               <Button variant="outline" size="sm" className="font-jetbrains" onClick={testVisionPipeline} disabled={busy || Boolean(testBusy)}>
                 {testBusy === "pipeline" ? <Loader2 className="size-4 animate-spin" /> : <Eye className="size-4" />}
                 Pipeline
+              </Button>
+              <Button variant="outline" size="sm" className="font-jetbrains" onClick={() => setShowTuneCvModal(true)} disabled={!result?.refined_warp}>
+                <Sliders className="size-4" />
+                Tune CV
               </Button>
               <Button variant="outline" size="sm" className="font-jetbrains" onClick={processHumanTurn} disabled={busy || !armCalibrated || Boolean(testBusy)}>
                 <Bot className="size-4" />
@@ -953,6 +964,16 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {showTuneCvModal && (
+        <TuneCvModal
+          onClose={() => setShowTuneCvModal(false)}
+          refinedWarpB64={result?.refined_warp}
+          imagePath={lastCapturePath ?? result?.image_path}
+          params={params}
+          onTuned={(t) => setParams((prev) => ({ ...prev, ...t }))}
+        />
       )}
 
       {showManualCalibrationModal && (
