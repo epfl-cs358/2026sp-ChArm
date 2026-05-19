@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -16,6 +17,24 @@ from charm.vision.piece_color_detector import (
     detect_piece_colors,
     draw_piece_color_debug,
 )
+
+
+@dataclass
+class PipelineOptions:
+    """Tunable detector parameters and optional empty-board reference.
+
+    Defaults match the legacy hard-coded values so callers that don't pass
+    options keep the previous behavior.
+    """
+
+    occupancy_threshold: float = 4.0
+    occupancy_delta_threshold: float = 12.0
+    white_threshold: float = 80.0
+    black_threshold: float = 80.0
+    white_delta_threshold: float = 5.0
+    black_delta_threshold: float = -30.0
+    warp_size: int = 800
+    reference_image_path: Optional[str] = None
 
 
 @dataclass
@@ -36,7 +55,10 @@ class BoardPipelineResult:
     black_bitmap: list[list[int]]
 
 
-def run_board_pipeline(image_path: str) -> BoardPipelineResult:
+def run_board_pipeline(
+    image_path: str,
+    options: Optional[PipelineOptions] = None,
+) -> BoardPipelineResult:
     """
     Minimal pipeline for an already-calibrated board image.
 
@@ -50,7 +72,13 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
         3) occupancy detection
         4) piece color detection
         5) bitmap generation
+
+    Pass `options` to match a tuned api_server pipeline (including an empty-board
+    reference image for delta-based occupancy/color classification).
     """
+    if options is None:
+        options = PipelineOptions()
+
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image from path: {image_path}")
@@ -70,7 +98,7 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     # Normalize to a fixed square size
     warped_board = cv2.resize(
         image,
-        (800, 800),
+        (options.warp_size, options.warp_size),
         interpolation=cv2.INTER_CUBIC,
     )
 
@@ -78,8 +106,25 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     grid_debug_image = draw_8x8_grid(warped_board)
     cells = extract_8x8_cells(warped_board)
 
+    # Optional empty-board reference for delta-based detection
+    reference_cells = None
+    if options.reference_image_path:
+        ref_img = cv2.imread(options.reference_image_path)
+        if ref_img is not None:
+            if ref_img.shape[:2] != warped_board.shape[:2]:
+                ref_img = cv2.resize(
+                    ref_img,
+                    (warped_board.shape[1], warped_board.shape[0]),
+                )
+            reference_cells = extract_8x8_cells(ref_img)
+
     # Occupancy detection
-    occupancy_results = detect_occupancy(cells, threshold=4.0)
+    occupancy_results = detect_occupancy(
+        cells,
+        threshold=options.occupancy_threshold,
+        reference_cells=reference_cells,
+        delta_threshold=options.occupancy_delta_threshold,
+    )
     occupancy_matrix = occupancy_to_matrix(occupancy_results)
     occupancy_debug_image = draw_occupancy_debug(
         warped_board,
@@ -91,8 +136,11 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
     color_results = detect_piece_colors(
         cells,
         occupancy_results,
-        white_threshold=80.0,
-        black_threshold=80.0,
+        white_threshold=options.white_threshold,
+        black_threshold=options.black_threshold,
+        reference_cells=reference_cells,
+        white_delta_threshold=options.white_delta_threshold,
+        black_delta_threshold=options.black_delta_threshold,
     )
     piece_color_debug_image = draw_piece_color_debug(
         warped_board,

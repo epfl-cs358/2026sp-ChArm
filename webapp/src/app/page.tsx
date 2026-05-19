@@ -17,6 +17,7 @@ import {
   Loader2,
   Settings,
   ShieldCheck,
+  Swords,
   UserRound,
   XCircle,
 } from "lucide-react";
@@ -42,6 +43,42 @@ import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 
 const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
+
+const SKILL_LEVEL_STORAGE_KEY = "charm-stockfish-skill-level";
+const DEFAULT_SKILL_LEVEL = 12;
+const MIN_SKILL_LEVEL = 1;
+const MAX_SKILL_LEVEL = 20;
+
+// Rough ELO estimates per Stockfish "Skill Level" setting. Anchored to widely
+// cited community measurements: skill 0 ≈ 1100, 5 ≈ 1500, 10 ≈ 1800, 15 ≈ 2300,
+// 20 ≈ 2850 (full strength). Linear interpolation between anchors.
+function estimateEloForSkill(skill: number): number {
+  const anchors: Array<[number, number]> = [
+    [0, 1100],
+    [5, 1500],
+    [10, 1800],
+    [15, 2300],
+    [20, 2850],
+  ];
+  const s = Math.max(0, Math.min(20, skill));
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const [s0, e0] = anchors[i];
+    const [s1, e1] = anchors[i + 1];
+    if (s >= s0 && s <= s1) {
+      const t = (s - s0) / (s1 - s0);
+      return Math.round(e0 + t * (e1 - e0));
+    }
+  }
+  return anchors[anchors.length - 1][1];
+}
+
+function skillTier(skill: number): string {
+  if (skill <= 3) return "Beginner";
+  if (skill <= 7) return "Casual";
+  if (skill <= 12) return "Club";
+  if (skill <= 16) return "Strong";
+  return "Master";
+}
 
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
 
@@ -384,13 +421,43 @@ export default function Dashboard() {
   const [showParamsModal, setShowParamsModal] = useState(false);
   const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
   const [showTuneCvModal, setShowTuneCvModal] = useState(false);
+  const [emptyRefExists, setEmptyRefExists] = useState(false);
+  const [emptyRefBusy, setEmptyRefBusy] = useState<"capture" | "clear" | null>(null);
+  const [emptyRefImage, setEmptyRefImage] = useState<string | null>(null);
+  const [emptyRefSavedAt, setEmptyRefSavedAt] = useState<number | null>(null);
+  const [showEmptyRefModal, setShowEmptyRefModal] = useState(false);
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
+  const [skillLevel, setSkillLevel] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_SKILL_LEVEL;
+    const stored = window.localStorage.getItem(SKILL_LEVEL_STORAGE_KEY);
+    const parsed = stored ? parseInt(stored, 10) : NaN;
+    if (!Number.isFinite(parsed)) return DEFAULT_SKILL_LEVEL;
+    return Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, parsed));
+  });
+  const [showSkillModal, setShowSkillModal] = useState(false);
+  const [draftSkillLevel, setDraftSkillLevel] = useState<number>(skillLevel);
+  const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
   const armMoveId = useRef(0);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(SKILL_LEVEL_STORAGE_KEY, String(skillLevel));
+    }
+  }, [skillLevel]);
+
+  useEffect(() => {
+    if (!skillApplyToast) return;
+    const t = setTimeout(() => setSkillApplyToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [skillApplyToast]);
+
+  useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams(), api.getCvTuning()])
-      .then(([robot, vision, saved, tuningResp]) => {
+    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams(), api.getCvTuning(), api.getEmptyReference()])
+      .then(([robot, vision, saved, tuningResp, emptyRef]) => {
+        setEmptyRefExists(emptyRef.exists);
+        setEmptyRefImage(emptyRef.image);
+        setEmptyRefSavedAt(emptyRef.saved_at ?? null);
         if (cancelled) return;
         setRobotStatus(robot);
         setRobotPort((current) => {
@@ -404,6 +471,15 @@ export default function Dashboard() {
           base.occupancy_threshold = tuningResp.tuning.occupancy_threshold;
           base.white_threshold = tuningResp.tuning.white_threshold;
           base.black_threshold = tuningResp.tuning.black_threshold;
+          if (tuningResp.tuning.occupancy_delta_threshold !== undefined) {
+            base.occupancy_delta_threshold = tuningResp.tuning.occupancy_delta_threshold;
+          }
+          if (tuningResp.tuning.white_delta_threshold !== undefined) {
+            base.white_delta_threshold = tuningResp.tuning.white_delta_threshold;
+          }
+          if (tuningResp.tuning.black_delta_threshold !== undefined) {
+            base.black_delta_threshold = tuningResp.tuning.black_delta_threshold;
+          }
         }
         setParams(base);
       })
@@ -465,6 +541,7 @@ export default function Dashboard() {
         const session = await api.startGameSession({
           player_color: "white",
           difficulty,
+          skill_level: skillLevel,
           params,
           capture: true,
           max_mismatches: 0,
@@ -520,6 +597,7 @@ export default function Dashboard() {
         capture: true,
         max_mismatches: 0,
         difficulty,
+        skill_level: skillLevel,
         port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
         baud: 9600,
       });
@@ -572,6 +650,40 @@ export default function Dashboard() {
       setTurnState("error");
     }
   }, [armCalibrated, difficulty, gameSessionStarted, params, robotPort, robotStatus, turnState]);
+
+  const captureEmptyReference = useCallback(async () => {
+    if (emptyRefBusy) return;
+    setError(null);
+    setEmptyRefBusy("capture");
+    try {
+      const response = await api.captureEmptyReference({ params, capture: true });
+      setEmptyRefExists(true);
+      setEmptyRefImage(response.image);
+      setEmptyRefSavedAt(response.saved_at ?? Date.now() / 1000);
+      setMoveLog((current) => [...current, "Empty board reference captured (fresh photo, current calibration)"]);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Capture empty reference failed");
+    } finally {
+      setEmptyRefBusy(null);
+    }
+  }, [emptyRefBusy, params]);
+
+  const clearEmptyReference = useCallback(async () => {
+    if (emptyRefBusy) return;
+    setError(null);
+    setEmptyRefBusy("clear");
+    try {
+      await api.clearEmptyReference();
+      setEmptyRefExists(false);
+      setEmptyRefImage(null);
+      setEmptyRefSavedAt(null);
+      setMoveLog((current) => [...current, "Empty board reference cleared"]);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Clear empty reference failed");
+    } finally {
+      setEmptyRefBusy(null);
+    }
+  }, [emptyRefBusy]);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -654,25 +766,26 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex min-w-[260px] items-center justify-end gap-2 flex-wrap">
-          <div
-            className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs"
-            style={{ borderColor: "var(--charm-border)", background: "oklch(from var(--charm-cyan) l c h / 0.06)", color: "var(--charm-muted)" }}
-            title="Stockfish difficulty. Applies to the next robot move."
+          <button
+            type="button"
+            onClick={() => {
+              setDraftSkillLevel(skillLevel);
+              setShowSkillModal(true);
+            }}
+            title={`Stockfish skill ${skillLevel}/20 (~${estimateEloForSkill(skillLevel)} Elo). Click to change. Takes effect on the next robot move.`}
+            className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors hover:bg-[oklch(from_var(--charm-cyan)_l_c_h_/_0.14)]"
+            style={{
+              borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
+              background: "oklch(from var(--charm-cyan) l c h / 0.08)",
+              color: "var(--charm-cyan)",
+            }}
           >
-            <span style={{ color: "var(--charm-muted)" }}>Difficulty</span>
-            <Slider
-              value={[difficulty]}
-              min={0}
-              max={2}
-              step={1}
-              onValueChange={(v) => {
-                const next = Array.isArray(v) ? v[0] : v;
-                if (next === 0 || next === 1 || next === 2) setDifficulty(next);
-              }}
-              className="w-24"
-            />
-            <span style={{ color: "var(--charm-cyan)", minWidth: "3.5rem" }}>{DIFFICULTY_LABELS[difficulty]}</span>
-          </div>
+            <Swords className="size-4" />
+            <span style={{ color: "var(--charm-muted)" }}>Stockfish</span>
+            <span className="font-semibold" style={{ color: "var(--charm-cyan)" }}>Lv {skillLevel}/20</span>
+            <span style={{ color: "var(--charm-muted)" }}>·</span>
+            <span style={{ color: "var(--charm-muted)" }}>~{estimateEloForSkill(skillLevel)} Elo</span>
+          </button>
           <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: turnState === "error" ? "oklch(0.65 0.22 25)" : "var(--charm-cyan)" }}>
             {statusLabel}
           </Badge>
@@ -876,6 +989,72 @@ export default function Dashboard() {
                 Game
               </Button>
             </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="font-jetbrains flex-1"
+                onClick={captureEmptyReference}
+                disabled={Boolean(emptyRefBusy)}
+                title="Takes a fresh photo and warps it with the current saved calibration"
+              >
+                {emptyRefBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
+                Capture empty
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="font-jetbrains flex-1"
+                onClick={clearEmptyReference}
+                disabled={Boolean(emptyRefBusy) || !emptyRefExists}
+              >
+                {emptyRefBusy === "clear" ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
+                Clear empty
+              </Button>
+              <Badge
+                variant="outline"
+                className="font-jetbrains"
+                style={{
+                  borderColor: "var(--charm-border)",
+                  color: emptyRefExists ? "var(--charm-cyan)" : "var(--charm-muted)",
+                }}
+              >
+                {emptyRefExists ? "ref on" : "no ref"}
+              </Badge>
+            </div>
+            <div className="rounded-md border border-border p-2">
+              <div className="flex items-center justify-between mb-1">
+                <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>
+                  Empty reference (warped with current calibration)
+                </p>
+                <p className="font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                  {emptyRefSavedAt
+                    ? new Date(emptyRefSavedAt * 1000).toLocaleString()
+                    : "not captured"}
+                </p>
+              </div>
+              {emptyRefImage ? (
+                <button
+                  type="button"
+                  onClick={() => setShowEmptyRefModal(true)}
+                  className="block w-full overflow-hidden rounded border border-border"
+                  title="Click to enlarge"
+                >
+                  <img
+                    src={imageSrc(emptyRefImage)}
+                    alt="Empty board reference"
+                    className="block h-32 w-full object-contain bg-black"
+                  />
+                </button>
+              ) : (
+                <div
+                  className="flex h-32 items-center justify-center rounded border border-dashed border-border font-jetbrains text-xs"
+                  style={{ color: "var(--charm-muted)" }}
+                >
+                  No empty reference saved yet
+                </div>
+              )}
+            </div>
             <div className="rounded-md border border-border px-3 py-2">
               <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Latest capture</p>
               <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>{lastCapturePath ?? result?.image_path ?? "waiting"}</p>
@@ -931,6 +1110,152 @@ export default function Dashboard() {
         </Card>
         </div>
       </div>
+
+      {showSkillModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-12 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.7)" }}
+          onClick={() => setShowSkillModal(false)}
+        >
+          <div
+            className="mx-4 w-full max-w-md rounded-md border shadow-2xl"
+            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
+              <div className="flex items-center gap-2">
+                <Swords className="size-4" style={{ color: "var(--charm-cyan)" }} />
+                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Stockfish Difficulty</span>
+              </div>
+              <button
+                onClick={() => setShowSkillModal(false)}
+                className="font-jetbrains text-xs"
+                style={{ color: "var(--charm-muted)" }}
+              >
+                ✕ close
+              </button>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="flex items-baseline justify-between">
+                <div>
+                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>
+                    Skill Level
+                  </div>
+                  <div className="font-jetbrains text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
+                    {draftSkillLevel}
+                    <span className="ml-1 text-base" style={{ color: "var(--charm-muted)" }}>/ 20</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>
+                    Estimated Elo
+                  </div>
+                  <div className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>
+                    ~{estimateEloForSkill(draftSkillLevel)}
+                  </div>
+                  <div className="font-jetbrains text-xs mt-0.5" style={{ color: "var(--charm-muted)" }}>
+                    {skillTier(draftSkillLevel)}
+                  </div>
+                </div>
+              </div>
+
+              <Slider
+                value={[draftSkillLevel]}
+                min={MIN_SKILL_LEVEL}
+                max={MAX_SKILL_LEVEL}
+                step={1}
+                onValueChange={(v) => {
+                  const next = Array.isArray(v) ? v[0] : v;
+                  if (Number.isFinite(next)) {
+                    setDraftSkillLevel(Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, next as number)));
+                  }
+                }}
+                className="w-full"
+              />
+
+              <div className="flex justify-between font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                <span>1 · Beginner</span>
+                <span>10 · Club</span>
+                <span>20 · Master</span>
+              </div>
+
+              <div
+                className="rounded-md border px-3 py-2 font-jetbrains text-xs"
+                style={{
+                  borderColor: "var(--charm-border)",
+                  background: "oklch(from var(--charm-cyan) l c h / 0.04)",
+                  color: "var(--charm-muted)",
+                }}
+              >
+                Stockfish reconfigures on every robot move, so changes apply to the <span style={{ color: "var(--charm-cyan)" }}>next</span> move — including mid-game.
+              </div>
+
+              {draftSkillLevel !== skillLevel && (
+                <div
+                  className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
+                  style={{
+                    borderColor: "oklch(from var(--charm-cyan) l c h / 0.4)",
+                    background: "oklch(from var(--charm-cyan) l c h / 0.07)",
+                    color: "var(--charm-text)",
+                  }}
+                >
+                  <span>
+                    Current: <span style={{ color: "var(--charm-muted)" }}>Lv {skillLevel} (~{estimateEloForSkill(skillLevel)} Elo)</span>
+                  </span>
+                  <span>
+                    Pending: <span style={{ color: "var(--charm-cyan)" }}>Lv {draftSkillLevel} (~{estimateEloForSkill(draftSkillLevel)} Elo)</span>
+                  </span>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowSkillModal(false)}
+                  className="rounded-md border px-3 py-1.5 font-jetbrains text-xs"
+                  style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "transparent" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSkillLevel(draftSkillLevel);
+                    setSkillApplyToast({ level: draftSkillLevel, at: Date.now() });
+                    setShowSkillModal(false);
+                  }}
+                  disabled={draftSkillLevel === skillLevel}
+                  className="rounded-md border px-3 py-1.5 font-jetbrains text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
+                    background: "oklch(from var(--charm-cyan) l c h / 0.15)",
+                    color: "var(--charm-cyan)",
+                  }}
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {skillApplyToast && (
+        <div
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] rounded-md border px-4 py-2 font-jetbrains text-xs shadow-lg flex items-center gap-2"
+          style={{
+            borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
+            background: "var(--charm-card)",
+            color: "var(--charm-text)",
+          }}
+        >
+          <CheckCircle2 className="size-4" style={{ color: "var(--charm-cyan)" }} />
+          Stockfish skill level set to <span style={{ color: "var(--charm-cyan)" }}>{skillApplyToast.level}/20</span>
+          <span style={{ color: "var(--charm-muted)" }}>(~{estimateEloForSkill(skillApplyToast.level)} Elo)</span>
+          <span style={{ color: "var(--charm-muted)" }}>— applies on next robot move.</span>
+        </div>
+      )}
 
       {showParamsModal && (
         <div
@@ -993,6 +1318,46 @@ export default function Dashboard() {
             </div>
             <div className="bg-background">
               <ManualCalibration imagePath={lastCapturePath} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEmptyRefModal && emptyRefImage && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.8)" }}
+          onClick={() => setShowEmptyRefModal(false)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-md border shadow-2xl"
+            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
+              <div className="flex flex-col">
+                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
+                  Empty board reference
+                </span>
+                <span className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                  {emptyRefSavedAt ? `saved ${new Date(emptyRefSavedAt * 1000).toLocaleString()}` : "no timestamp"}
+                  {" · warped with the saved board + inner calibration"}
+                </span>
+              </div>
+              <button
+                onClick={() => setShowEmptyRefModal(false)}
+                className="font-jetbrains text-xs"
+                style={{ color: "var(--charm-muted)" }}
+              >
+                ✕ close
+              </button>
+            </div>
+            <div className="p-4 flex items-center justify-center bg-black">
+              <img
+                src={imageSrc(emptyRefImage)}
+                alt="Empty board reference (large)"
+                className="max-h-[75vh] w-auto object-contain"
+              />
             </div>
           </div>
         </div>

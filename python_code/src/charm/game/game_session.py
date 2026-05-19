@@ -8,7 +8,7 @@ import chess
 from charm.chess_engine.best_move import get_best_move
 from charm.game.state_tracker import BoardStateTracker, compare_board_to_bitmaps
 from charm.game.vision_integration import update_tracker_from_image
-from charm.vision.pipeline import run_board_pipeline
+from charm.vision.pipeline import PipelineOptions, run_board_pipeline
 
 
 PlayerColor = Literal["white", "black"]
@@ -61,6 +61,7 @@ class GameSession:
         self.initialized = False
         self.game_started = False
         self.flip_180 = False
+        self.pipeline_options: Optional[PipelineOptions] = None
 
         self.player_color: Optional[PlayerColor] = None
         self.robot_color: Optional[PlayerColor] = None
@@ -116,6 +117,7 @@ class GameSession:
         self.initialized = False
         self.game_started = False
         self.flip_180 = False
+        self.pipeline_options = None
         self.player_color = None
         self.robot_color = None
         self.tracker = None
@@ -129,6 +131,7 @@ class GameSession:
         image_path: str,
         max_mismatches: int = 0,
         flip_180: bool = False,
+        pipeline_options: Optional[PipelineOptions] = None,
     ) -> SessionResult:
         """
         Validate the standard initial chess position from a calibrated board image.
@@ -141,8 +144,11 @@ class GameSession:
 
         If the board matches the standard initial position, this creates the
         BoardStateTracker and the session becomes initialized.
+
+        Pass `pipeline_options` to match the tuned detector params and empty-board
+        reference used by the webapp's debug pipeline; otherwise legacy defaults apply.
         """
-        pipeline_result = run_board_pipeline(image_path)
+        pipeline_result = run_board_pipeline(image_path, options=pipeline_options)
 
         white_bitmap = pipeline_result.white_bitmap
         black_bitmap = pipeline_result.black_bitmap
@@ -173,6 +179,7 @@ class GameSession:
         self.initialized = True
         self.game_started = False
         self.flip_180 = flip_180
+        self.pipeline_options = pipeline_options
         self.player_color = None
         self.robot_color = None
 
@@ -241,6 +248,7 @@ class GameSession:
         self,
         image_path: str,
         max_mismatches: int = 0,
+        pipeline_options: Optional[PipelineOptions] = None,
     ) -> SessionResult:
         """
         Process a calibrated board image after the human player has moved.
@@ -264,12 +272,14 @@ class GameSession:
         return self.process_next_image(
             image_path=image_path,
             max_mismatches=max_mismatches,
+            pipeline_options=pipeline_options,
         )
 
     def process_next_image(
         self,
         image_path: str,
         max_mismatches: int = 0,
+        pipeline_options: Optional[PipelineOptions] = None,
     ) -> SessionResult:
         """
         Low-level method for processing any next calibrated board image.
@@ -288,11 +298,13 @@ class GameSession:
 
         assert self.tracker is not None
 
+        effective_options = pipeline_options if pipeline_options is not None else self.pipeline_options
         update_result = update_tracker_from_image(
             tracker=self.tracker,
             image_path=image_path,
             max_mismatches=max_mismatches,
             flip_180=self.flip_180,
+            pipeline_options=effective_options,
         )
 
         inference_result = update_result.inference_result

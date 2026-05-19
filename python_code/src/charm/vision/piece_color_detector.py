@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 import cv2
 import numpy as np
@@ -19,21 +19,30 @@ class PieceColorResult:
     occupied: bool
     color: PieceColorLabel
     brightness_score: float
+    brightness_delta: Optional[float] = None
+    dark_score: Optional[float] = None
+    dark_delta: Optional[float] = None
 
 
-def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
+def _center_lab_l(cell_image: np.ndarray) -> np.ndarray:
     h, w = cell_image.shape[:2]
-
     x1 = int(w * 0.35)
     x2 = int(w * 0.65)
     y1 = int(h * 0.30)
     y2 = int(h * 0.65)
-
     roi = cell_image[y1:y2, x1:x2]
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    return lab[:, :, 0].astype(np.float32)
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    return float(np.percentile(gray, 75))
+def compute_piece_brightness_score(cell_image: np.ndarray) -> float:
+    """75th percentile of LAB L over the center ROI — picks up white highlights."""
+    return float(np.percentile(_center_lab_l(cell_image), 75))
+
+
+def compute_piece_dark_score(cell_image: np.ndarray) -> float:
+    """25th percentile of LAB L over the center ROI — picks up black shadows."""
+    return float(np.percentile(_center_lab_l(cell_image), 25))
 
 
 def detect_piece_colors(
@@ -41,14 +50,36 @@ def detect_piece_colors(
     occupancy_results: list[OccupancyResult],
     white_threshold: float = 128.0,
     black_threshold: float = 128.0,
+    reference_cells: Optional[list[SquareCell]] = None,
+    white_delta_threshold: float = 5.0,
+    black_delta_threshold: float = -30.0,
 ) -> list[PieceColorResult]:
-    """
-    Only classify occupied cells.
-    - score >= white_threshold -> white
-    - score <= black_threshold -> black
-    - otherwise -> unknown
+    """Classify occupied cells as white/black/unknown.
+
+    Without a reference:
+      - p75(LAB L) >= white_threshold -> white
+      - p75(LAB L) <= black_threshold -> black
+      - otherwise -> unknown
+
+    With `reference_cells` (cells from an empty-board reference) the LAB L
+    channel is sampled twice per cell:
+      - bright_delta = p75(cell L) - p75(ref L) — kept for debugging.
+      - dark_delta   = p25(cell L) - p25(ref L) — primary discriminator.
+
+    Once occupancy has flagged a cell as occupied, the two classes separate
+    cleanly on `dark_delta` alone: a black piece body drops p25(L) by ~100+
+    units vs the empty reference, while a white piece only moves it by ~±20
+    (bright_delta is unreliable for white-on-light-square, where the empty
+    square is already near-saturated at p75).
+
+    Classification (with reference):
+      - dark_delta <= black_delta_threshold -> black
+      - otherwise -> white
+    `white_delta_threshold` is retained on the signature for API stability
+    but is no longer consulted on the reference path.
     """
     occupancy_map = {(r.row, r.col): r for r in occupancy_results}
+    ref_map = {(c.row, c.col): c for c in reference_cells} if reference_cells else {}
     results: list[PieceColorResult] = []
 
     for cell in cells:
@@ -62,18 +93,36 @@ def detect_piece_colors(
                     occupied=False,
                     color="unknown",
                     brightness_score=0.0,
+                    brightness_delta=None,
                 )
             )
             continue
 
-        score = compute_piece_brightness_score(cell.image)
+        bright_score = compute_piece_brightness_score(cell.image)
+        dark_score = compute_piece_dark_score(cell.image)
+        ref_cell = ref_map.get((cell.row, cell.col))
+        bright_delta: Optional[float] = None
+        dark_delta: Optional[float] = None
 
-        if score >= white_threshold:
-            label: PieceColorLabel = "white"
-        elif score <= black_threshold:
-            label = "black"
+        if ref_cell is not None:
+            ref_bright = compute_piece_brightness_score(ref_cell.image)
+            ref_dark = compute_piece_dark_score(ref_cell.image)
+            bright_delta = bright_score - ref_bright
+            dark_delta = dark_score - ref_dark
+
+            # Once occupancy has already said the cell is occupied, dark_delta
+            # alone cleanly splits the two classes: a black piece body drops
+            # p25(L) by ~100+ units vs the empty reference, while a white piece
+            # moves it by at most ~20 either way (even on light squares where
+            # bright_delta is uninformative).
+            label: PieceColorLabel = "black" if dark_delta <= black_delta_threshold else "white"
         else:
-            label = "unknown"
+            if bright_score >= white_threshold:
+                label = "white"
+            elif bright_score <= black_threshold:
+                label = "black"
+            else:
+                label = "unknown"
 
         results.append(
             PieceColorResult(
@@ -81,7 +130,10 @@ def detect_piece_colors(
                 col=cell.col,
                 occupied=True,
                 color=label,
-                brightness_score=score,
+                brightness_score=bright_score,
+                brightness_delta=bright_delta,
+                dark_score=dark_score,
+                dark_delta=dark_delta,
             )
         )
 
@@ -137,15 +189,20 @@ def draw_piece_color_debug(
             label = "E"
             thickness = 1
         else:
+            tag = {"white": "W", "black": "B"}.get(result.color, "U")
             if result.color == "white":
                 color = (255, 255, 255)
-                label = f"W:{result.brightness_score:.0f}"
             elif result.color == "black":
                 color = (0, 255, 0)
-                label = f"B:{result.brightness_score:.0f}"
             else:
                 color = (0, 255, 255)  # yellow
-                label = f"U:{result.brightness_score:.0f}"
+
+            if result.brightness_delta is not None and result.dark_delta is not None:
+                label = f"{tag}:{result.brightness_delta:+.0f}/{result.dark_delta:+.0f}"
+            elif result.brightness_delta is not None:
+                label = f"{tag}:{result.brightness_delta:+.0f}"
+            else:
+                label = f"{tag}:{result.brightness_score:.0f}"
             thickness = 3
 
         cv2.rectangle(

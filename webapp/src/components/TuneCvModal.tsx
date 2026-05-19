@@ -9,12 +9,21 @@ import { PipelineParams } from "@/lib/types";
 
 type Label = "empty" | "white" | "black";
 
+export interface TunedThresholds {
+  occupancy_threshold: number;
+  occupancy_delta_threshold?: number;
+  white_threshold: number;
+  black_threshold: number;
+  white_delta_threshold?: number;
+  black_delta_threshold?: number;
+}
+
 interface Props {
   onClose: () => void;
   refinedWarpB64: string | undefined;
   imagePath?: string | null;
   params: PipelineParams;
-  onTuned: (t: { occupancy_threshold: number; white_threshold: number; black_threshold: number }) => void;
+  onTuned: (t: TunedThresholds) => void;
 }
 
 const LABEL_COLORS: Record<Label, string> = {
@@ -28,7 +37,7 @@ export function TuneCvModal({ onClose, refinedWarpB64, imagePath, params, onTune
   const [annotations, setAnnotations] = useState<Record<string, Label>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ occupancy_threshold: number; white_threshold: number; black_threshold: number } | null>(null);
+  const [result, setResult] = useState<TunedThresholds | null>(null);
 
   const counts = useMemo(() => {
     const c: Record<Label, number> = { empty: 0, white: 0, black: 0 };
@@ -65,16 +74,16 @@ export function TuneCvModal({ onClose, refinedWarpB64, imagePath, params, onTune
         image_path: imagePath ?? undefined,
       };
       const response = await api.tuneCv(payload);
-      setResult({
+      const tuned: TunedThresholds = {
         occupancy_threshold: response.tuning.occupancy_threshold,
+        occupancy_delta_threshold: response.tuning.occupancy_delta_threshold,
         white_threshold: response.tuning.white_threshold,
         black_threshold: response.tuning.black_threshold,
-      });
-      onTuned({
-        occupancy_threshold: response.tuning.occupancy_threshold,
-        white_threshold: response.tuning.white_threshold,
-        black_threshold: response.tuning.black_threshold,
-      });
+        white_delta_threshold: response.tuning.white_delta_threshold,
+        black_delta_threshold: response.tuning.black_delta_threshold,
+      };
+      setResult(tuned);
+      onTuned(tuned);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Tune failed");
     } finally {
@@ -165,9 +174,20 @@ export function TuneCvModal({ onClose, refinedWarpB64, imagePath, params, onTune
           {result && (
             <div className="rounded border px-3 py-2 font-jetbrains text-xs" style={{ borderColor: "var(--charm-border)", color: "var(--charm-text)" }}>
               <div className="mb-1 uppercase" style={{ color: "var(--charm-muted)" }}>tuned thresholds</div>
-              <div>occupancy: {result.occupancy_threshold}</div>
-              <div>white: {result.white_threshold}</div>
-              <div>black: {result.black_threshold}</div>
+              <div>occupancy (edge+std): {result.occupancy_threshold}</div>
+              {result.occupancy_delta_threshold !== undefined && (
+                <div>occupancy Δ (vs empty ref): {result.occupancy_delta_threshold}</div>
+              )}
+              <div>white brightness: {result.white_threshold}</div>
+              <div>black brightness: {result.black_threshold}</div>
+              {result.black_delta_threshold !== undefined && (
+                <div>black dark-Δ (vs empty ref): {result.black_delta_threshold}</div>
+              )}
+              {result.occupancy_delta_threshold === undefined && (
+                <div className="mt-2" style={{ color: "var(--charm-muted)" }}>
+                  Tip: capture an Empty board reference to also tune the Δ-thresholds (the ones the live pipeline actually uses).
+                </div>
+              )}
             </div>
           )}
 

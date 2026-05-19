@@ -24,6 +24,7 @@ sys.path.insert(0, str(SRC_PATH))
 
 from webapp_backend import robot_adapter
 from charm.game.game_session import GameSession, SessionResult
+from charm.vision.pipeline import PipelineOptions
 
 from charm.vision.four_point_calibration import (
     FourPointCalibration,
@@ -116,11 +117,13 @@ from charm.vision.occupancy_detector import (
     detect_occupancy,
     OccupancyResult,
     compute_occupancy_score,
+    compute_reference_delta,
     draw_occupancy_debug,
     occupancy_to_matrix,
 )
 from charm.vision.piece_color_detector import (
     compute_piece_brightness_score,
+    compute_piece_dark_score,
     draw_piece_color_debug,
 )
 
@@ -137,6 +140,7 @@ BOARD_CAL_PATH = PYTHON_CODE_DIR / "board_calibration.json"
 INNER_CAL_PATH = PYTHON_CODE_DIR / "inner_warp_calibration.json"
 ROBOT_CAL_PATH = PYTHON_CODE_DIR / "robot_calibration.json"
 CV_TUNING_PATH = PYTHON_CODE_DIR / "cv_tuning.json"
+EMPTY_REF_PATH = PYTHON_CODE_DIR / "empty_board_reference.jpg"
 RAW_IMAGE_PATH = REPO_ROOT / "latest_raw.jpg"
 LEGACY_RAW_IMAGE_PATH = PYTHON_CODE_DIR / "latest_raw.jpg"
 SAVED_PARAMS_PATH = REPO_ROOT / "saved_pipeline_params.json"
@@ -144,6 +148,17 @@ ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
 LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
 DIFFICULTY_SKILL_LEVEL = {0: 5, 1: 12, 2: 20}
+
+
+def _resolve_skill_level(skill_level: Optional[int], difficulty: int) -> int:
+    """Pick the Stockfish skill level (0-20).
+
+    Explicit `skill_level` wins (clamped to 0-20); otherwise the legacy
+    DIFFICULTY_SKILL_LEVEL bucket is used.
+    """
+    if skill_level is not None:
+        return max(0, min(20, int(skill_level)))
+    return DIFFICULTY_SKILL_LEVEL[difficulty]
 
 _GAME_SESSION = GameSession()
 
@@ -184,11 +199,14 @@ class PipelineParams(BaseModel):
     sharpen_alpha: float = 1.35
     sharpen_beta: float = -0.35
     occupancy_threshold: float = 4.0
+    occupancy_delta_threshold: float = 12.0
     canny_low: int = 15
     canny_high: int = 50
     occupancy_std_weight: float = 0.4
     white_threshold: float = 80
     black_threshold: float = 80
+    white_delta_threshold: float = 5.0
+    black_delta_threshold: float = -30.0
     warp_size: int = 800
     image_path: Optional[str] = None
 
@@ -286,6 +304,7 @@ class GameStepPayload(BaseModel):
 class GameSessionPayload(BaseModel):
     player_color: str = "white"
     difficulty: int = 1
+    skill_level: Optional[int] = None
     params: PipelineParams = Field(default_factory=PipelineParams)
     capture: bool = True
     max_mismatches: int = 0
@@ -301,6 +320,7 @@ class GameSessionTurnPayload(BaseModel):
     capture: bool = True
     max_mismatches: int = 0
     difficulty: int = 1
+    skill_level: Optional[int] = None
     engine_path: str = "stockfish"
     think_time: float = 0.5
     port: Optional[str] = None
@@ -324,6 +344,12 @@ class CvTunePayload(BaseModel):
     annotations: list[TuneAnnotation]
     params: PipelineParams = Field(default_factory=PipelineParams)
     image_path: Optional[str] = None
+
+
+class EmptyReferencePayload(BaseModel):
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    image_path: Optional[str] = None
+    capture: bool = True
 
 
 def _normalize_camera_url(url: Optional[str]) -> Optional[str]:
@@ -467,7 +493,14 @@ def _apply_cv_tuning(params: PipelineParams) -> PipelineParams:
     if not tuning:
         return params
     defaults = PipelineParams()
-    for field in ("occupancy_threshold", "white_threshold", "black_threshold"):
+    for field in (
+        "occupancy_threshold",
+        "occupancy_delta_threshold",
+        "white_threshold",
+        "black_threshold",
+        "white_delta_threshold",
+        "black_delta_threshold",
+    ):
         if field in tuning and getattr(params, field) == getattr(defaults, field):
             setattr(params, field, float(tuning[field]))
     return params
@@ -533,7 +566,23 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
     t = time.perf_counter()
     occupancy_cells = extract_8x8_cells(warped, x_lines, y_lines)
     color_cells = occupancy_cells
-    occupancy_results = detect_occupancy(occupancy_cells, threshold=p.occupancy_threshold)
+
+    reference_cells = None
+    if EMPTY_REF_PATH.exists():
+        ref_img = cv2.imread(str(EMPTY_REF_PATH))
+        if ref_img is not None:
+            if ref_img.shape[:2] != warped.shape[:2]:
+                ref_img = cv2.resize(ref_img, (warped.shape[1], warped.shape[0]))
+            ref_x, ref_y = detect_8x8_grid_lines(ref_img)
+            reference_cells = extract_8x8_cells(ref_img, ref_x, ref_y)
+
+    occupancy_results = detect_occupancy(
+        occupancy_cells,
+        threshold=p.occupancy_threshold,
+        reference_cells=reference_cells,
+        delta_threshold=p.occupancy_delta_threshold,
+    )
+    results["empty_reference_active"] = reference_cells is not None
     results["occupancy_debug"] = to_b64(
         draw_occupancy_debug(warped.copy(), occupancy_cells, occupancy_results)
     )
@@ -552,7 +601,15 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
 
     from charm.vision.piece_color_detector import detect_piece_colors
 
-    color_results = detect_piece_colors(color_cells, occupancy_results, p.white_threshold, p.black_threshold)
+    color_results = detect_piece_colors(
+        color_cells,
+        occupancy_results,
+        white_threshold=p.white_threshold,
+        black_threshold=p.black_threshold,
+        reference_cells=reference_cells,
+        white_delta_threshold=p.white_delta_threshold,
+        black_delta_threshold=p.black_delta_threshold,
+    )
 
     for r in color_results:
         brightness_grid[r.row][r.col] = round(r.brightness_score, 1)
@@ -616,6 +673,7 @@ def _run_pipeline_and_write_calibrated(params: PipelineParams, capture: bool) ->
     if img is None:
         raise HTTPException(400, f"Failed to decode image: {path}")
 
+    params = _apply_cv_tuning(params)
     pipeline_result = run_pipeline(img, params)
     pipeline_result["image_path"] = str(path)
     pipeline_result["timestamp"] = time.time()
@@ -834,6 +892,50 @@ def pipeline_run(params: PipelineParams):
     return result
 
 
+@app.post("/api/empty-reference/capture")
+def capture_empty_reference(payload: Optional[EmptyReferencePayload] = None):
+    payload = payload or EmptyReferencePayload()
+    params = payload.params
+
+    if payload.capture:
+        source_path = str(_capture_or_resolve_image(params, capture=True))
+    else:
+        source_path = payload.image_path
+
+    warped = _warped_board_for_tuning(params, source_path)
+    if not cv2.imwrite(str(EMPTY_REF_PATH), warped):
+        raise HTTPException(500, "Failed to write empty reference image")
+    return {
+        "status": "saved",
+        "path": str(EMPTY_REF_PATH),
+        "source_image": source_path,
+        "image": to_b64(warped),
+        "saved_at": time.time(),
+    }
+
+
+@app.get("/api/empty-reference")
+def get_empty_reference():
+    if not EMPTY_REF_PATH.exists():
+        return {"exists": False, "image": None, "saved_at": None}
+    img = cv2.imread(str(EMPTY_REF_PATH))
+    if img is None:
+        return {"exists": False, "image": None, "saved_at": None}
+    return {
+        "exists": True,
+        "image": to_b64(img),
+        "path": str(EMPTY_REF_PATH),
+        "saved_at": EMPTY_REF_PATH.stat().st_mtime,
+    }
+
+
+@app.delete("/api/empty-reference")
+def clear_empty_reference():
+    if EMPTY_REF_PATH.exists():
+        EMPTY_REF_PATH.unlink()
+    return {"status": "cleared"}
+
+
 @app.get("/api/pipeline/tuning")
 def get_cv_tuning():
     tuning = _load_cv_tuning()
@@ -872,6 +974,17 @@ def tune_cv(payload: CvTunePayload):
     cells = extract_8x8_cells(warped, x_lines, y_lines)
     cell_map = {(c.row, c.col): c for c in cells}
 
+    # Load empty-reference cells if present so we can also tune delta thresholds.
+    ref_cell_map: dict[tuple[int, int], object] = {}
+    if EMPTY_REF_PATH.exists():
+        ref_img = cv2.imread(str(EMPTY_REF_PATH))
+        if ref_img is not None:
+            if ref_img.shape[:2] != warped.shape[:2]:
+                ref_img = cv2.resize(ref_img, (warped.shape[1], warped.shape[0]))
+            ref_x, ref_y = detect_8x8_grid_lines(ref_img)
+            ref_cells = extract_8x8_cells(ref_img, ref_x, ref_y)
+            ref_cell_map = {(c.row, c.col): c for c in ref_cells}
+
     samples: dict[str, list[dict]] = {"empty": [], "white": [], "black": []}
     for label, items in buckets.items():
         for ann in items:
@@ -880,12 +993,37 @@ def tune_cv(payload: CvTunePayload):
                 raise HTTPException(500, f"Cell not extracted: ({ann.row},{ann.col})")
             occ = float(compute_occupancy_score(cell.image))
             bright = float(compute_piece_brightness_score(cell.image))
-            samples[label].append({
+            dark = float(compute_piece_dark_score(cell.image))
+            sample: dict = {
                 "row": ann.row,
                 "col": ann.col,
                 "occupancy_score": round(occ, 3),
                 "brightness_score": round(bright, 2),
-            })
+                "dark_score": round(dark, 2),
+            }
+            ref_cell = ref_cell_map.get((ann.row, ann.col))
+            if ref_cell is not None:
+                occupancy_delta = float(compute_reference_delta(cell.image, ref_cell.image))  # type: ignore[arg-type]
+                ref_bright = float(compute_piece_brightness_score(ref_cell.image))  # type: ignore[arg-type]
+                ref_dark = float(compute_piece_dark_score(ref_cell.image))  # type: ignore[arg-type]
+                sample["occupancy_delta"] = round(occupancy_delta, 3)
+                sample["bright_delta"] = round(bright - ref_bright, 2)
+                sample["dark_delta"] = round(dark - ref_dark, 2)
+            samples[label].append(sample)
+
+    # Helper: pick a threshold T such that occupied samples satisfy `metric > T`
+    # and empty samples satisfy `metric <= T`. When the classes don't overlap
+    # we use the midpoint; when they do (lighting noise pushes empties into
+    # the occupied range, etc.), we hug `min_occupied` with a small margin so
+    # AND-mode in detect_occupancy still catches every real piece — the other
+    # metric is responsible for filtering the overlapping empties.
+    def _pick_threshold(empty_vals: list[float], occ_vals: list[float]) -> float:
+        max_empty_v = max(empty_vals)
+        min_occ_v = min(occ_vals)
+        if min_occ_v > max_empty_v:
+            return (max_empty_v + min_occ_v) / 2.0
+        spread = max(abs(min_occ_v), 1.0)
+        return min_occ_v - 0.05 * spread
 
     empty_occ = [s["occupancy_score"] for s in samples["empty"]]
     occupied_occ = [
@@ -893,12 +1031,7 @@ def tune_cv(payload: CvTunePayload):
         for label in ("white", "black")
         for s in samples[label]
     ]
-    max_empty = max(empty_occ)
-    min_occ = min(occupied_occ)
-    if min_occ <= max_empty:
-        occupancy_threshold = (max_empty + min_occ) / 2.0
-    else:
-        occupancy_threshold = (max_empty + min_occ) / 2.0
+    occupancy_threshold = _pick_threshold(empty_occ, occupied_occ)
 
     white_bright = [s["brightness_score"] for s in samples["white"]]
     black_bright = [s["brightness_score"] for s in samples["black"]]
@@ -906,13 +1039,44 @@ def tune_cv(payload: CvTunePayload):
     white_threshold = midpoint
     black_threshold = midpoint
 
-    tuning = {
+    tuning: dict = {
         "occupancy_threshold": round(float(occupancy_threshold), 3),
         "white_threshold": round(float(white_threshold), 2),
         "black_threshold": round(float(black_threshold), 2),
         "saved_at": time.time(),
         "samples": samples,
     }
+
+    # Reference-based delta thresholds. Only derive when every annotated cell
+    # has a per-cell delta (otherwise we'd be biased toward whatever subset
+    # happened to overlap the reference).
+    all_have_occ_delta = all(
+        "occupancy_delta" in s for label in ("empty", "white", "black") for s in samples[label]
+    )
+    if all_have_occ_delta:
+        empty_dd = [s["occupancy_delta"] for s in samples["empty"]]
+        occupied_dd = [
+            s["occupancy_delta"]
+            for label in ("white", "black")
+            for s in samples[label]
+        ]
+        occupancy_delta_threshold = _pick_threshold(empty_dd, occupied_dd)
+        tuning["occupancy_delta_threshold"] = round(float(occupancy_delta_threshold), 3)
+
+    all_have_dark_delta = all(
+        "dark_delta" in s for label in ("white", "black") for s in samples[label]
+    )
+    if all_have_dark_delta:
+        # Black pieces have very negative dark_delta (~-100); white pieces are near 0.
+        # Pick a midpoint between max black dark_delta and min white dark_delta.
+        white_dark_deltas = [s["dark_delta"] for s in samples["white"]]
+        black_dark_deltas = [s["dark_delta"] for s in samples["black"]]
+        black_delta_threshold = (max(black_dark_deltas) + min(white_dark_deltas)) / 2.0
+        tuning["black_delta_threshold"] = round(float(black_delta_threshold), 3)
+        # white_delta_threshold is currently unused on the reference path but
+        # we save a neutral value to keep PipelineParams overlay symmetric.
+        tuning["white_delta_threshold"] = round(float(black_delta_threshold), 3)
+
     _save_cv_tuning(tuning)
 
     return {
@@ -1062,7 +1226,22 @@ def game_session_start(payload: GameSessionPayload):
     pipeline_result["color_labels"] = [list(reversed(row)) for row in reversed(pipeline_result["color_labels"])]
 
     _GAME_SESSION.reset()
-    initial = _GAME_SESSION.initialize_from_image(str(calibrated_path), max_mismatches=payload.max_mismatches, flip_180=True)
+    pipeline_options = PipelineOptions(
+        occupancy_threshold=payload.params.occupancy_threshold,
+        occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
+        white_threshold=payload.params.white_threshold,
+        black_threshold=payload.params.black_threshold,
+        white_delta_threshold=payload.params.white_delta_threshold,
+        black_delta_threshold=payload.params.black_delta_threshold,
+        warp_size=payload.params.warp_size,
+        reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
+    )
+    initial = _GAME_SESSION.initialize_from_image(
+        str(calibrated_path),
+        max_mismatches=payload.max_mismatches,
+        flip_180=True,
+        pipeline_options=pipeline_options,
+    )
     if not initial.success:
         # Add board validation debug info
         expected_board = chess.Board()
@@ -1088,7 +1267,7 @@ def game_session_start(payload: GameSessionPayload):
         robot_result = _GAME_SESSION.compute_robot_move(
             engine_path=payload.engine_path,
             think_time=payload.think_time,
-            skill_level=DIFFICULTY_SKILL_LEVEL[payload.difficulty],
+            skill_level=_resolve_skill_level(payload.skill_level, payload.difficulty),
         )
         if robot_result.success and robot_result.move_uci and robot_board_copy is not None:
             if payload.execute_robot:
@@ -1127,9 +1306,20 @@ def game_session_player_done(payload: GameSessionTurnPayload):
 
     human_board_before = _GAME_SESSION.get_current_board()
     human_board_copy = human_board_before.copy(stack=True) if human_board_before is not None else None
+    turn_pipeline_options = PipelineOptions(
+        occupancy_threshold=payload.params.occupancy_threshold,
+        occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
+        white_threshold=payload.params.white_threshold,
+        black_threshold=payload.params.black_threshold,
+        white_delta_threshold=payload.params.white_delta_threshold,
+        black_delta_threshold=payload.params.black_delta_threshold,
+        warp_size=payload.params.warp_size,
+        reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
+    )
     human_result = _GAME_SESSION.process_player_move_from_image(
         str(calibrated_path),
         max_mismatches=payload.max_mismatches,
+        pipeline_options=turn_pipeline_options,
     )
     if not human_result.success:
         return _game_session_payload(
@@ -1153,7 +1343,7 @@ def game_session_player_done(payload: GameSessionTurnPayload):
     robot_result = _GAME_SESSION.compute_robot_move(
         engine_path=payload.engine_path,
         think_time=payload.think_time,
-        skill_level=DIFFICULTY_SKILL_LEVEL[payload.difficulty],
+        skill_level=_resolve_skill_level(payload.skill_level, payload.difficulty),
     )
     robot_command = None
     if not robot_result.success or not robot_result.move_uci or robot_board_copy is None:

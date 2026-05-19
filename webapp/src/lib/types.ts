@@ -27,11 +27,14 @@ export interface PipelineParams {
   sharpen_alpha: number;
   sharpen_beta: number;
   occupancy_threshold: number;
+  occupancy_delta_threshold: number;
   canny_low: number;
   canny_high: number;
   occupancy_std_weight: number;
   white_threshold: number;
   black_threshold: number;
+  white_delta_threshold: number;
+  black_delta_threshold: number;
   warp_size: number;
   image_path?: string;
 }
@@ -256,10 +259,13 @@ export const DEFAULT_PARAMS: PipelineParams = {
   sharpen_alpha: 1.35,
   sharpen_beta: -0.35,
   occupancy_threshold: 4.0,
+  occupancy_delta_threshold: 12.0,
   canny_low: 15,
   canny_high: 50,
   occupancy_std_weight: 0.4,
   white_threshold: 80.0,
   black_threshold: 80.0,
+  white_delta_threshold: 5.0,
+  black_delta_threshold: -30.0,
   warp_size: 800,
 };

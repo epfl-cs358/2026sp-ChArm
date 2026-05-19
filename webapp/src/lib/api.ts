@@ -62,10 +62,25 @@ export const api = {
       path: string;
       tuning: {
         occupancy_threshold: number;
+        occupancy_delta_threshold?: number;
         white_threshold: number;
         black_threshold: number;
+        white_delta_threshold?: number;
+        black_delta_threshold?: number;
         saved_at: number;
-        samples: Record<string, { row: number; col: number; occupancy_score: number; brightness_score: number }[]>;
+        samples: Record<
+          string,
+          {
+            row: number;
+            col: number;
+            occupancy_score: number;
+            brightness_score: number;
+            dark_score?: number;
+            occupancy_delta?: number;
+            bright_delta?: number;
+            dark_delta?: number;
+          }[]
+        >;
       };
     }>("/api/pipeline/tune", payload),
 
@@ -74,14 +89,29 @@ export const api = {
       exists: boolean;
       tuning: {
         occupancy_threshold: number;
+        occupancy_delta_threshold?: number;
         white_threshold: number;
         black_threshold: number;
+        white_delta_threshold?: number;
+        black_delta_threshold?: number;
         saved_at?: number;
       } | null;
     }>("/api/pipeline/tuning"),
 
   clearCvTuning: () =>
     fetch(`${API}/api/pipeline/tuning`, { method: "DELETE" }).then((r) => r.json()),
+
+  captureEmptyReference: (payload?: { params?: PipelineParams; image_path?: string; capture?: boolean }) =>
+    post<{ status: string; path: string; image: string; source_image?: string; saved_at?: number }>(
+      "/api/empty-reference/capture",
+      payload ?? {},
+    ),
+
+  getEmptyReference: () =>
+    get<{ exists: boolean; image: string | null; path?: string; saved_at?: number | null }>("/api/empty-reference"),
+
+  clearEmptyReference: () =>
+    fetch(`${API}/api/empty-reference`, { method: "DELETE" }).then((r) => r.json()),
 
   uploadAndRun: async (file: File, params: PipelineParams): Promise<PipelineResult> => {
     const fd = new FormData();
@@ -102,6 +132,7 @@ export const api = {
   startGameSession: (payload: {
     player_color?: "white" | "black";
     difficulty?: 0 | 1 | 2;
+    skill_level?: number;
     params?: PipelineParams;
     capture?: boolean;
     max_mismatches?: number;
@@ -117,6 +148,7 @@ export const api = {
     capture?: boolean;
     max_mismatches?: number;
     difficulty?: 0 | 1 | 2;
+    skill_level?: number;
     engine_path?: string;
     think_time?: number;
     port?: string;

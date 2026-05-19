@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from charm.game.state_tracker import BoardStateTracker, MoveInferenceResult
-from charm.vision.pipeline import BoardPipelineResult, run_board_pipeline
+from charm.vision.pipeline import BoardPipelineResult, PipelineOptions, run_board_pipeline
 
 
 @dataclass
@@ -15,8 +16,9 @@ class VisionStateUpdateResult:
 def infer_move_from_image(
     tracker: BoardStateTracker,
     image_path: str,
+    pipeline_options: Optional[PipelineOptions] = None,
 ) -> VisionStateUpdateResult:
-    pipeline_result = run_board_pipeline(image_path)
+    pipeline_result = run_board_pipeline(image_path, options=pipeline_options)
     inference_result = tracker.infer_move(
         pipeline_result.white_bitmap,
         pipeline_result.black_bitmap,
@@ -32,8 +34,9 @@ def update_tracker_from_image(
     image_path: str,
     max_mismatches: int = 0,
     flip_180: bool = False,
+    pipeline_options: Optional[PipelineOptions] = None,
 ) -> VisionStateUpdateResult:
-    pipeline_result = run_board_pipeline(image_path)
+    pipeline_result = run_board_pipeline(image_path, options=pipeline_options)
     white_bitmap = pipeline_result.white_bitmap
     black_bitmap = pipeline_result.black_bitmap
     if flip_180:
