@@ -308,9 +308,11 @@ export default function LabelingWizardPage() {
       await api.labelingArm(activeName, { color, square, action: "pickup_source" });
       // 2) place on target
       await api.labelingArm(activeName, { color, square, action: "place_target" });
-      // 3) wait an extra beat past settle so the arm clears the frame
+      // 3) park the arm at home so it is out of frame for every captured picture
+      await api.labelingArm(activeName, { color, square, action: "home" });
+      // 4) wait an extra beat past settle so the arm clears the frame
       await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms / 2)));
-      // 4) capture frames
+      // 5) capture frames
       await api.captureLabelSquare(activeName, {
         color,
         square,
@@ -909,6 +911,26 @@ export default function LabelingWizardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {meta && (
+              <CaptureTuner
+                meta={meta}
+                draftFrames={draftFrames}
+                draftSettle={draftSettle}
+                appliedFrames={appliedFrames}
+                appliedSettle={appliedSettle}
+                onDraftFrames={(n) => {
+                  setDraftFrames(n);
+                  setAppliedFrames(false);
+                }}
+                onDraftSettle={(n) => {
+                  setDraftSettle(n);
+                  setAppliedSettle(false);
+                }}
+                onApplyFrames={handleApplyFrames}
+                onApplySettle={handleApplySettle}
+                disabled={whiteRunState === "running"}
+              />
+            )}
             <SweepRunner
               color="white"
               currentSquare={whiteCurrentSquare}
@@ -997,6 +1019,26 @@ export default function LabelingWizardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {meta && (
+              <CaptureTuner
+                meta={meta}
+                draftFrames={draftFrames}
+                draftSettle={draftSettle}
+                appliedFrames={appliedFrames}
+                appliedSettle={appliedSettle}
+                onDraftFrames={(n) => {
+                  setDraftFrames(n);
+                  setAppliedFrames(false);
+                }}
+                onDraftSettle={(n) => {
+                  setDraftSettle(n);
+                  setAppliedSettle(false);
+                }}
+                onApplyFrames={handleApplyFrames}
+                onApplySettle={handleApplySettle}
+                disabled={blackRunState === "running"}
+              />
+            )}
             <SweepRunner
               color="black"
               currentSquare={blackCurrentSquare}
@@ -1195,6 +1237,97 @@ function NavRow({
       <Button onClick={onForward} disabled={forwardDisabled || !onForward}>
         {forwardLabel}
       </Button>
+    </div>
+  );
+}
+
+function CaptureTuner({
+  meta,
+  draftFrames,
+  draftSettle,
+  appliedFrames,
+  appliedSettle,
+  onDraftFrames,
+  onDraftSettle,
+  onApplyFrames,
+  onApplySettle,
+  disabled,
+}: {
+  meta: LabelDatasetMeta;
+  draftFrames: number;
+  draftSettle: number;
+  appliedFrames: boolean;
+  appliedSettle: boolean;
+  onDraftFrames: (n: number) => void;
+  onDraftSettle: (n: number) => void;
+  onApplyFrames: () => void;
+  onApplySettle: () => void;
+  disabled?: boolean;
+}) {
+  // Estimator uses the *applied* settings (what the sweep will actually use),
+  // not the draft, so the number doesn't lie before Apply is pressed.
+  const frames = meta.settings.frames_per_square;
+  const settleSec = meta.settings.settle_ms / 1000;
+  // Rough heuristic per square: ~10s arm overhead (pickup + place + home +
+  // return_to_source) + frames × (delay + ~0.8s for camera grab and warp).
+  const perSquareSec = 10 + frames * (settleSec + 0.8);
+  const totalMin = (perSquareSec * 64) / 60;
+  return (
+    <div
+      className="rounded-md border p-3 space-y-2 font-jetbrains text-xs"
+      style={{
+        borderColor: "var(--charm-border)",
+        background: "color-mix(in oklab, var(--charm-cyan) 5%, transparent)",
+      }}
+    >
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-1">
+          <span style={{ color: "var(--charm-muted)" }}>Pictures per square</span>
+          <Input
+            type="number"
+            min={1}
+            max={20}
+            value={draftFrames}
+            disabled={disabled}
+            onChange={(e) => onDraftFrames(parseInt(e.target.value || "0", 10))}
+            className="w-20"
+          />
+        </div>
+        <Button
+          size="sm"
+          variant={appliedFrames ? "outline" : "default"}
+          disabled={disabled}
+          onClick={onApplyFrames}
+        >
+          {appliedFrames ? "Applied" : "Apply"}
+        </Button>
+        <div className="flex flex-col gap-1">
+          <span style={{ color: "var(--charm-muted)" }}>Delay between pictures (ms)</span>
+          <Input
+            type="number"
+            min={0}
+            max={5000}
+            step={50}
+            value={draftSettle}
+            disabled={disabled}
+            onChange={(e) => onDraftSettle(parseInt(e.target.value || "0", 10))}
+            className="w-28"
+          />
+        </div>
+        <Button
+          size="sm"
+          variant={appliedSettle ? "outline" : "default"}
+          disabled={disabled}
+          onClick={onApplySettle}
+        >
+          {appliedSettle ? "Applied" : "Apply"}
+        </Button>
+      </div>
+      <p style={{ color: "var(--charm-muted)" }}>
+        Active: {frames} pictures × {settleSec.toFixed(2)}s delay → ~
+        {perSquareSec.toFixed(0)}s per square × 64 ≈ {totalMin.toFixed(1)} min
+        per color sweep. (Rough estimate — arm motion adds variance.)
+      </p>
     </div>
   );
 }
