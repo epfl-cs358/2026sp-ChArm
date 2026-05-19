@@ -273,4 +273,188 @@ export const api = {
   },
 
   disconnectRobot: () => post<{ status: string }>("/api/robot/disconnect", {}),
+
+  // ---- Labeled-data wizard ----
+  listLabelDatasets: () =>
+    get<{
+      datasets: LabelDatasetMeta[];
+      squares: string[];
+    }>("/api/labeling/datasets"),
+
+  getLabelDataset: (name: string) =>
+    get<LabelDatasetResponse>(`/api/labeling/datasets/${encodeURIComponent(name)}`),
+
+  createLabelDataset: (payload: { name: string; settings?: Partial<LabelSettings> }) =>
+    post<LabelDatasetResponse>("/api/labeling/datasets", payload),
+
+  deleteLabelDataset: (name: string) =>
+    fetch(`${API}/api/labeling/datasets/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then((r) => r.json()),
+
+  updateLabelSettings: (name: string, settings: LabelSettings) =>
+    put<LabelDatasetResponse>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/settings`,
+      { settings },
+    ),
+
+  getLabelThumb: (name: string, color: "empty" | "white" | "black", square: string) => {
+    const params = new URLSearchParams({ color, square: square || "a1" });
+    return get<{ exists: boolean; image: string | null }>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/thumb?${params.toString()}`,
+    );
+  },
+
+  captureLabelEmpty: (name: string, payload: {
+    params: PipelineParams;
+    capture?: boolean;
+    frames?: number;
+  }) =>
+    post<{ saved_frames: number } & LabelDatasetResponse>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/capture-empty`,
+      payload,
+    ),
+
+  captureLabelSquare: (name: string, payload: {
+    color: "white" | "black";
+    square: string;
+    params: PipelineParams;
+    capture?: boolean;
+    frames?: number;
+  }) =>
+    post<{ saved_frames: number } & LabelDatasetResponse>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/capture-square`,
+      payload,
+    ),
+
+  labelingArm: (name: string, payload: {
+    color: "white" | "black";
+    square: string;
+    action: "pickup_source" | "place_target" | "return_to_source" | "home";
+    port?: string;
+    baud?: number;
+  }) =>
+    post<{ status: string; action: string; commands: string[]; responses: string[] }>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/arm`,
+      payload,
+    ),
+
+  computeDatasetStats: (name: string) =>
+    post<{
+      metadata: LabelDatasetMeta;
+      accuracy: LabelAccuracyReport;
+      exemplar_config_path: string;
+    }>(`/api/labeling/datasets/${encodeURIComponent(name)}/compute-stats`, {}),
+
+  getDatasetAccuracy: (name: string) =>
+    get<{ exists: boolean; accuracy: LabelAccuracyReport | null }>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/accuracy`,
+    ),
+
+  getActiveClassifier: () =>
+    get<{ active: boolean; name: string | null; has_config?: boolean; config_path?: string }>(
+      "/api/labeling/active",
+    ),
+
+  setActiveClassifier: (name: string | null) =>
+    put<{ active: boolean; name: string | null; config_path?: string }>(
+      "/api/labeling/active",
+      { name },
+    ),
+
+  clearActiveClassifier: () =>
+    fetch(`${API}/api/labeling/active`, { method: "DELETE" }).then((r) => r.json()),
+
+  arucoDetect: (payload: {
+    image_path?: string;
+    capture?: boolean;
+    warp_size?: number;
+    dictionary?: string;
+    layout?: Record<string, string>;
+    save?: boolean;
+  }) =>
+    post<ArucoDetectResult>("/api/calibration/aruco-detect", payload),
+
+  getArucoMarker: (marker_id: number, size = 600, dictionary = "DICT_4X4_50") => {
+    const params = new URLSearchParams({
+      marker_id: String(marker_id),
+      size: String(size),
+      dictionary,
+    });
+    return get<{ marker_id: number; dictionary: string; size_px: number; image: string }>(
+      `/api/calibration/aruco-marker?${params.toString()}`,
+    );
+  },
 };
+
+export interface ArucoDetection {
+  id: number;
+  corners: [number, number][];
+  center: [number, number];
+}
+
+export interface ArucoDetectResult {
+  status: "ok" | "incomplete";
+  image_path: string;
+  saved?: boolean;
+  saved_path?: string | null;
+  board?: {
+    top_left: [number, number];
+    top_right: [number, number];
+    bottom_right: [number, number];
+    bottom_left: [number, number];
+  };
+  detections: ArucoDetection[];
+  used_ids?: number[];
+  missing_ids?: number[];
+  detected_ids?: number[];
+  expected_ids?: number[];
+  first_warp?: string;
+  overlay?: string;
+  layout?: Record<string, string>;
+  error?: string;
+}
+
+export interface LabelSettings {
+  frames_per_square: number;
+  settle_ms: number;
+  source_square: string;
+  piece_type: string;
+  lighting_note: string;
+}
+
+export interface LabelDatasetMeta {
+  name: string;
+  created_at: number;
+  updated_at: number;
+  settings: LabelSettings;
+  empty_frames: number;
+  white: Record<string, number>;
+  black: Record<string, number>;
+  has_exemplar_config: boolean;
+  has_accuracy: boolean;
+}
+
+export interface LabelDatasetResponse {
+  metadata: LabelDatasetMeta;
+  paths: {
+    dir: string;
+    exemplar_config: string | null;
+    accuracy: string | null;
+  };
+}
+
+export interface LabelAccuracyReport {
+  squares: Record<
+    string,
+    {
+      row: number;
+      col: number;
+      total: number;
+      correct: number;
+      accuracy: number;
+      confusion: Record<string, Record<string, number>>;
+    }
+  >;
+  overall: { total: number; correct: number; accuracy: number };
+}

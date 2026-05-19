@@ -13,6 +13,7 @@ import ParamControls from "@/components/ParamControls";
 import ChessBoard from "@/components/ChessBoard";
 import DebugImages from "@/components/DebugImages";
 import ManualCalibration from "@/components/ManualCalibration";
+import ArucoCalibration from "@/components/ArucoCalibration";
 import {
   Select,
   SelectContent,
@@ -671,6 +672,7 @@ export default function LabPage() {
     count: number; n_white: number; n_black: number; n_scenes: number;
   } | null>(null);
   const [showManualCalibration, setShowManualCalibration] = useState(false);
+  const [showArucoCalibration, setShowArucoCalibration] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const runASeq = useRef(0);
   const runBSeq = useRef(0);
@@ -1021,6 +1023,13 @@ export default function LabPage() {
           >
             Do manual calibration on the 4 corners
           </button>
+          <button
+            type="button"
+            onClick={() => setShowArucoCalibration((current) => !current)}
+            className="px-3 py-2 text-xs font-mono rounded-md border border-border text-text-muted hover:text-text hover:border-border-bright"
+          >
+            ArUco calibration (auto, 4 markers)
+          </button>
           <div className="flex rounded-md overflow-hidden border border-border">
             {(["raw", "upload"] as const).map((s) => (
               <button
@@ -1092,6 +1101,12 @@ export default function LabPage() {
           </button>
         </div>
       </div>
+
+      {showArucoCalibration && (
+        <div className="mb-6 rounded-md border border-border p-4">
+          <ArucoCalibration />
+        </div>
+      )}
 
       {showManualCalibration && (
         <div className="mb-6 rounded-md border border-border">

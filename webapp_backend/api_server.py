@@ -506,6 +506,52 @@ def _apply_cv_tuning(params: PipelineParams) -> PipelineParams:
     return params
 
 
+def _classify_with_exemplars(occupancy_cells, config):
+    """Run the per-square exemplar classifier on the current cells and produce
+    OccupancyResult + PieceColorResult lists that match the existing pipeline
+    contract so the same debug-image drawers work unchanged.
+    """
+    from charm.vision.exemplar_classifier import classify_cell
+    from charm.vision.occupancy_detector import OccupancyResult
+    from charm.vision.piece_color_detector import PieceColorResult
+
+    occupancy_results: list[OccupancyResult] = []
+    color_results: list[PieceColorResult] = []
+    for cell in occupancy_cells:
+        res = classify_cell(cell.image, cell.row, cell.col, config)
+        occupied = res.label != "empty"
+        # The "score" field is what the threshold-path debug renders; piggy-back
+        # the confidence margin so the existing debug view still has a useful
+        # per-cell number. delta is unused on this path.
+        occupancy_results.append(
+            OccupancyResult(
+                row=cell.row,
+                col=cell.col,
+                occupied=occupied,
+                score=float(res.confidence_margin),
+                delta=None,
+            )
+        )
+        if not occupied:
+            color_results.append(
+                PieceColorResult(
+                    row=cell.row, col=cell.col,
+                    occupied=False, color="unknown",
+                    brightness_score=0.0,
+                )
+            )
+        else:
+            color = res.label  # "white" or "black"
+            color_results.append(
+                PieceColorResult(
+                    row=cell.row, col=cell.col,
+                    occupied=True, color=color,  # type: ignore[arg-type]
+                    brightness_score=float(res.confidence_margin),
+                )
+            )
+    return occupancy_results, color_results
+
+
 def _warped_board_for_tuning(params: PipelineParams, image_path: Optional[str]) -> np.ndarray:
     path = Path(image_path) if image_path else resolve_latest_raw_path()
     if not path.exists():
@@ -576,12 +622,21 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
             ref_x, ref_y = detect_8x8_grid_lines(ref_img)
             reference_cells = extract_8x8_cells(ref_img, ref_x, ref_y)
 
-    occupancy_results = detect_occupancy(
-        occupancy_cells,
-        threshold=p.occupancy_threshold,
-        reference_cells=reference_cells,
-        delta_threshold=p.occupancy_delta_threshold,
-    )
+    active_name, active_cfg = _get_active_exemplar_config()
+    if active_cfg is not None:
+        occupancy_results, color_results = _classify_with_exemplars(
+            occupancy_cells, active_cfg
+        )
+        results["classifier"] = {"active": True, "name": active_name, "kind": "exemplar"}
+    else:
+        occupancy_results = detect_occupancy(
+            occupancy_cells,
+            threshold=p.occupancy_threshold,
+            reference_cells=reference_cells,
+            delta_threshold=p.occupancy_delta_threshold,
+        )
+        color_results = None  # filled in below via threshold path
+        results["classifier"] = {"active": False, "name": None, "kind": "threshold"}
     results["empty_reference_active"] = reference_cells is not None
     results["occupancy_debug"] = to_b64(
         draw_occupancy_debug(warped.copy(), occupancy_cells, occupancy_results)
@@ -601,15 +656,16 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
 
     from charm.vision.piece_color_detector import detect_piece_colors
 
-    color_results = detect_piece_colors(
-        color_cells,
-        occupancy_results,
-        white_threshold=p.white_threshold,
-        black_threshold=p.black_threshold,
-        reference_cells=reference_cells,
-        white_delta_threshold=p.white_delta_threshold,
-        black_delta_threshold=p.black_delta_threshold,
-    )
+    if color_results is None:
+        color_results = detect_piece_colors(
+            color_cells,
+            occupancy_results,
+            white_threshold=p.white_threshold,
+            black_threshold=p.black_threshold,
+            reference_cells=reference_cells,
+            white_delta_threshold=p.white_delta_threshold,
+            black_delta_threshold=p.black_delta_threshold,
+        )
 
     for r in color_results:
         brightness_grid[r.row][r.col] = round(r.brightness_score, 1)
@@ -1444,6 +1500,131 @@ def calibrate_board_corners(payload: BoardCornerCalibrationPayload):
     }
 
 
+class ArucoCalibratePayload(BaseModel):
+    image_path: Optional[str] = None
+    capture: bool = True
+    warp_size: int = 800
+    dictionary: str = "DICT_4X4_50"
+    layout: dict[str, str] = Field(
+        default_factory=lambda: {"0": "a8", "1": "h8", "2": "h1", "3": "a1"},
+    )
+    save: bool = False  # only persist to BOARD_CAL_PATH when explicitly applied
+
+
+_ARUCO_DICT_BY_NAME = {
+    "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
+    "DICT_4X4_100": cv2.aruco.DICT_4X4_100,
+    "DICT_4X4_250": cv2.aruco.DICT_4X4_250,
+    "DICT_5X5_50": cv2.aruco.DICT_5X5_50,
+    "DICT_6X6_50": cv2.aruco.DICT_6X6_50,
+}
+
+
+@app.post("/api/calibration/aruco-detect")
+def calibrate_aruco(payload: ArucoCalibratePayload):
+    from charm.vision.aruco_calibration import (
+        compute_board_corners_from_markers,
+        detect_aruco_markers,
+        draw_aruco_overlay,
+    )
+
+    dict_id = _ARUCO_DICT_BY_NAME.get(payload.dictionary)
+    if dict_id is None:
+        raise HTTPException(400, f"Unsupported dictionary: {payload.dictionary}")
+
+    # Resolve image (fresh capture or saved path).
+    if payload.capture:
+        try:
+            src_path = Path(_capture_or_resolve_image(PipelineParams(), capture=True))
+        except HTTPException:
+            raise
+    else:
+        src_path = Path(payload.image_path) if payload.image_path else resolve_latest_raw_path()
+    if not src_path.exists():
+        raise HTTPException(404, f"Image not found: {src_path}")
+    image = cv2.imread(str(src_path))
+    if image is None:
+        raise HTTPException(400, f"Failed to decode image: {src_path}")
+
+    try:
+        marker_layout = {int(k): v for k, v in payload.layout.items()}
+    except ValueError as e:
+        raise HTTPException(400, f"Layout keys must be integer marker IDs: {e}")
+
+    detections = detect_aruco_markers(image, dictionary_id=dict_id)
+    try:
+        result = compute_board_corners_from_markers(detections, marker_layout)
+    except ValueError as e:
+        return {
+            "status": "incomplete",
+            "image_path": str(src_path),
+            "detections": [d.to_json() for d in detections],
+            "detected_ids": sorted(d.marker_id for d in detections),
+            "expected_ids": sorted(marker_layout.keys()),
+            "error": str(e),
+        }
+
+    overlay = draw_aruco_overlay(image, result)
+    try:
+        first_warp = warp_from_calibration(image, result.calibration, output_size=payload.warp_size)
+    except Exception as e:
+        raise HTTPException(500, f"warp failed: {e}")
+
+    saved = False
+    if payload.save:
+        save_four_point_calibration(result.calibration, BOARD_CAL_PATH)
+        saved = True
+
+    return {
+        "status": "ok",
+        "image_path": str(src_path),
+        "saved": saved,
+        "saved_path": str(BOARD_CAL_PATH) if saved else None,
+        "board": {
+            "top_left": list(result.calibration.top_left),
+            "top_right": list(result.calibration.top_right),
+            "bottom_right": list(result.calibration.bottom_right),
+            "bottom_left": list(result.calibration.bottom_left),
+        },
+        "detections": [d.to_json() for d in result.detections],
+        "used_ids": result.used_ids,
+        "missing_ids": result.missing_ids,
+        "first_warp": to_b64(first_warp),
+        "overlay": to_b64(overlay),
+        "layout": {str(k): v for k, v in marker_layout.items()},
+    }
+
+
+@app.get("/api/calibration/aruco-marker")
+def aruco_marker_image(marker_id: int, size: int = 600, dictionary: str = "DICT_4X4_50"):
+    """Render a single ArUco marker as a PNG so the user can print it.
+
+    Size is in pixels; print at 3.75 cm wide. With a 600px marker this means
+    the printer must scale it to 3.75 cm: at 96 dpi -> 142px/inch -> set print
+    scale so output is 3.75 cm. Most browsers print at the page's natural DPI;
+    callers can pick `size` so the print scaling lands on 3.75 cm cleanly.
+    """
+    import base64 as _b64
+    import io
+
+    dict_id = _ARUCO_DICT_BY_NAME.get(dictionary)
+    if dict_id is None:
+        raise HTTPException(400, f"Unsupported dictionary: {dictionary}")
+    if size <= 0 or size > 2000:
+        raise HTTPException(400, "size must be 1..2000")
+    aruco_dict = cv2.aruco.getPredefinedDictionary(dict_id)
+    img = cv2.aruco.generateImageMarker(aruco_dict, int(marker_id), int(size))
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise HTTPException(500, "Failed to encode marker PNG")
+    return {
+        "marker_id": int(marker_id),
+        "dictionary": dictionary,
+        "size_px": int(size),
+        "image": _b64.b64encode(buf.tobytes()).decode(),
+    }
+
+
 @app.get("/api/images/list")
 def list_raw_images():
     candidates = [
@@ -1632,6 +1813,407 @@ def classifier_status():
 @app.post("/api/classifier/retrain")
 def retrain_classifier():
     raise HTTPException(501, "kNN classifier has been removed — color detection uses brightness threshold only.")
+
+
+# ---------------------------------------------------------------------------
+# Labeled-data wizard (arm-driven dataset capture + exemplar classifier)
+# ---------------------------------------------------------------------------
+
+from webapp_backend.labeling import (
+    DatasetSettings,
+    DatasetStore,
+    square_to_rc as labeling_square_to_rc,
+    SQUARES as LABELING_SQUARES,
+)
+from charm.vision.exemplar_classifier import (
+    build_exemplar_config,
+    leave_one_out_accuracy,
+)
+
+LABELED_DATASETS_DIR = PYTHON_CODE_DIR / "labeled_datasets"
+LABEL_STORE = DatasetStore(LABELED_DATASETS_DIR)
+LABELING_BUSY: dict[str, bool] = {"busy": False}
+ACTIVE_CLASSIFIER_PATH = PYTHON_CODE_DIR / "active_classifier.json"
+
+# In-process cache so we don't reparse exemplar_config.json on every pipeline run.
+_ACTIVE_CACHE: dict = {"name": None, "mtime": 0.0, "config": None}
+
+
+def _load_active_classifier_pointer() -> Optional[str]:
+    if not ACTIVE_CLASSIFIER_PATH.exists():
+        return None
+    try:
+        data = json.loads(ACTIVE_CLASSIFIER_PATH.read_text())
+        name = data.get("name")
+        return str(name) if name else None
+    except Exception:
+        return None
+
+
+def _save_active_classifier_pointer(name: Optional[str]) -> None:
+    if name is None:
+        if ACTIVE_CLASSIFIER_PATH.exists():
+            ACTIVE_CLASSIFIER_PATH.unlink()
+        return
+    ACTIVE_CLASSIFIER_PATH.write_text(json.dumps({"name": name, "saved_at": time.time()}, indent=2))
+
+
+def _get_active_exemplar_config():
+    """Return (name, ExemplarConfig) or (None, None) if no classifier is active.
+
+    Reloads the on-disk exemplar_config.json when its mtime changes so the
+    wizard can re-train without restarting the server.
+    """
+    name = _load_active_classifier_pointer()
+    if not name:
+        return None, None
+    cfg_path = LABEL_STORE.dataset_dir(name) / "exemplar_config.json"
+    if not cfg_path.exists():
+        return None, None
+    mtime = cfg_path.stat().st_mtime
+    if _ACTIVE_CACHE["name"] == name and _ACTIVE_CACHE["mtime"] == mtime and _ACTIVE_CACHE["config"] is not None:
+        return name, _ACTIVE_CACHE["config"]
+    from charm.vision.exemplar_classifier import ExemplarConfig
+    try:
+        cfg = ExemplarConfig.load(cfg_path)
+    except Exception:
+        return None, None
+    _ACTIVE_CACHE["name"] = name
+    _ACTIVE_CACHE["mtime"] = mtime
+    _ACTIVE_CACHE["config"] = cfg
+    return name, cfg
+
+
+class LabelingSettingsPayload(BaseModel):
+    frames_per_square: int = 5
+    settle_ms: int = 600
+    source_square: str = "h8"
+    piece_type: str = "pawn"
+    lighting_note: str = ""
+
+
+class LabelingCreatePayload(BaseModel):
+    name: str
+    settings: LabelingSettingsPayload = Field(default_factory=LabelingSettingsPayload)
+
+
+class LabelingUpdateSettingsPayload(BaseModel):
+    settings: LabelingSettingsPayload
+
+
+class LabelingCaptureEmptyPayload(BaseModel):
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    capture: bool = True
+    frames: Optional[int] = None  # override frames-per-square; defaults to settings
+
+
+class LabelingCaptureSquarePayload(BaseModel):
+    color: str  # "white" | "black"
+    square: str  # e.g. "a1"
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    capture: bool = True
+    frames: Optional[int] = None
+
+
+class LabelingArmPayload(BaseModel):
+    color: str
+    square: str  # destination square
+    action: str  # "pickup_source" | "place_target" | "return_to_source" | "home"
+    port: Optional[str] = None
+    baud: int = 9600
+
+
+def _meta_response(name: str) -> dict:
+    meta = LABEL_STORE.load(name)
+    accuracy_path = LABEL_STORE.dataset_dir(name) / "accuracy.json"
+    config_path = LABEL_STORE.dataset_dir(name) / "exemplar_config.json"
+    return {
+        "metadata": meta.to_json(),
+        "paths": {
+            "dir": str(LABEL_STORE.dataset_dir(name)),
+            "exemplar_config": str(config_path) if config_path.exists() else None,
+            "accuracy": str(accuracy_path) if accuracy_path.exists() else None,
+        },
+    }
+
+
+def _capture_warped_frames(params: PipelineParams, count: int, settle_ms: int, do_capture: bool) -> list[np.ndarray]:
+    """Capture `count` *warped* board frames, sleeping settle_ms between captures.
+
+    Frames are always passed through the full calibration pipeline (outer board
+    warp + inner warp) so the saved JPEGs only contain the 800x800 on-board
+    region — anything outside the board (the desk, the arm, ambient clutter)
+    is cropped out. ``apply_inner_warp`` is forced True here regardless of the
+    request payload to guarantee this property for labeled-data captures.
+    """
+    if count < 1:
+        raise HTTPException(400, "frames must be >= 1")
+    # Force the inner warp on, even if the caller forgot to set it.
+    labeling_params = params.model_copy(update={"apply_inner_warp": True})
+    frames: list[np.ndarray] = []
+    for _ in range(count):
+        source_path = str(_capture_or_resolve_image(labeling_params, capture=do_capture))
+        warped = _warped_board_for_tuning(labeling_params, source_path)
+        frames.append(warped)
+        if settle_ms > 0 and len(frames) < count:
+            time.sleep(settle_ms / 1000.0)
+    return frames
+
+
+@app.get("/api/labeling/datasets")
+def list_label_datasets():
+    return {
+        "datasets": [m.to_json() for m in LABEL_STORE.list()],
+        "squares": LABELING_SQUARES,
+    }
+
+
+@app.post("/api/labeling/datasets")
+def create_label_dataset(payload: LabelingCreatePayload):
+    try:
+        settings = DatasetSettings(**payload.settings.model_dump())
+        meta = LABEL_STORE.create(payload.name, settings)
+    except FileExistsError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _meta_response(meta.name)
+
+
+@app.get("/api/labeling/datasets/{name}")
+def get_label_dataset(name: str):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    return _meta_response(name)
+
+
+@app.delete("/api/labeling/datasets/{name}")
+def delete_label_dataset(name: str):
+    LABEL_STORE.delete(name)
+    return {"status": "deleted", "name": name}
+
+
+@app.put("/api/labeling/datasets/{name}/settings")
+def update_label_dataset_settings(name: str, payload: LabelingUpdateSettingsPayload):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    meta = LABEL_STORE.load(name)
+    meta.settings = DatasetSettings(**payload.settings.model_dump())
+    LABEL_STORE.save(meta)
+    return _meta_response(name)
+
+
+@app.get("/api/labeling/datasets/{name}/thumb")
+def get_label_thumb(name: str, color: str, square: str):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    if color == "empty":
+        img = LABEL_STORE.read_empty_first_frame(name)
+    else:
+        try:
+            img = LABEL_STORE.read_square_first_frame(name, color, square)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    if img is None:
+        return {"exists": False, "image": None}
+    # crop the relevant cell for retake thumbnails (only when color != empty)
+    if color != "empty":
+        try:
+            row, col = labeling_square_to_rc(square)
+            x_lines, y_lines = detect_8x8_grid_lines(img)
+            cells = extract_8x8_cells(img, x_lines, y_lines)
+            cell = next((c for c in cells if c.row == row and c.col == col), None)
+            if cell is not None:
+                img = cell.image
+        except Exception:
+            pass
+    return {"exists": True, "image": to_b64(img)}
+
+
+@app.post("/api/labeling/datasets/{name}/capture-empty")
+def capture_empty_for_dataset(name: str, payload: LabelingCaptureEmptyPayload):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    if LABELING_BUSY["busy"]:
+        raise HTTPException(409, "Labeling capture already running")
+    meta = LABEL_STORE.load(name)
+    frames_count = int(payload.frames or meta.settings.frames_per_square)
+    LABELING_BUSY["busy"] = True
+    try:
+        frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
+        saved = LABEL_STORE.write_empty_frames(name, frames)
+    finally:
+        LABELING_BUSY["busy"] = False
+    return {"saved_frames": saved, **_meta_response(name)}
+
+
+@app.post("/api/labeling/datasets/{name}/capture-square")
+def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    if LABELING_BUSY["busy"]:
+        raise HTTPException(409, "Labeling capture already running")
+    meta = LABEL_STORE.load(name)
+    color = payload.color.lower()
+    if color not in ("white", "black"):
+        raise HTTPException(400, "color must be 'white' or 'black'")
+    if payload.square.lower() not in LABELING_SQUARES:
+        raise HTTPException(400, f"Invalid square: {payload.square}")
+
+    frames_count = int(payload.frames or meta.settings.frames_per_square)
+    LABELING_BUSY["busy"] = True
+    try:
+        frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
+        saved = LABEL_STORE.write_square_frames(name, color, payload.square.lower(), frames)
+    finally:
+        LABELING_BUSY["busy"] = False
+    return {"saved_frames": saved, **_meta_response(name)}
+
+
+@app.post("/api/labeling/datasets/{name}/arm")
+def labeling_arm(name: str, payload: LabelingArmPayload):
+    """Drive the arm during dataset capture.
+
+    - pickup_source: pick a {color} {piece_type} from the configured source square.
+    - place_target: put it on `square`.
+    - return_to_source: pick it back from `square` and put it on the source.
+    - home: send the arm to its home position.
+    """
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    meta = LABEL_STORE.load(name)
+    piece = meta.settings.piece_type
+    src = meta.settings.source_square.lower()
+    target = payload.square.lower()
+    if target not in LABELING_SQUARES:
+        raise HTTPException(400, f"Invalid square: {payload.square}")
+
+    action = payload.action
+    commands: list[str]
+    if action == "pickup_source":
+        commands = [f"pick {piece} {src}"]
+    elif action == "place_target":
+        commands = [f"put {piece} {target}"]
+    elif action == "return_to_source":
+        commands = [f"pick {piece} {target}", f"put {piece} {src}", "home"]
+    elif action == "home":
+        commands = ["home"]
+    else:
+        raise HTTPException(400, f"Unknown action: {action}")
+
+    try:
+        responses = robot_adapter.send_commands(commands, payload.port, payload.baud)
+    except Exception as e:
+        robot_adapter.close()
+        raise HTTPException(500, str(e))
+    return {
+        "status": "ok",
+        "action": action,
+        "commands": commands,
+        "responses": responses,
+    }
+
+
+@app.post("/api/labeling/datasets/{name}/compute-stats")
+def compute_dataset_stats(name: str, payload: Optional[PipelineParams] = None):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    params = payload or PipelineParams()
+
+    def _extract_cells(warped: np.ndarray):
+        x_lines, y_lines = detect_8x8_grid_lines(warped)
+        return extract_8x8_cells(warped, x_lines, y_lines)
+
+    config = build_exemplar_config(
+        dataset_name=name,
+        extract_cells_fn=_extract_cells,
+        iter_empty_frames=lambda: LABEL_STORE.iter_empty_frames(name),
+        iter_square_frames=lambda color, sq: LABEL_STORE.iter_square_frames(name, color, sq),
+    )
+    config_path = LABEL_STORE.dataset_dir(name) / "exemplar_config.json"
+    config.save(config_path)
+
+    accuracy = leave_one_out_accuracy(config)
+    accuracy_path = LABEL_STORE.dataset_dir(name) / "accuracy.json"
+    accuracy_json = {
+        "squares": {k: v.to_json() for k, v in accuracy.items()},
+        "overall": {
+            "total": sum(a.total for a in accuracy.values()),
+            "correct": sum(a.correct for a in accuracy.values()),
+        },
+    }
+    accuracy_json["overall"]["accuracy"] = (
+        accuracy_json["overall"]["correct"] / accuracy_json["overall"]["total"]
+        if accuracy_json["overall"]["total"]
+        else 0.0
+    )
+    accuracy_path.write_text(json.dumps(accuracy_json, indent=2))
+
+    meta = LABEL_STORE.load(name)
+    meta.has_exemplar_config = True
+    meta.has_accuracy = True
+    LABEL_STORE.save(meta)
+
+    return {
+        "metadata": meta.to_json(),
+        "accuracy": accuracy_json,
+        "exemplar_config_path": str(config_path),
+    }
+
+
+class LabelingActivatePayload(BaseModel):
+    name: Optional[str] = None
+
+
+@app.get("/api/labeling/active")
+def get_active_classifier():
+    name = _load_active_classifier_pointer()
+    if not name or not LABEL_STORE.exists(name):
+        return {"active": False, "name": None, "has_config": False}
+    cfg_path = LABEL_STORE.dataset_dir(name) / "exemplar_config.json"
+    return {
+        "active": True,
+        "name": name,
+        "has_config": cfg_path.exists(),
+        "config_path": str(cfg_path) if cfg_path.exists() else None,
+    }
+
+
+@app.put("/api/labeling/active")
+def set_active_classifier(payload: LabelingActivatePayload):
+    """Activate (or, when name is null/empty, deactivate) a dataset's classifier."""
+    if not payload.name:
+        _save_active_classifier_pointer(None)
+        _ACTIVE_CACHE.update({"name": None, "mtime": 0.0, "config": None})
+        return {"active": False, "name": None}
+    if not LABEL_STORE.exists(payload.name):
+        raise HTTPException(404, f"Dataset not found: {payload.name}")
+    cfg_path = LABEL_STORE.dataset_dir(payload.name) / "exemplar_config.json"
+    if not cfg_path.exists():
+        raise HTTPException(
+            400,
+            f"Dataset {payload.name} has no exemplar_config.json — run compute-stats first.",
+        )
+    _save_active_classifier_pointer(payload.name)
+    _ACTIVE_CACHE.update({"name": None, "mtime": 0.0, "config": None})
+    return {"active": True, "name": payload.name, "config_path": str(cfg_path)}
+
+
+@app.delete("/api/labeling/active")
+def clear_active_classifier():
+    _save_active_classifier_pointer(None)
+    _ACTIVE_CACHE.update({"name": None, "mtime": 0.0, "config": None})
+    return {"active": False, "name": None}
+
+
+@app.get("/api/labeling/datasets/{name}/accuracy")
+def get_dataset_accuracy(name: str):
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    accuracy_path = LABEL_STORE.dataset_dir(name) / "accuracy.json"
+    if not accuracy_path.exists():
+        return {"exists": False, "accuracy": None}
+    return {"exists": True, "accuracy": json.loads(accuracy_path.read_text())}
 
 
 if __name__ == "__main__":
