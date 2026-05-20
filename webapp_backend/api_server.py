@@ -1274,39 +1274,47 @@ def game_session_start(payload: GameSessionPayload):
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
         raise HTTPException(400, "difficulty must be 0, 1, or 2")
 
-    _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
-
-    # Flip bitmaps 180° to handle board orientation (board is physically rotated 180°)
-    pipeline_result["white_bitmap"] = _flip_bitmap_180(pipeline_result["white_bitmap"])
-    pipeline_result["black_bitmap"] = _flip_bitmap_180(pipeline_result["black_bitmap"])
-    pipeline_result["color_labels"] = [list(reversed(row)) for row in reversed(pipeline_result["color_labels"])]
-
     _GAME_SESSION.reset()
-    pipeline_options = PipelineOptions(
-        occupancy_threshold=payload.params.occupancy_threshold,
-        occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
-        white_threshold=payload.params.white_threshold,
-        black_threshold=payload.params.black_threshold,
-        white_delta_threshold=payload.params.white_delta_threshold,
-        black_delta_threshold=payload.params.black_delta_threshold,
-        warp_size=payload.params.warp_size,
-        reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
-    )
-    initial = _GAME_SESSION.initialize_from_image(
-        str(calibrated_path),
-        max_mismatches=payload.max_mismatches,
-        flip_180=True,
-        pipeline_options=pipeline_options,
-    )
+
+    if _read_active_cnn_run_id():
+        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
+        white_bitmap, black_bitmap, pipeline_result = _run_cnn_game_scan(raw_path)
+        white_bitmap = _flip_bitmap_180(white_bitmap)
+        black_bitmap = _flip_bitmap_180(black_bitmap)
+        pipeline_result["white_bitmap"] = white_bitmap
+        pipeline_result["black_bitmap"] = black_bitmap
+        initial = _GAME_SESSION.initialize_from_bitmaps(
+            white_bitmap, black_bitmap, max_mismatches=payload.max_mismatches
+        )
+    else:
+        _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
+        pipeline_result["white_bitmap"] = _flip_bitmap_180(pipeline_result["white_bitmap"])
+        pipeline_result["black_bitmap"] = _flip_bitmap_180(pipeline_result["black_bitmap"])
+        pipeline_result["color_labels"] = [list(reversed(row)) for row in reversed(pipeline_result["color_labels"])]
+        pipeline_options = PipelineOptions(
+            occupancy_threshold=payload.params.occupancy_threshold,
+            occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
+            white_threshold=payload.params.white_threshold,
+            black_threshold=payload.params.black_threshold,
+            white_delta_threshold=payload.params.white_delta_threshold,
+            black_delta_threshold=payload.params.black_delta_threshold,
+            warp_size=payload.params.warp_size,
+            reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
+        )
+        initial = _GAME_SESSION.initialize_from_image(
+            str(calibrated_path),
+            max_mismatches=payload.max_mismatches,
+            flip_180=True,
+            pipeline_options=pipeline_options,
+        )
+
     if not initial.success:
-        # Add board validation debug info
         expected_board = chess.Board()
         pipeline_result["board_validation_debug"] = {
             "expected_fen": expected_board.fen(),
             "mismatch_count": initial.mismatch_count,
             "observed_white_bitmap": pipeline_result["white_bitmap"],
             "observed_black_bitmap": pipeline_result["black_bitmap"],
-            "color_labels": pipeline_result.get("color_labels"),
         }
         return _game_session_payload("board_failed", pipeline_result=pipeline_result, started=initial)
 
@@ -1358,25 +1366,36 @@ def game_session_player_done(payload: GameSessionTurnPayload):
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
         raise HTTPException(400, "difficulty must be 0, 1, or 2")
 
-    _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
-
     human_board_before = _GAME_SESSION.get_current_board()
     human_board_copy = human_board_before.copy(stack=True) if human_board_before is not None else None
-    turn_pipeline_options = PipelineOptions(
-        occupancy_threshold=payload.params.occupancy_threshold,
-        occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
-        white_threshold=payload.params.white_threshold,
-        black_threshold=payload.params.black_threshold,
-        white_delta_threshold=payload.params.white_delta_threshold,
-        black_delta_threshold=payload.params.black_delta_threshold,
-        warp_size=payload.params.warp_size,
-        reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
-    )
-    human_result = _GAME_SESSION.process_player_move_from_image(
-        str(calibrated_path),
-        max_mismatches=payload.max_mismatches,
-        pipeline_options=turn_pipeline_options,
-    )
+
+    if _read_active_cnn_run_id():
+        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
+        white_bitmap, black_bitmap, pipeline_result = _run_cnn_game_scan(raw_path)
+        white_bitmap = _flip_bitmap_180(white_bitmap)
+        black_bitmap = _flip_bitmap_180(black_bitmap)
+        pipeline_result["white_bitmap"] = white_bitmap
+        pipeline_result["black_bitmap"] = black_bitmap
+        human_result = _GAME_SESSION.process_bitmaps(
+            white_bitmap, black_bitmap, max_mismatches=payload.max_mismatches
+        )
+    else:
+        _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
+        turn_pipeline_options = PipelineOptions(
+            occupancy_threshold=payload.params.occupancy_threshold,
+            occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
+            white_threshold=payload.params.white_threshold,
+            black_threshold=payload.params.black_threshold,
+            white_delta_threshold=payload.params.white_delta_threshold,
+            black_delta_threshold=payload.params.black_delta_threshold,
+            warp_size=payload.params.warp_size,
+            reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
+        )
+        human_result = _GAME_SESSION.process_player_move_from_image(
+            str(calibrated_path),
+            max_mismatches=payload.max_mismatches,
+            pipeline_options=turn_pipeline_options,
+        )
     if not human_result.success:
         return _game_session_payload(
             "player_move_failed",
@@ -2878,6 +2897,59 @@ def _load_active_cnn_classifier():
     _ACTIVE_CNN_CLASSIFIER = CnnBoardClassifier(str(model_path), str(indices_path))
     _ACTIVE_CNN_RUN_ID = run_id
     return _ACTIVE_CNN_CLASSIFIER
+
+
+def _run_cnn_game_scan(raw_path: Path) -> tuple[list, list, dict]:
+    """Warp raw image, classify with active CNN, return (white_bitmap, black_bitmap, pipeline_dict).
+
+    pipeline_dict is compatible with _game_session_payload's 'pipeline' field and
+    contains the CNN overlay instead of the classical debug images.
+    """
+    if not BOARD_CAL_PATH.exists() or not INNER_CAL_PATH.exists():
+        raise HTTPException(400, "Board calibration missing — calibrate the board first.")
+
+    raw = cv2.imread(str(raw_path))
+    if raw is None:
+        raise HTTPException(400, f"Could not read image: {raw_path}")
+
+    board_cal = load_four_point_calibration(BOARD_CAL_PATH)
+    inner_cal = load_inner_warp_calibration(str(INNER_CAL_PATH))
+    first_warp = warp_from_calibration(raw, board_cal, output_size=800)
+    refined = refine_board_with_inner_corners(first_warp, inner_cal, output_size=800)
+
+    cv2.imwrite(str(LATEST_CALIBRATED_PATH), refined)
+
+    classifier = _load_active_cnn_classifier()
+    if classifier is None:
+        raise HTTPException(400, "No active CNN model — activate one from the CNN lab first.")
+
+    cells = extract_8x8_cells(refined)
+    result = classifier.classify_cells(cells)
+
+    overlay = refined.copy()
+    label_color = {"empty": (160, 160, 160), "white": (255, 255, 255), "black": (40, 40, 40)}
+    for pred in result.predictions:
+        x = pred.col * (overlay.shape[1] // 8) + 4
+        y = pred.row * (overlay.shape[0] // 8) + 20
+        cv2.putText(
+            overlay,
+            f"{pred.label[0].upper()} {pred.confidence:.2f}",
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+            label_color.get(pred.label, (200, 200, 200)),
+            1, cv2.LINE_AA,
+        )
+
+    pipeline_dict: dict = {
+        "image_path": str(raw_path),
+        "refined_warp": to_b64(refined),
+        "cnn_overlay": to_b64(overlay),
+        "white_bitmap": result.white_bitmap,
+        "black_bitmap": result.black_bitmap,
+        "cnn_active": True,
+        "inference_ms": result.inference_ms,
+    }
+    return result.white_bitmap, result.black_bitmap, pipeline_dict
 
 
 @app.get("/api/cnn/active-model")

@@ -10,6 +10,8 @@ from charm.game.state_tracker import BoardStateTracker, compare_board_to_bitmaps
 from charm.game.vision_integration import update_tracker_from_image
 from charm.vision.pipeline import PipelineOptions, run_board_pipeline
 
+Bitmap = list[list[int]]
+
 
 PlayerColor = Literal["white", "black"]
 
@@ -109,11 +111,6 @@ class GameSession:
     # Step 1: wait for start is handled by E2E controller
     # ------------------------------------------------------------------
     def reset(self) -> None:
-        """
-        Reset the session to a clean state.
-
-        Use this if the user wants to restart the game from the beginning.
-        """
         self.initialized = False
         self.game_started = False
         self.flip_180 = False
@@ -193,6 +190,118 @@ class GameSession:
             mismatch_count=mismatch_count,
         )
         self._record_step(image_path, result)
+        return result
+
+    def initialize_from_bitmaps(
+        self,
+        white_bitmap: Bitmap,
+        black_bitmap: Bitmap,
+        max_mismatches: int = 0,
+        flip_180: bool = False,
+    ) -> SessionResult:
+        """CNN path: validate the initial board from pre-computed bitmaps."""
+        wb = white_bitmap
+        bb = black_bitmap
+        if flip_180:
+            wb = [list(reversed(row)) for row in reversed(wb)]
+            bb = [list(reversed(row)) for row in reversed(bb)]
+
+        expected_board = chess.Board()
+        mismatch_count = compare_board_to_bitmaps(expected_board, wb, bb)
+
+        if mismatch_count > max_mismatches:
+            result = SessionResult(
+                success=False,
+                message=(
+                    "Initial board setup is invalid. "
+                    "Please reset the pieces to the standard starting position."
+                ),
+                mismatch_count=mismatch_count,
+            )
+            self._record_step("cnn_scan", result)
+            return result
+
+        self.tracker = BoardStateTracker(expected_board)
+        self.initialized = True
+        self.game_started = False
+        self.flip_180 = False
+        self.pipeline_options = None
+        self.player_color = None
+        self.robot_color = None
+
+        result = SessionResult(
+            success=True,
+            message=(
+                "Initial board validated via CNN. "
+                "Tracking started from the standard starting position. "
+                "Please choose player color next."
+            ),
+            mismatch_count=mismatch_count,
+        )
+        self._record_step("cnn_scan", result)
+        return result
+
+    def process_bitmaps(
+        self,
+        white_bitmap: Bitmap,
+        black_bitmap: Bitmap,
+        max_mismatches: int = 0,
+    ) -> SessionResult:
+        """CNN path: update the game tracker from pre-computed bitmaps."""
+        init_error = self._require_initialized()
+        if init_error is not None:
+            self._record_step("cnn_scan", init_error)
+            return init_error
+
+        assert self.tracker is not None
+        inference_result = self.tracker.update_from_bitmaps(
+            white_bitmap, black_bitmap, max_mismatches=max_mismatches
+        )
+
+        if inference_result.move is None:
+            board = self.tracker.board
+            status = inference_result.status
+
+            if status == "unchanged_position":
+                error_code = "unchanged"
+                message = "Board unchanged — did you complete your move before pressing done?"
+            elif status == "ambiguous_observation":
+                error_code = "ambiguous"
+                n = inference_result.matching_move_count
+                message = (
+                    f"Ambiguous: {n} legal moves match the observed position. "
+                    "Reposition your piece precisely and try again."
+                )
+            else:
+                if board.is_check():
+                    legal_count = board.legal_moves.count()
+                    error_code = "in_check"
+                    message = (
+                        f"You are in check ({legal_count} escaping move{'s' if legal_count != 1 else ''} available) "
+                        "— your move must resolve the check."
+                    )
+                else:
+                    error_code = "illegal_move"
+                    message = "Illegal move: the piece position does not match any legal move from the current position."
+
+            result = SessionResult(
+                success=False,
+                message=message,
+                mismatch_count=inference_result.mismatch_count,
+                error_code=error_code,
+            )
+            self._record_step("cnn_scan", result)
+            return result
+
+        move_uci = inference_result.move.uci()
+        result = SessionResult(
+            success=True,
+            message="Move recognized and board updated.",
+            move_uci=move_uci,
+            motion_step=self._move_to_motion_step(move_uci),
+            mismatch_count=inference_result.mismatch_count,
+        )
+        self._record_step("cnn_scan", result)
         return result
 
     # ------------------------------------------------------------------
