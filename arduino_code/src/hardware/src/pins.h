@@ -20,19 +20,19 @@ const int Z_LIMIT_BOTTOM_PIN = 11;
 // gripper pin
 const int GRIPPER_PIN = 46;
 
+
+// ========= ESP-32D =========
 // button pins
-const int SW_PIN = 24;
-const int DT_PIN = 19;
-const int CLK_PIN = 18;
-
-
+const int SW_PIN = 35;
+const int DT_PIN = 32;
+const int CLK_PIN = 33;
 
 // lcd pins
-const int RS_PIN = 44;
-const int E_PIN = 42;
-const int D4_PIN = 38;
-const int D5_PIN = 36;
-const int D6_PIN = 34;
-const int D7_PIN = 32;
+const int RS_PIN = 4;
+const int E_PIN = 16;
+const int D4_PIN = 17;
+const int D5_PIN = 5;
+const int D6_PIN = 18;
+const int D7_PIN = 19;
 
 #endif
