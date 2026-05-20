@@ -29,6 +29,11 @@ export default function ArucoCalibration({
   const [result, setResult] = useState<ArucoDetectResult | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [markers, setMarkers] = useState<Record<number, string>>({});
+  const [sourcePreview, setSourcePreview] = useState<
+    { image: string; path: string; timestamp: number } | null
+  >(null);
+  const [sourceBusy, setSourceBusy] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
 
   // Preload the 4 marker PNGs so the user can print them.
   useEffect(() => {
@@ -45,6 +50,36 @@ export default function ArucoCalibration({
       cancelled = true;
     };
   }, []);
+
+  const loadLatestRaw = useCallback(async () => {
+    setSourceBusy(true);
+    setSourceError(null);
+    try {
+      const res = await api.getRawImage();
+      setSourcePreview(res);
+    } catch (e) {
+      setSourceError((e as Error).message);
+    } finally {
+      setSourceBusy(false);
+    }
+  }, []);
+
+  const loadSourceImage = useCallback(async (path?: string) => {
+    if (!path) {
+      await loadLatestRaw();
+      return;
+    }
+    setSourceBusy(true);
+    setSourceError(null);
+    try {
+      const res = await api.readImage(path);
+      setSourcePreview(res);
+    } catch (e) {
+      setSourceError((e as Error).message);
+    } finally {
+      setSourceBusy(false);
+    }
+  }, [loadLatestRaw]);
 
   const handleLayoutChange = (id: string, sq: string) => {
     setLayout((prev) => ({ ...prev, [id]: sq.toLowerCase() }));
@@ -84,6 +119,7 @@ export default function ArucoCalibration({
           save,
         });
         setResult(r);
+        await loadSourceImage(r.image_path);
         if (r.status === "incomplete") {
           setError(r.error ?? "Some markers were not detected");
         } else if (save) {
@@ -187,6 +223,47 @@ export default function ArucoCalibration({
           <span className="text-xs text-green-500 font-jetbrains">
             Saved ✓ {new Date(savedAt).toLocaleTimeString()}
           </span>
+        )}
+      </div>
+
+      {/* Source preview */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+            Source capture (raw image fed to ArUco detector)
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => loadSourceImage(result?.image_path)} disabled={sourceBusy}>
+              {sourceBusy ? "Loading…" : "refresh preview"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={loadLatestRaw} disabled={sourceBusy}>
+              latest raw
+            </Button>
+          </div>
+        </div>
+        {sourceError && (
+          <div
+            className="rounded-md border p-2 text-xs font-jetbrains"
+            style={{
+              borderColor: "var(--charm-red, #f87171)",
+              color: "var(--charm-red, #f87171)",
+              background: "color-mix(in oklab, var(--charm-red, #f87171) 8%, transparent)",
+            }}
+          >
+            {sourceError}
+          </div>
+        )}
+        {sourcePreview && (
+          <div className="space-y-1">
+            <img
+              src={sourcePreview.image ? `data:image/jpeg;base64,${sourcePreview.image}` : ""}
+              alt="raw capture"
+              className="w-full rounded-md border"
+            />
+            <div className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+              {sourcePreview.path} · {new Date(sourcePreview.timestamp * 1000).toLocaleString()}
+            </div>
+          </div>
         )}
       </div>
 

@@ -3,3 +3,6 @@ opencv-python==4.9.0.80
 python-chess>=1.999
 stockfish
 pyserial
+# CNN classifier (train_cnn.py + cnn_classifier.py + cnn_dataset.py)
+tensorflow>=2.16,<2.20
+matplotlib>=3.7

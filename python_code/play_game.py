@@ -131,12 +131,12 @@ def main() -> None:
 
     if not board_cal_path.exists():
         print(f"ERROR: board calibration not found: {board_cal_path}")
-        print("Run calibrate_board_corners.py first.")
+        print("Open the webapp Lab page and run ArUco or Manual calibration first.")
         sys.exit(1)
 
     if not inner_cal_path.exists():
         print(f"ERROR: inner warp calibration not found: {inner_cal_path}")
-        print("Run calibrate_inner_warp_corners.py first.")
+        print("Open the webapp Lab page and run Manual calibration first.")
         sys.exit(1)
 
     print(f"Connecting to Arduino UI on {args.ui_port} @ {args.ui_baud} baud...")

@@ -182,9 +182,10 @@ export const api = {
       debug: string;
     }>("/api/calibration/board-corners", payload),
 
-  getRawImage: () => get<{ image: string; path: string }>("/api/image/raw"),
+  getRawImage: () => get<{ image: string; path: string; timestamp: number }>("/api/image/raw"),
 
-  readImage: (path: string) => post<{ image: string; path: string }>("/api/image/read", { path }),
+  readImage: (path: string) =>
+    post<{ image: string; path: string; timestamp: number }>("/api/image/read", { path }),
 
   captureFromCamera: (url?: string) => post<{ status: string; image: string; path: string }>("/api/capture", { url }),
 
@@ -385,7 +386,161 @@ export const api = {
       `/api/calibration/aruco-marker?${params.toString()}`,
     );
   },
+
+  // ---- CNN wizard (calibration preflight + dataset build + training + inference) ----
+  getCalibrationStatus: () => get<CalibrationStatus>("/api/calibration/status"),
+
+  cnnListSourceDatasets: () =>
+    get<{ datasets: CnnSourceDatasetMeta[] }>("/api/cnn/source-datasets"),
+
+  cnnBuildDataset: (payload: { source: string; output: string; val_split?: number }) =>
+    post<{ build_id: string }>("/api/cnn/build-dataset", payload),
+
+  cnnBuildStatus: (build_id: string) =>
+    get<CnnBuildStatus>(`/api/cnn/build-status/${encodeURIComponent(build_id)}`),
+
+  cnnDatasetPreview: (output_name: string, per_class = 9) => {
+    const qs = new URLSearchParams({ per_class: String(per_class) });
+    return get<{ preview: Record<string, string[]> }>(
+      `/api/cnn/dataset-preview/${encodeURIComponent(output_name)}?${qs.toString()}`,
+    );
+  },
+
+  cnnTrain: (payload: { dataset: string; epochs?: number; batch_size?: number }) =>
+    post<{ job_id: string; run_id: string }>("/api/cnn/train", payload),
+
+  cnnTrainStatus: (job_id: string) =>
+    get<CnnTrainStatus>(`/api/cnn/train-status/${encodeURIComponent(job_id)}`),
+
+  cnnTrainArtifacts: (run_id: string) =>
+    get<CnnTrainArtifacts>(`/api/cnn/train-artifacts/${encodeURIComponent(run_id)}`),
+
+  cnnListModels: () => get<{ models: CnnModelMeta[] }>("/api/cnn/models"),
+
+  cnnActivateModel: (run_id: string) =>
+    post<{ run_id: string; active: boolean }>("/api/cnn/activate-model", { run_id }),
+
+  cnnActiveModel: () => get<CnnActiveModel>("/api/cnn/active-model"),
+
+  cnnScan: (payload: { capture?: boolean; compare_classical?: boolean }) =>
+    post<CnnScanResult>("/api/cnn/scan", payload),
+
+  cnnScanCell: (row: number, col: number) =>
+    get<CnnScanCellResult>(`/api/cnn/scan-cell/${row}/${col}`),
+
+  cnnFeedback: (payload: {
+    run_id: string;
+    row: number;
+    col: number;
+    true_label: "empty" | "white" | "black";
+    crop_b64?: string;
+  }) =>
+    post<{ queued: boolean; queue_path: string }>("/api/cnn/feedback", payload),
 };
+
+// --- CNN-related response types ---
+
+export interface CalibrationStatus {
+  board_calibration_present: boolean;
+  inner_warp_present: boolean;
+  camera_reachable: boolean;
+  board_calibration_age_seconds: number | null;
+}
+
+export interface CnnSourceDatasetMeta {
+  name: string;
+  empty_frames: number;
+  white_squares: number;
+  white_frames: number;
+  black_squares: number;
+  black_frames: number;
+  total_frames: number;
+}
+
+export interface CnnBuildStatus {
+  frames_done: number;
+  frames_total: number;
+  current_file: string;
+  cells_written_by_class: Record<string, number>;
+  finished: boolean;
+  error: string | null;
+  report: { output_dir: string; counts_train: Record<string, number>; counts_val: Record<string, number> } | null;
+  started_at: number;
+}
+
+export interface CnnTrainStatus {
+  run_id: string;
+  dataset: string;
+  epoch: number;
+  total_epochs: number;
+  train_loss: number | null;
+  train_acc: number | null;
+  val_loss: number | null;
+  val_acc: number | null;
+  finished: boolean;
+  error: string | null;
+  started_at: number;
+}
+
+export interface CnnTrainArtifacts {
+  run_id: string;
+  training_curves_png: string | null;
+  confusion_matrix_png: string | null;
+  metrics: {
+    train_acc?: number;
+    val_acc?: number;
+    class_names?: string[];
+    per_class?: Record<string, { precision: number; recall: number; f1: number; support: number }>;
+    confusion_matrix?: number[][];
+  } | null;
+}
+
+export interface CnnModelMeta {
+  run_id: string;
+  finished_at: number;
+  val_acc: number | null;
+  dataset: string | null;
+}
+
+export interface CnnActiveModel {
+  run_id: string | null;
+  val_acc: number | null;
+  dataset: string | null;
+  loaded: boolean;
+}
+
+export interface CnnCellPrediction {
+  row: number;
+  col: number;
+  label: "empty" | "white" | "black";
+  confidence: number;
+  probs: { empty: number; white: number; black: number };
+}
+
+export interface CnnScanResult {
+  white_bitmap: number[][];
+  black_bitmap: number[][];
+  predictions: CnnCellPrediction[];
+  warped_board_b64: string;
+  cnn_overlay_b64: string;
+  cell_crops_b64: string[];
+  inference_ms: number;
+  classical_comparison: {
+    white_bitmap?: number[][];
+    black_bitmap?: number[][];
+    disagreement_count?: number;
+    disagreement_cells?: { row: number; col: number; cnn: string; classical: string }[];
+    error?: string;
+  } | null;
+}
+
+export interface CnnScanCellResult {
+  row: number;
+  col: number;
+  crop_b64: string;
+  prediction: CnnCellPrediction;
+  captured_at: number;
+}
 
 export interface ArucoDetection {
   id: number;

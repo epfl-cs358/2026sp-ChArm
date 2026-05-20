@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { FlaskConical, Gauge, LayoutDashboard, Tags, Waypoints } from "lucide-react";
+import { Brain, FlaskConical, Gauge, LayoutDashboard, Tags, Waypoints } from "lucide-react";
 import { api } from "@/lib/api";
 import { Separator } from "@/components/ui/separator";
 
@@ -11,6 +11,7 @@ const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/lab", label: "Computer Vision", icon: FlaskConical },
   { href: "/lab/labeling", label: "Labeling Wizard", icon: Tags },
+  { href: "/lab/cnn", label: "CNN Wizard", icon: Brain },
   { href: "/robot", label: "Scara Calibration", icon: Waypoints },
 ];
 

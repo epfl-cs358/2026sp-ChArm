@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parent
 SRC_PATH = ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-# from charm.game import BoardStateTracker, update_tracker_from_image
+from charm.game.state_tracker import BoardStateTracker
+from charm.game.vision_integration import update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
 from charm.vision.transferphoto import fetch_raw_image
 from charm.vision.calibration_config import (
@@ -125,13 +126,13 @@ def main() -> None:
     if not board_calibration_path.exists():
         raise FileNotFoundError(
             f"Could not find board calibration file: {board_calibration_path}\n"
-            "Run calibrate_board_corners.py first."
+            "Open the webapp Lab page and run ArUco or Manual calibration first."
         )
 
     if not inner_calibration_path.exists():
         raise FileNotFoundError(
             f"Could not find inner warp calibration file: {inner_calibration_path}\n"
-            "Run calibrate_inner_warp_corners.py first."
+            "Open the webapp Lab page and run Manual calibration first."
         )
 
     board_calibration = load_four_point_calibration(board_calibration_path)

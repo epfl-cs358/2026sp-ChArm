@@ -2216,6 +2216,626 @@ def get_dataset_accuracy(name: str):
     return {"exists": True, "accuracy": json.loads(accuracy_path.read_text())}
 
 
+# ============================================================================
+# CNN classifier — calibration preflight, dataset build, training, inference.
+# All routes live under /api/cnn/* and /api/calibration/status. See
+# prompt.md for the contract.
+# ============================================================================
+
+import threading
+import uuid
+import urllib.request
+import urllib.error
+
+
+@app.get("/api/calibration/status")
+def get_calibration_status():
+    """Preflight badges for the CNN wizard.
+
+    Returns presence of both calibration JSONs, ESP32-CAM reachability,
+    and how old the board calibration is in seconds.
+    """
+    board_present = BOARD_CAL_PATH.exists()
+    inner_present = INNER_CAL_PATH.exists()
+
+    age: Optional[float] = None
+    if board_present:
+        try:
+            age = max(0.0, time.time() - BOARD_CAL_PATH.stat().st_mtime)
+        except OSError:
+            age = None
+
+    reachable = False
+    try:
+        from charm.vision.transferphoto import ESP32_URL
+        req = urllib.request.Request(ESP32_URL, method="HEAD")
+        with urllib.request.urlopen(req, timeout=2):
+            reachable = True
+    except Exception:
+        # Some ESP32-CAM firmware doesn't answer HEAD; fall back to GET with
+        # a tiny timeout so we don't pull the whole frame.
+        try:
+            from charm.vision.transferphoto import ESP32_URL
+            with urllib.request.urlopen(ESP32_URL, timeout=2) as resp:
+                resp.read(64)
+                reachable = True
+        except Exception:
+            reachable = False
+
+    return {
+        "board_calibration_present": board_present,
+        "inner_warp_present": inner_present,
+        "camera_reachable": reachable,
+        "board_calibration_age_seconds": age,
+    }
+
+
+# ----------------------------------------------------------------------------
+# CNN dataset build (Phase 2)
+# ----------------------------------------------------------------------------
+
+CNN_MODELS_DIR = PYTHON_CODE_DIR / "models"
+CNN_ACTIVE_POINTER = CNN_MODELS_DIR / "active.json"
+
+_CNN_BUILD_JOBS: dict[str, dict] = {}
+_CNN_BUILD_LOCK = threading.Lock()
+
+
+class CnnBuildDatasetPayload(BaseModel):
+    source: str
+    output: str
+    val_split: float = 0.15
+
+
+@app.get("/api/cnn/source-datasets")
+def cnn_list_source_datasets():
+    """List labeled_datasets entries (excluding cnn_*) with frame counts."""
+    out = []
+    if not LABELED_DATASETS_DIR.exists():
+        return {"datasets": []}
+    for child in sorted(LABELED_DATASETS_DIR.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("cnn_"):
+            continue
+        empty_dir = child / "empty"
+        white_dir = child / "white"
+        black_dir = child / "black"
+        empty_frames = sum(1 for _ in empty_dir.glob("*.jpg")) if empty_dir.exists() else 0
+        white_squares = sum(1 for d in white_dir.iterdir() if d.is_dir()) if white_dir.exists() else 0
+        black_squares = sum(1 for d in black_dir.iterdir() if d.is_dir()) if black_dir.exists() else 0
+        white_frames = (
+            sum(1 for d in white_dir.iterdir() if d.is_dir() for _ in d.glob("*.jpg"))
+            if white_dir.exists() else 0
+        )
+        black_frames = (
+            sum(1 for d in black_dir.iterdir() if d.is_dir() for _ in d.glob("*.jpg"))
+            if black_dir.exists() else 0
+        )
+        out.append({
+            "name": child.name,
+            "empty_frames": empty_frames,
+            "white_squares": white_squares,
+            "white_frames": white_frames,
+            "black_squares": black_squares,
+            "black_frames": black_frames,
+            "total_frames": empty_frames + white_frames + black_frames,
+        })
+    return {"datasets": out}
+
+
+@app.post("/api/cnn/build-dataset")
+def cnn_build_dataset(payload: CnnBuildDatasetPayload):
+    from charm.vision.cnn_dataset import build_cnn_dataset, CnnBuildProgress
+
+    source_dir = LABELED_DATASETS_DIR / payload.source
+    if not source_dir.exists():
+        raise HTTPException(404, f"Source dataset not found: {payload.source}")
+
+    if not BOARD_CAL_PATH.exists() or not INNER_CAL_PATH.exists():
+        raise HTTPException(400, "Board and inner-warp calibrations must be saved first.")
+
+    build_id = uuid.uuid4().hex[:12]
+    with _CNN_BUILD_LOCK:
+        _CNN_BUILD_JOBS[build_id] = {
+            "frames_done": 0,
+            "frames_total": 0,
+            "current_file": "",
+            "cells_written_by_class": {"empty": 0, "white": 0, "black": 0},
+            "finished": False,
+            "error": None,
+            "report": None,
+            "started_at": time.time(),
+        }
+
+    def _progress(p: CnnBuildProgress) -> None:
+        with _CNN_BUILD_LOCK:
+            _CNN_BUILD_JOBS[build_id].update({
+                "frames_done": p.frames_done,
+                "frames_total": p.frames_total,
+                "current_file": p.current_file,
+                "cells_written_by_class": dict(p.cells_written_by_class),
+            })
+
+    def _run() -> None:
+        try:
+            report = build_cnn_dataset(
+                source_dataset_name=payload.source,
+                output_dataset_name=payload.output,
+                val_split=payload.val_split,
+                progress_cb=_progress,
+            )
+            with _CNN_BUILD_LOCK:
+                _CNN_BUILD_JOBS[build_id]["finished"] = True
+                _CNN_BUILD_JOBS[build_id]["report"] = {
+                    "output_dir": str(report.output_dir),
+                    "counts_train": report.counts_train,
+                    "counts_val": report.counts_val,
+                }
+        except Exception as exc:  # noqa: BLE001
+            with _CNN_BUILD_LOCK:
+                _CNN_BUILD_JOBS[build_id]["finished"] = True
+                _CNN_BUILD_JOBS[build_id]["error"] = str(exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"build_id": build_id}
+
+
+@app.get("/api/cnn/build-status/{build_id}")
+def cnn_build_status(build_id: str):
+    with _CNN_BUILD_LOCK:
+        job = _CNN_BUILD_JOBS.get(build_id)
+        if job is None:
+            raise HTTPException(404, f"Build job not found: {build_id}")
+        return dict(job)
+
+
+@app.get("/api/cnn/dataset-preview/{output_name}")
+def cnn_dataset_preview(output_name: str, per_class: int = 9):
+    """Return up to `per_class` random crops per class as base64."""
+    import random
+
+    out_dir = LABELED_DATASETS_DIR / output_name
+    if not out_dir.exists():
+        raise HTTPException(404, f"Dataset not found: {output_name}")
+
+    preview: dict[str, list[str]] = {}
+    for split in ("train", "val"):
+        for cls in ("empty", "white", "black"):
+            cls_dir = out_dir / split / cls
+            if not cls_dir.exists():
+                continue
+            files = list(cls_dir.glob("*.png"))
+            if not files:
+                continue
+            sampled = random.sample(files, min(per_class, len(files)))
+            key = f"{split}_{cls}"
+            preview[key] = []
+            for f in sampled:
+                img = cv2.imread(str(f))
+                if img is None:
+                    continue
+                preview[key].append(to_b64(img))
+    return {"preview": preview}
+
+
+# ----------------------------------------------------------------------------
+# CNN training (Phase 3)
+# ----------------------------------------------------------------------------
+
+_CNN_TRAIN_JOBS: dict[str, dict] = {}
+_CNN_TRAIN_LOCK = threading.Lock()
+
+
+class CnnTrainPayload(BaseModel):
+    dataset: str
+    epochs: int = 20
+    batch_size: int = 32
+
+
+@app.post("/api/cnn/train")
+def cnn_train(payload: CnnTrainPayload):
+    dataset_dir = LABELED_DATASETS_DIR / payload.dataset
+    if not dataset_dir.exists():
+        raise HTTPException(404, f"Dataset not found: {payload.dataset}")
+    if not (dataset_dir / "train").exists() or not (dataset_dir / "val").exists():
+        raise HTTPException(400, f"Dataset {payload.dataset} has no train/ or val/ subdirs — run build-dataset first.")
+
+    run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+    job_id = uuid.uuid4().hex[:12]
+
+    with _CNN_TRAIN_LOCK:
+        _CNN_TRAIN_JOBS[job_id] = {
+            "run_id": run_id,
+            "dataset": payload.dataset,
+            "epoch": 0,
+            "total_epochs": payload.epochs,
+            "train_loss": None,
+            "train_acc": None,
+            "val_loss": None,
+            "val_acc": None,
+            "finished": False,
+            "error": None,
+            "started_at": time.time(),
+        }
+
+    def _run() -> None:
+        try:
+            from train_cnn import train  # python_code/train_cnn.py
+        except Exception as exc:  # noqa: BLE001
+            with _CNN_TRAIN_LOCK:
+                _CNN_TRAIN_JOBS[job_id]["finished"] = True
+                _CNN_TRAIN_JOBS[job_id]["error"] = f"train_cnn import failed: {exc}"
+            return
+
+        def _epoch_cb(snapshot: dict) -> None:
+            with _CNN_TRAIN_LOCK:
+                _CNN_TRAIN_JOBS[job_id].update(snapshot)
+
+        try:
+            train(
+                dataset=payload.dataset,
+                epochs=payload.epochs,
+                batch_size=payload.batch_size,
+                run_id=run_id,
+                on_epoch_end=_epoch_cb,
+            )
+            with _CNN_TRAIN_LOCK:
+                _CNN_TRAIN_JOBS[job_id]["finished"] = True
+        except Exception as exc:  # noqa: BLE001
+            with _CNN_TRAIN_LOCK:
+                _CNN_TRAIN_JOBS[job_id]["finished"] = True
+                _CNN_TRAIN_JOBS[job_id]["error"] = str(exc)
+
+    # train_cnn.py lives at python_code/train_cnn.py — make sure it's importable.
+    if str(PYTHON_CODE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_CODE_DIR))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "run_id": run_id}
+
+
+@app.get("/api/cnn/train-status/{job_id}")
+def cnn_train_status(job_id: str):
+    with _CNN_TRAIN_LOCK:
+        job = _CNN_TRAIN_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, f"Train job not found: {job_id}")
+        return dict(job)
+
+
+@app.get("/api/cnn/train-artifacts/{run_id}")
+def cnn_train_artifacts(run_id: str):
+    run_dir = CNN_MODELS_DIR / run_id
+    if not run_dir.exists():
+        raise HTTPException(404, f"Run not found: {run_id}")
+
+    def _b64_png(path: Path) -> Optional[str]:
+        if not path.exists():
+            return None
+        return base64.b64encode(path.read_bytes()).decode()
+
+    metrics: Optional[dict] = None
+    metrics_path = run_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text())
+        except Exception:
+            metrics = None
+
+    return {
+        "run_id": run_id,
+        "training_curves_png": _b64_png(run_dir / "training_curves.png"),
+        "confusion_matrix_png": _b64_png(run_dir / "confusion_matrix.png"),
+        "metrics": metrics,
+    }
+
+
+@app.get("/api/cnn/models")
+def cnn_list_models():
+    out = []
+    if not CNN_MODELS_DIR.exists():
+        return {"models": []}
+    for run_dir in sorted(CNN_MODELS_DIR.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        meta_path = run_dir / "metrics.json"
+        keras_path = run_dir / "chess_cnn.keras"
+        if not keras_path.exists():
+            continue
+        info: dict = {
+            "run_id": run_dir.name,
+            "finished_at": keras_path.stat().st_mtime,
+            "val_acc": None,
+            "dataset": None,
+        }
+        if meta_path.exists():
+            try:
+                m = json.loads(meta_path.read_text())
+                info["val_acc"] = m.get("val_acc")
+                info["dataset"] = m.get("dataset")
+            except Exception:
+                pass
+        out.append(info)
+    return {"models": out}
+
+
+class CnnActivatePayload(BaseModel):
+    run_id: str
+
+
+@app.post("/api/cnn/activate-model")
+def cnn_activate_model(payload: CnnActivatePayload):
+    run_dir = CNN_MODELS_DIR / payload.run_id
+    keras_path = run_dir / "chess_cnn.keras"
+    if not keras_path.exists():
+        raise HTTPException(404, f"Model not found for run: {payload.run_id}")
+    CNN_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    CNN_ACTIVE_POINTER.write_text(json.dumps({"run_id": payload.run_id, "activated_at": time.time()}, indent=2))
+    # Drop the cached classifier so the next /scan reloads.
+    global _ACTIVE_CNN_CLASSIFIER, _ACTIVE_CNN_RUN_ID
+    _ACTIVE_CNN_CLASSIFIER = None
+    _ACTIVE_CNN_RUN_ID = None
+    return {"run_id": payload.run_id, "active": True}
+
+
+# ----------------------------------------------------------------------------
+# CNN inference (Phase 4)
+# ----------------------------------------------------------------------------
+
+_ACTIVE_CNN_CLASSIFIER = None  # CnnBoardClassifier or None
+_ACTIVE_CNN_RUN_ID: Optional[str] = None
+_LAST_CNN_SCAN: dict = {}  # crops + predictions for /scan-cell drill-down
+
+
+def _read_active_cnn_run_id() -> Optional[str]:
+    if not CNN_ACTIVE_POINTER.exists():
+        return None
+    try:
+        return json.loads(CNN_ACTIVE_POINTER.read_text()).get("run_id")
+    except Exception:
+        return None
+
+
+def _load_active_cnn_classifier():
+    """Return the active CnnBoardClassifier, loading it on demand."""
+    global _ACTIVE_CNN_CLASSIFIER, _ACTIVE_CNN_RUN_ID
+    run_id = _read_active_cnn_run_id()
+    if not run_id:
+        _ACTIVE_CNN_CLASSIFIER = None
+        _ACTIVE_CNN_RUN_ID = None
+        return None
+    if _ACTIVE_CNN_CLASSIFIER is not None and _ACTIVE_CNN_RUN_ID == run_id:
+        return _ACTIVE_CNN_CLASSIFIER
+
+    from charm.vision.cnn_classifier import CnnBoardClassifier
+    run_dir = CNN_MODELS_DIR / run_id
+    model_path = run_dir / "chess_cnn.keras"
+    indices_path = run_dir / "class_indices.json"
+    if not model_path.exists() or not indices_path.exists():
+        _ACTIVE_CNN_CLASSIFIER = None
+        _ACTIVE_CNN_RUN_ID = None
+        return None
+    _ACTIVE_CNN_CLASSIFIER = CnnBoardClassifier(str(model_path), str(indices_path))
+    _ACTIVE_CNN_RUN_ID = run_id
+    return _ACTIVE_CNN_CLASSIFIER
+
+
+@app.get("/api/cnn/active-model")
+def cnn_active_model():
+    run_id = _read_active_cnn_run_id()
+    if not run_id:
+        return {"run_id": None, "val_acc": None, "dataset": None, "loaded": False}
+
+    info: dict = {"run_id": run_id, "val_acc": None, "dataset": None, "loaded": False}
+    metrics_path = CNN_MODELS_DIR / run_id / "metrics.json"
+    if metrics_path.exists():
+        try:
+            m = json.loads(metrics_path.read_text())
+            info["val_acc"] = m.get("val_acc")
+            info["dataset"] = m.get("dataset")
+        except Exception:
+            pass
+    try:
+        info["loaded"] = _load_active_cnn_classifier() is not None
+    except Exception:
+        info["loaded"] = False
+    return info
+
+
+class CnnScanPayload(BaseModel):
+    capture: bool = True
+    compare_classical: bool = True
+
+
+@app.post("/api/cnn/scan")
+def cnn_scan(payload: CnnScanPayload):
+    classifier = _load_active_cnn_classifier()
+    if classifier is None:
+        raise HTTPException(400, "No active CNN model. Activate one from /api/cnn/models.")
+
+    if not BOARD_CAL_PATH.exists() or not INNER_CAL_PATH.exists():
+        raise HTTPException(400, "Calibrations missing — calibrate the board first.")
+
+    # 1) capture or use latest raw
+    if payload.capture:
+        from charm.vision.transferphoto import fetch_raw_image
+        raw_path = Path(fetch_raw_image())
+    else:
+        raw_path = resolve_latest_raw_path()
+        if not raw_path.exists():
+            raise HTTPException(400, "No latest raw image on disk — pass capture=true.")
+
+    raw = cv2.imread(str(raw_path))
+    if raw is None:
+        raise HTTPException(500, f"Could not read raw image: {raw_path}")
+
+    # 2) two-stage warp
+    board_cal = load_four_point_calibration(BOARD_CAL_PATH)
+    inner_cal = load_inner_warp_calibration(INNER_CAL_PATH)
+    first_warp = warp_from_calibration(raw, board_cal, output_size=800)
+    refined = refine_board_with_inner_corners(first_warp, inner_cal, output_size=800)
+
+    # 3) split + classify
+    cells = extract_8x8_cells(refined)
+    result = classifier.classify_cells(cells)
+
+    # 4) build overlay with grid + labels
+    overlay = refined.copy()
+    cv2.rectangle(overlay, (0, 0), (overlay.shape[1] - 1, overlay.shape[0] - 1), (60, 60, 60), 1)
+    for i in range(1, 8):
+        x = i * (overlay.shape[1] // 8)
+        y = i * (overlay.shape[0] // 8)
+        cv2.line(overlay, (x, 0), (x, overlay.shape[0]), (60, 60, 60), 1)
+        cv2.line(overlay, (0, y), (overlay.shape[1], y), (60, 60, 60), 1)
+    label_color = {"empty": (160, 160, 160), "white": (255, 255, 255), "black": (40, 40, 40)}
+    for pred in result.predictions:
+        x = pred.col * (overlay.shape[1] // 8) + 6
+        y = pred.row * (overlay.shape[0] // 8) + 22
+        cv2.putText(
+            overlay,
+            f"{pred.label[0].upper()} {pred.confidence:.2f}",
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            label_color.get(pred.label, (200, 200, 200)),
+            1,
+            cv2.LINE_AA,
+        )
+
+    # 5) cell crops in row-major order
+    cell_crops_b64 = [to_b64(cell.image) for cell in sorted(cells, key=lambda c: (c.row, c.col))]
+
+    response: dict = {
+        "white_bitmap": result.white_bitmap,
+        "black_bitmap": result.black_bitmap,
+        "predictions": [
+            {
+                "row": p.row,
+                "col": p.col,
+                "label": p.label,
+                "confidence": p.confidence,
+                "probs": p.probs,
+            }
+            for p in result.predictions
+        ],
+        "warped_board_b64": to_b64(refined),
+        "cnn_overlay_b64": to_b64(overlay),
+        "cell_crops_b64": cell_crops_b64,
+        "inference_ms": result.inference_ms,
+        "classical_comparison": None,
+    }
+
+    # 6) optional classical comparison
+    if payload.compare_classical:
+        try:
+            from charm.utils.bitmap import build_white_black_bitmaps
+            ref_img = cv2.imread(str(EMPTY_REF_PATH)) if EMPTY_REF_PATH.exists() else None
+            reference_cells = None
+            if ref_img is not None:
+                if ref_img.shape[:2] != refined.shape[:2]:
+                    ref_img = cv2.resize(ref_img, (refined.shape[1], refined.shape[0]))
+                reference_cells = extract_8x8_cells(ref_img)
+            occupancy = detect_occupancy(cells, reference_cells=reference_cells)
+            from charm.vision.piece_color_detector import detect_piece_colors
+            colors = detect_piece_colors(cells, occupancy, reference_cells=reference_cells)
+            cl_white, cl_black = build_white_black_bitmaps(colors)
+            disagreements = []
+            for r in range(8):
+                for c in range(8):
+                    cnn_label = "empty"
+                    if result.white_bitmap[r][c]:
+                        cnn_label = "white"
+                    elif result.black_bitmap[r][c]:
+                        cnn_label = "black"
+                    cl_label = "empty"
+                    if cl_white[r][c]:
+                        cl_label = "white"
+                    elif cl_black[r][c]:
+                        cl_label = "black"
+                    if cnn_label != cl_label:
+                        disagreements.append({
+                            "row": r, "col": c, "cnn": cnn_label, "classical": cl_label,
+                        })
+            response["classical_comparison"] = {
+                "white_bitmap": cl_white,
+                "black_bitmap": cl_black,
+                "disagreement_count": len(disagreements),
+                "disagreement_cells": disagreements,
+            }
+        except Exception as exc:  # noqa: BLE001 — comparison is optional
+            response["classical_comparison"] = {"error": str(exc)}
+
+    # cache for /scan-cell
+    global _LAST_CNN_SCAN
+    _LAST_CNN_SCAN = {
+        "cell_crops_b64": cell_crops_b64,
+        "predictions": response["predictions"],
+        "captured_at": time.time(),
+    }
+
+    return response
+
+
+@app.get("/api/cnn/scan-cell/{row}/{col}")
+def cnn_scan_cell(row: int, col: int):
+    if not (0 <= row < 8 and 0 <= col < 8):
+        raise HTTPException(400, "row and col must be in [0, 8)")
+    if not _LAST_CNN_SCAN:
+        raise HTTPException(400, "No scan in cache — call POST /api/cnn/scan first.")
+    idx = row * 8 + col
+    crops = _LAST_CNN_SCAN.get("cell_crops_b64") or []
+    preds = _LAST_CNN_SCAN.get("predictions") or []
+    if idx >= len(crops) or idx >= len(preds):
+        raise HTTPException(500, "Scan cache is incomplete.")
+    return {
+        "row": row,
+        "col": col,
+        "crop_b64": crops[idx],
+        "prediction": preds[idx],
+        "captured_at": _LAST_CNN_SCAN.get("captured_at"),
+    }
+
+
+class CnnFeedbackPayload(BaseModel):
+    run_id: str
+    row: int
+    col: int
+    true_label: str
+    crop_b64: Optional[str] = None
+
+
+@app.post("/api/cnn/feedback")
+def cnn_feedback(payload: CnnFeedbackPayload):
+    if payload.true_label not in {"empty", "white", "black"}:
+        raise HTTPException(400, "true_label must be one of empty/white/black")
+
+    run_id = payload.run_id
+    # Find the dataset this run was trained on, so we can write next to it.
+    metrics_path = CNN_MODELS_DIR / run_id / "metrics.json"
+    dataset = None
+    if metrics_path.exists():
+        try:
+            dataset = json.loads(metrics_path.read_text()).get("dataset")
+        except Exception:
+            dataset = None
+    if not dataset:
+        raise HTTPException(404, f"Cannot resolve dataset for run {run_id}")
+
+    queue_path = LABELED_DATASETS_DIR / dataset / "retrain_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "row": payload.row,
+        "col": payload.col,
+        "true_label": payload.true_label,
+        "crop_b64": payload.crop_b64,
+        "ts": time.time(),
+    }
+    with queue_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+    return {"queued": True, "queue_path": str(queue_path)}
+
+
 if __name__ == "__main__":
     import uvicorn
 
