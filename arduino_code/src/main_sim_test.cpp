@@ -33,6 +33,7 @@
 #include "hardware/src/gripper.h"
 #include "hardware/src/stepperXYZ.h"
 #include "hardware/src/limitSwitch.h"
+#include "hardware/src/enableDriver.h"
 
 StepperXYZ _stubXStepper(X_STEP_IN1, X_DIR_IN1);
 StepperXYZ _stubYStepper(Y_STEP_IN1, Y_DIR_IN1);
@@ -56,6 +57,11 @@ enum SimBotState {
     BOT_WILL_MOVE,    // waiting to send BOT_MOVING
     BOT_WILL_RETURN   // waiting to send PLAYER_TURN_WHITE
 };
+
+static unsigned long lastSerialActivityMs = 0;
+static unsigned long lastUiLoopMs = 0;
+static const unsigned long LCD_RESYNC_IDLE_MS = 5000;
+static const unsigned long UI_POLL_MS = 50;
 
 class SimStream : public Stream {
 public:
@@ -214,10 +220,11 @@ void setup() {
 }
 
 void loop() {
+    updateDrivers();
     simStream.tick();
     simStream.tickBoardOk();
     uiController.loop();
-    lcd.tick();   // periodically re-sync the LCD to recover from noise glitches
+    lcd.tick();
 
     UIMode mode = uiState.getMode();
     if (mode != lastMode) {

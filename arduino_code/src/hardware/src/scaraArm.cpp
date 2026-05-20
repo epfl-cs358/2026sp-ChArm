@@ -27,28 +27,30 @@ void ScaraArm::calibrate() {
     Serial.println("Gripper openned for calibration");
     gripper.open();
 
+
     Serial.println("Calbrating lead screw");
     leadScrew.calibrate();
-    Serial.println("Lead screw calibration complete");
     leadScrew.moveBy_mm(60.0f); //go up to clear king and box during rest of calibration
 
+
     Serial.println("Calibrating base joint");
-    //set new soft limits
+    //set new soft limits 
     joint1.calibrate();
-    Serial.println("Base joint calibration complete");
     joint1.moveBy(137.0f);
     joint1.setZero();
     joint1.setMinAngle(-137.0f);
     joint1.setMaxAngle(137.0f);
 
+
     Serial.println("Calibrating forearm joint");
     joint2.calibrate();
-    Serial.println("Forearm joint calibration complete");
     //once j1 is calibrated need to move it in the middle so it straight along the axis
     joint2.moveTo(joint2.maxAngleDeg() / 2.0f);
     joint2.setZero(); // set zero to the middle of the range so IK is centered on straight configuration
     joint2.setMinAngle(-joint2.maxAngleDeg() / 2.0f -2);
     joint2.setMaxAngle(joint2.maxAngleDeg() / 2.0f + 2);
+
+
 
     sync();
     Serial.println("Calibration done");
@@ -59,7 +61,6 @@ void ScaraArm::calibrate() {
 void ScaraArm::goHome() {
     beforeMove();
     leadScrew.moveTo_mm(PICKPLACE_HOVER_Z_MM);
-    // Rest position: X=0, Y=500 (arm along Y axis, 90° from X-axis home)
     joint1.moveTo(120.0f);
     joint2.moveTo(60.0f);
     afterMove();
@@ -106,9 +107,8 @@ void ScaraArm::moveByZ(float mm) {
 bool ScaraArm::moveXYZ(float x, float y, float z) {
     beforeMove();
     leadScrew.moveTo_mm(z);
-    bool result = moveXY(x, y);
+    return moveXY(x, y);
     afterMove();
-    return result;
 }
 
 void ScaraArm::moveJ1(float deg) { joint1.moveTo(deg); sync(); }
@@ -126,6 +126,8 @@ float ScaraArm::j2Angle() const  { return joint2.angle(); }
 bool ScaraArm::pickAt(float x, float y, int pieceType) {
     // Clamp piece type to valid range
     if (pieceType < 0 || pieceType > 5) pieceType = 0;
+
+    openGripper();
     
     // Move to hover above target (sets Z then XY).
     if (!moveXYZ(x, y, PICKPLACE_HOVER_Z_MM)) return false;

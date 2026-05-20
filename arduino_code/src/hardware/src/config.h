@@ -68,7 +68,7 @@ const float PLACE_Z[6] = {
 };
 
 // Trash position Z (hardcoded, not calibrated)
-const float TRASH_Z = 60.0f;
+const float TRASH_Z = 90.0f;
 
 #endif
 

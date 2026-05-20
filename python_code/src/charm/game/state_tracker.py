@@ -52,17 +52,44 @@ def count_bitmap_mismatches(left: Bitmap, right: Bitmap) -> int:
     return mismatches
 
 
-def compare_board_to_bitmaps(
-    board: chess.Board,
-    observed_white_bitmap: Bitmap,
-    observed_black_bitmap: Bitmap,
-) -> int:
-    candidate_white_bitmap, candidate_black_bitmap = board_to_bitmaps(board)
+def compare_board_to_bitmaps(expected_board, white_bitmap, black_bitmap) -> int:
+    """
+    Compare a python-chess board with detected 8x8 white/black bitmaps.
 
-    return count_bitmap_mismatches(candidate_white_bitmap, observed_white_bitmap) + count_bitmap_mismatches(
-        candidate_black_bitmap,
-        observed_black_bitmap,
-    )
+    Bitmap convention:
+      row 0 = rank 8
+      row 7 = rank 1
+      col 0 = file a
+      col 7 = file h
+    """
+    mismatch_count = 0
+
+    for row in range(8):
+        for col in range(8):
+            rank = 7 - row
+            file = col
+            square = chess.square(file, rank)
+
+            piece = expected_board.piece_at(square)
+
+            expected_white = piece is not None and piece.color == chess.WHITE
+            expected_black = piece is not None and piece.color == chess.BLACK
+
+            detected_white = bool(white_bitmap[row][col])
+            detected_black = bool(black_bitmap[row][col])
+
+            if expected_white != detected_white or expected_black != detected_black:
+                mismatch_count += 1
+                print(
+                    f"[MISMATCH] {chess.square_name(square)} "
+                    f"expected_white={expected_white}, "
+                    f"expected_black={expected_black}, "
+                    f"detected_white={detected_white}, "
+                    f"detected_black={detected_black}"
+                )
+
+    print("[DEBUG] total mismatch_count =", mismatch_count)
+    return mismatch_count
 
 
 @dataclass
