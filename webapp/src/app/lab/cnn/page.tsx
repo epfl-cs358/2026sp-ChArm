@@ -25,6 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import ArucoCalibration from "@/components/ArucoCalibration";
+import ManualCalibration from "@/components/ManualCalibration";
 import CnnScanPanel from "@/components/CnnScanPanel";
 
 const STEPS = [
@@ -208,6 +209,7 @@ function Step1Preflight({
   refresh: () => void;
   onContinue: () => void;
 }) {
+  const [calMode, setCalMode] = useState<"manual" | "aruco">("manual");
   return (
     <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
       <CardContent className="p-5 flex flex-col gap-4">
@@ -239,10 +241,31 @@ function Step1Preflight({
         </div>
 
         <div className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-          If a badge is amber, fix it before continuing. Open the calibration tools below if needed.
+          If a badge is amber, fix it below. Pick a calibration method — manual
+          point-picking or ArUco auto-detect.
         </div>
 
-        <ArucoCalibration embedded />
+        <div className="flex gap-3 items-center font-jetbrains text-xs">
+          <span style={{ color: "var(--charm-muted)" }}>Calibration:</span>
+          <label className="flex items-center gap-1.5">
+            <input
+              type="radio"
+              checked={calMode === "manual"}
+              onChange={() => setCalMode("manual")}
+            />
+            Manual
+          </label>
+          <label className="flex items-center gap-1.5">
+            <input
+              type="radio"
+              checked={calMode === "aruco"}
+              onChange={() => setCalMode("aruco")}
+            />
+            ArUco markers
+          </label>
+        </div>
+
+        {calMode === "manual" ? <ManualCalibration /> : <ArucoCalibration embedded />}
 
         <div className="flex gap-2 pt-2">
           <Button size="sm" variant="outline" onClick={refresh}>
@@ -318,8 +341,13 @@ function Step2PickSource({
                   <span style={{ color: "var(--charm-muted)" }}>{s.total_frames} frames</span>
                 </div>
                 <div className="mt-1" style={{ color: "var(--charm-muted)" }}>
-                  empty: {s.empty_frames} · white: {s.white_frames} on {s.white_squares} sq · black: {s.black_frames} on {s.black_squares} sq
+                  sweep — empty: {s.empty_frames} · white: {s.white_frames} on {s.white_squares} sq · black: {s.black_frames} on {s.black_squares} sq
                 </div>
+                {(s.bulk_empty_cells || s.bulk_white_cells || s.bulk_black_cells) ? (
+                  <div className="mt-0.5" style={{ color: "var(--charm-cyan)" }}>
+                    bulk-paint cells — empty: {s.bulk_empty_cells ?? 0} · white: {s.bulk_white_cells ?? 0} · black: {s.bulk_black_cells ?? 0}
+                  </div>
+                ) : null}
               </button>
             );
           })}
@@ -818,8 +846,17 @@ export default function CnnWizardPage() {
           clearInterval(buildPollRef.current);
           buildPollRef.current = null;
         }
-      } catch {
-        // keep polling
+      } catch (e) {
+        // If the job vanished (e.g. backend restarted), drop the stale id
+        // so the "start build" button reappears instead of polling forever.
+        if ((e as Error).message?.includes("Build job not found")) {
+          if (buildPollRef.current) {
+            clearInterval(buildPollRef.current);
+            buildPollRef.current = null;
+          }
+          setBuildId(null);
+          setBuildStatus(null);
+        }
       }
     };
     tick();
@@ -828,7 +865,7 @@ export default function CnnWizardPage() {
       if (buildPollRef.current) clearInterval(buildPollRef.current);
       buildPollRef.current = null;
     };
-  }, [buildId]);
+  }, [buildId, setBuildId]);
 
   const startBuild = useCallback(async () => {
     if (!pickedSource || !outputName.trim()) return;
@@ -879,8 +916,15 @@ export default function CnnWizardPage() {
           clearInterval(trainPollRef.current);
           trainPollRef.current = null;
         }
-      } catch {
-        // keep polling
+      } catch (e) {
+        if ((e as Error).message?.includes("Train job not found")) {
+          if (trainPollRef.current) {
+            clearInterval(trainPollRef.current);
+            trainPollRef.current = null;
+          }
+          setTrainJobId(null);
+          setTrainStatus(null);
+        }
       }
     };
     tick();
@@ -889,7 +933,7 @@ export default function CnnWizardPage() {
       if (trainPollRef.current) clearInterval(trainPollRef.current);
       trainPollRef.current = null;
     };
-  }, [trainJobId]);
+  }, [trainJobId, setTrainJobId]);
 
   const startTrain = useCallback(
     async (epochs: number) => {

@@ -38,6 +38,10 @@ def _build_model(num_classes: int = 3):
 
     model = models.Sequential([
         layers.Input(shape=(100, 100, 3)),
+        # Vertical flips create views a top-down board never produces, so keep
+        # augmentation to horizontal + small rotations only.
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.2),
         layers.Rescaling(1.0 / 255),
         layers.Conv2D(16, 3, padding="same", activation="relu"),
         layers.MaxPooling2D(2),
@@ -187,10 +191,35 @@ def train(
     class_to_idx = {name: idx for idx, name in enumerate(class_names_train)}
     (run_dir / "class_indices.json").write_text(json.dumps(class_to_idx, indent=2))
 
-    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-    val_ds_prefetched = val_ds.prefetch(tf.data.AUTOTUNE)
-
     model = _build_model(num_classes=len(class_names_train))
+
+    # Count from disk instead of iterating the dataset — same numbers, no extra
+    # epoch of I/O before training starts.
+    counts = {i: 0 for i in range(len(class_names_train))}
+    for cls_name, idx in class_to_idx.items():
+        counts[idx] = sum(1 for _ in (train_dir / cls_name).iterdir() if _.is_file())
+    total = sum(counts.values()) or 1
+    class_weights = {
+        idx: (total / (len(class_names_train) * count)) if count > 0 else 0.0
+        for idx, count in counts.items()
+    }
+
+    # Apply the SAME class weighting to val as to train. Keras' class_weight=
+    # arg only weights the training loss; val_loss stays unweighted, which on
+    # an empty-heavy val set rewards "always predict empty". Mapping a
+    # per-sample weight onto val makes val_loss/val_accuracy measure the
+    # balanced objective, so EarlyStopping/ReduceLROnPlateau pick the model
+    # that's actually best for piece detection.
+    weight_lookup = tf.constant(
+        [class_weights[i] for i in range(len(class_names_train))],
+        dtype=tf.float32,
+    )
+
+    def _add_sample_weight(x, y):
+        return x, y, tf.gather(weight_lookup, y)
+
+    train_ds = train_ds.map(_add_sample_weight).cache().prefetch(tf.data.AUTOTUNE)
+    val_ds_prefetched = val_ds.map(_add_sample_weight).cache().prefetch(tf.data.AUTOTUNE)
 
     class _ProgressCallback(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
@@ -209,11 +238,27 @@ def train(
                 except Exception:
                     pass
 
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=4,
+        restore_best_weights=True,
+        verbose=1,
+    )
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,
+        patience=2,
+        min_lr=1e-5,
+        verbose=1,
+    )
+
+    # Weighting is carried via sample_weight in train_ds/val_ds_prefetched, so
+    # do NOT also pass class_weight= here — Keras would multiply them.
     history = model.fit(
         train_ds,
         validation_data=val_ds_prefetched,
         epochs=epochs,
-        callbacks=[_ProgressCallback()],
+        callbacks=[_ProgressCallback(), early_stop, reduce_lr],
         verbose=2,
     )
 

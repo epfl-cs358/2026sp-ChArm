@@ -4,6 +4,19 @@ venv/
 env/
 test_env/
 python_code/venv/
+# venv living directly inside python_code/ (bin/ lib/ lib64 share/ pyvenv.cfg)
+python_code/bin/
+python_code/lib/
+python_code/lib64
+python_code/share/
+python_code/pyvenv.cfg
+
+# Training datasets and trained models (large / machine-specific)
+python_code/labeled_datasets/
+python_code/models/
+
+# Board snapshots captured at runtime
+python_code/webapp_snapshots/
 
 # Python bytecode
 __pycache__/

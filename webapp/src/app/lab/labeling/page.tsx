@@ -25,6 +25,8 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import ArucoCalibration from "@/components/ArucoCalibration";
+import ManualCalibration from "@/components/ManualCalibration";
+import BulkPaintBoard, { BulkLabel } from "@/components/BulkPaintBoard";
 import { imageSrc } from "@/lib/image";
 
 // --- Step list (also drives the breadcrumb at the top) ---
@@ -68,6 +70,8 @@ function rcKey(square: string): string {
   const row = 8 - rank;
   return `${row},${col}`;
 }
+
+type SweepMode = "arm" | "manual" | "bulk";
 
 export default function LabelingWizardPage() {
   // ---------- global state ----------
@@ -121,6 +125,16 @@ export default function LabelingWizardPage() {
     { square: string; image: string | null }[]
   >([]);
   const whitePawnSquareRef = useRef<string | null>(null);
+  // Per-sweep mode toggle: "arm" runs the arm-driven sweep, "manual" lets
+  // the user move pieces by hand and validate one square at a time, "bulk"
+  // lets the user paint several squares (color or empty) and capture them
+  // all from one board photo.
+  const [whiteMode, setWhiteMode] = useState<SweepMode>("arm");
+  const [whiteManualTarget, setWhiteManualTarget] = useState<string>("a1");
+  const [whiteManualBusy, setWhiteManualBusy] = useState(false);
+  const [whiteBulkLabels, setWhiteBulkLabels] = useState<Record<string, BulkLabel>>({});
+  const [whiteBulkBusy, setWhiteBulkBusy] = useState(false);
+  const [whiteBulkFrames, setWhiteBulkFrames] = useState(1);
 
   // ---------- Step 9: black piece placed confirm ----------
   const [blackPlaced, setBlackPlaced] = useState(false);
@@ -136,6 +150,12 @@ export default function LabelingWizardPage() {
     { square: string; image: string | null }[]
   >([]);
   const blackPawnSquareRef = useRef<string | null>(null);
+  const [blackMode, setBlackMode] = useState<SweepMode>("arm");
+  const [blackManualTarget, setBlackManualTarget] = useState<string>("a1");
+  const [blackManualBusy, setBlackManualBusy] = useState(false);
+  const [blackBulkLabels, setBlackBulkLabels] = useState<Record<string, BulkLabel>>({});
+  const [blackBulkBusy, setBlackBulkBusy] = useState(false);
+  const [blackBulkFrames, setBlackBulkFrames] = useState(1);
 
   // ---------- Step 12: stats ----------
   const [accuracy, setAccuracy] = useState<LabelAccuracyReport | null>(null);
@@ -206,7 +226,14 @@ export default function LabelingWizardPage() {
       try {
         const ds = await api.getLabelDataset(activeName);
         const counts = color === "white" ? ds.metadata.white : ds.metadata.black;
-        const squares = Object.keys(counts).filter((sq) => counts[sq] > 0);
+        const bulkCounts =
+          color === "white" ? ds.metadata.bulk_white : ds.metadata.bulk_black;
+        // Show bulk-only squares too — the thumb endpoint falls back to the
+        // first bulk-paint cell if no sweep frame exists.
+        const seen = new Set<string>();
+        for (const [sq, n] of Object.entries(counts ?? {})) if (n > 0) seen.add(sq);
+        for (const [sq, n] of Object.entries(bulkCounts ?? {})) if (n > 0) seen.add(sq);
+        const squares = Array.from(seen);
         if (squares.length === 0) return;
         // Order by sweep order so newest-first matches the live gallery order
         squares.sort(
@@ -355,7 +382,12 @@ export default function LabelingWizardPage() {
   type SweepColor = "white" | "black";
 
   const doSquare = useCallback(
-    async (color: SweepColor, square: string, fromSquare: string) => {
+    async (
+      color: SweepColor,
+      square: string,
+      fromSquare: string,
+      mode: "append" | "overwrite" = "append",
+    ) => {
       if (!activeName || !meta) return;
       const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
       const setThumbs =
@@ -383,13 +415,15 @@ export default function LabelingWizardPage() {
       setPhase("waiting");
       await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
 
-      // 4) capture frames for the target square
+      // 4) capture frames for the target square. Sweep callers use append;
+      //    retake callers pass overwrite to throw out the old frames.
       setPhase("capturing");
       await api.captureLabelSquare(activeName, {
         color,
         square,
         params: LABELING_PARAMS,
         capture: true,
+        mode,
       });
 
       // 5) refresh metadata and add a thumbnail of the just-captured cell
@@ -516,7 +550,8 @@ export default function LabelingWizardPage() {
     setError(null);
     try {
       if (!meta) return;
-      await doSquare(color, sq, meta.settings.source_square);
+      // Retake = wipe and redo, by definition.
+      await doSquare(color, sq, meta.settings.source_square, "overwrite");
       await api.labelingArm(activeName, {
         color,
         square: meta.settings.source_square,
@@ -530,6 +565,124 @@ export default function LabelingWizardPage() {
     }
   };
 
+  // ---------- handlers: manual mode capture ----------
+  // Capture a single square without moving the arm. The user has placed the
+  // piece by hand; this just settles, grabs frames, and updates the gallery.
+  const manualCaptureSquare = useCallback(
+    async (color: SweepColor, square: string) => {
+      if (!activeName || !meta) return;
+      const setBusyForColor =
+        color === "white" ? setWhiteManualBusy : setBlackManualBusy;
+      const setThumbs =
+        color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
+      setBusyForColor(true);
+      setError(null);
+      try {
+        // Brief settle so the user's hand wobble has time to die down before
+        // we grab frames — same intent as the arm-driven path's settle step.
+        await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
+        await api.captureLabelSquare(activeName, {
+          color,
+          square,
+          params: LABELING_PARAMS,
+          capture: true,
+          skip_arm_home_check: true,
+          mode: "append",
+        });
+        const fresh = await api.getLabelDataset(activeName);
+        setMeta(fresh.metadata);
+        try {
+          const thumb = await api.getLabelThumb(activeName, color, square);
+          setThumbs((prev) => [
+            { square, image: thumb.exists ? thumb.image : null },
+            ...prev.filter((t) => t.square !== square),
+          ]);
+        } catch {
+          /* thumbnail is best-effort */
+        }
+        // Advance the target to the next square in sweep order, skipping
+        // squares already captured so the user lands on the next uncaptured one.
+        const counts = color === "white" ? fresh.metadata.white : fresh.metadata.black;
+        const startIdx = ALL_SQUARES.indexOf(square);
+        let nextIdx = (startIdx + 1) % ALL_SQUARES.length;
+        while (nextIdx !== startIdx && (counts[ALL_SQUARES[nextIdx]] ?? 0) > 0) {
+          nextIdx = (nextIdx + 1) % ALL_SQUARES.length;
+        }
+        const next = ALL_SQUARES[nextIdx];
+        if (color === "white") setWhiteManualTarget(next);
+        else setBlackManualTarget(next);
+      } catch (e) {
+        setError(`square ${square}: ${(e as Error).message}`);
+      } finally {
+        setBusyForColor(false);
+      }
+    },
+    [activeName, meta],
+  );
+
+  // ---------- handlers: bulk paint capture ----------
+  // One capture, multiple squares labeled at once. Saves per-cell crops to
+  // bulk/<color>/<sq>/cell_<uuid>.jpg on the backend.
+  const bulkCapture = useCallback(
+    async (color: SweepColor) => {
+      if (!activeName || !meta) return;
+      const labels = color === "white" ? whiteBulkLabels : blackBulkLabels;
+      const setBusy = color === "white" ? setWhiteBulkBusy : setBlackBulkBusy;
+      const frames = Math.max(
+        1,
+        Math.min(20, color === "white" ? whiteBulkFrames : blackBulkFrames),
+      );
+      if (Object.keys(labels).length === 0) {
+        setError("Paint at least one square before capturing.");
+        return;
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        await api.captureLabelBulk(activeName, {
+          labels,
+          params: LABELING_PARAMS,
+          capture: true,
+          frames,
+          settle_ms: meta.settings.settle_ms,
+        });
+        // Refresh meta so the per-square existing-count badges update.
+        const fresh = await api.getLabelDataset(activeName);
+        setMeta(fresh.metadata);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [
+      activeName,
+      meta,
+      whiteBulkLabels,
+      blackBulkLabels,
+      whiteBulkFrames,
+      blackBulkFrames,
+    ],
+  );
+
+  // Send the arm home so it's out of the way while the user is placing
+  // pieces. No-op (with a friendly error) if no arm is connected.
+  const sendArmHomeForManual = useCallback(
+    async (color: SweepColor) => {
+      if (!activeName) return;
+      try {
+        await api.labelingArm(activeName, {
+          color,
+          square: "a1",
+          action: "home",
+        });
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+    [activeName],
+  );
+
   // ---------- handlers: step 12 ----------
   const handleComputeStats = async () => {
     if (!activeName) return;
@@ -539,6 +692,68 @@ export default function LabelingWizardPage() {
       const res = await api.computeDatasetStats(activeName);
       setAccuracy(res.accuracy);
       setMeta(res.metadata);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setComputingStats(false);
+    }
+  };
+
+  // Shortcut: open an existing dataset and jump straight to bulk-paint so the
+  // user can add more samples without walking through empty-board and the
+  // full per-square sweep again. Defaults to white sweep step (7) with bulk
+  // mode pre-selected; the user can switch to step 10 from there for black.
+  const handleAddMoreData = async () => {
+    if (!chosenExisting) {
+      setError("Pick an existing dataset first");
+      return;
+    }
+    setError(null);
+    try {
+      const res = await api.getLabelDataset(chosenExisting);
+      setActiveName(chosenExisting);
+      setMeta(res.metadata);
+      setDraftSource(res.metadata.settings.source_square);
+      setDraftPiece(res.metadata.settings.piece_type);
+      setDraftLighting(res.metadata.settings.lighting_note);
+      setDraftFrames(res.metadata.settings.frames_per_square);
+      setDraftSettle(res.metadata.settings.settle_ms);
+      // Pretend every gating step is satisfied so navigation works.
+      setDatasetApplied(true);
+      setAppliedSource(true);
+      setAppliedPiece(true);
+      setAppliedLighting(true);
+      setAppliedFrames(true);
+      setAppliedSettle(true);
+      setCalibrationConfirmed(true);
+      setAppliedCalibrationMode(true);
+      setWhitePlaced(true);
+      setBlackPlaced(true);
+      setWhiteMode("bulk");
+      setBlackMode("bulk");
+      setStep(7);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  // Shortcut for existing datasets: re-run compute-stats against the saved
+  // JPEGs and jump straight to the Step 12 report — no need to click through
+  // every gated capture step when no recapture is needed.
+  const handleRecomputeExisting = async () => {
+    if (!chosenExisting) {
+      setError("Pick an existing dataset first");
+      return;
+    }
+    setComputingStats(true);
+    setError(null);
+    try {
+      setActiveName(chosenExisting);
+      const res = await api.computeDatasetStats(chosenExisting);
+      setAccuracy(res.accuracy);
+      setMeta(res.metadata);
+      setDatasetApplied(true);
+      setStep(12);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -568,8 +783,25 @@ export default function LabelingWizardPage() {
   };
 
   // ---------- derived ----------
-  const whiteDoneCount = meta ? Object.keys(meta.white).length : 0;
-  const blackDoneCount = meta ? Object.keys(meta.black).length : 0;
+  // A square counts as "captured" if it has at least one frame from EITHER
+  // the per-square sweep (white/black) OR the bulk-paint session
+  // (bulk_white/bulk_black). Same for the review-step gating below — a
+  // dataset that was filled entirely via bulk paint should still pass.
+  const countDone = (
+    main: Record<string, number> | undefined,
+    bulk: Record<string, number> | undefined,
+  ): number => {
+    const all = new Set<string>();
+    for (const [sq, n] of Object.entries(main ?? {})) if (n > 0) all.add(sq);
+    for (const [sq, n] of Object.entries(bulk ?? {})) if (n > 0) all.add(sq);
+    return all.size;
+  };
+  const whiteDoneCount = meta
+    ? countDone(meta.white, meta.bulk_white)
+    : 0;
+  const blackDoneCount = meta
+    ? countDone(meta.black, meta.bulk_black)
+    : 0;
 
   // ---------- render ----------
   return (
@@ -671,7 +903,7 @@ export default function LabelingWizardPage() {
                 </Button>
               </div>
             ) : (
-              <div className="flex gap-2 items-center">
+              <div className="flex gap-2 items-center flex-wrap">
                 <Select
                   value={chosenExisting}
                   onValueChange={(v) => {
@@ -692,6 +924,22 @@ export default function LabelingWizardPage() {
                 </Select>
                 <Button onClick={handleApplyDataset} disabled={datasetApplied}>
                   {datasetApplied ? "Applied ✓" : "Apply"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleRecomputeExisting}
+                  disabled={!chosenExisting || computingStats}
+                  title="Rebuild exemplar_config.json + accuracy.json from the dataset's saved JPEGs and jump to the report."
+                >
+                  {computingStats ? "Recomputing…" : "Recompute stats"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleAddMoreData}
+                  disabled={!chosenExisting}
+                  title="Skip empty-board + per-square sweep and jump to bulk paint so you can grow this dataset."
+                >
+                  + Add more data (bulk paint)
                 </Button>
               </div>
             )}
@@ -902,11 +1150,13 @@ export default function LabelingWizardPage() {
                 </div>
               )}
               {appliedCalibrationMode && calibrationMode === "manual" && (
-                <p className="text-xs text-muted-foreground font-jetbrains">
-                  Using the manually-set corners from the{" "}
-                  <a href="/lab" className="underline">Computer Vision</a> page. Make
-                  sure they're current before continuing.
-                </p>
+                <div className="rounded-md border p-3 space-y-2">
+                  <p className="text-xs text-muted-foreground font-jetbrains">
+                    Re-pick board / inner-warp corners below. Save Board + Save
+                    Inner from inside the tool, then check the confirm box.
+                  </p>
+                  <ManualCalibration />
+                </div>
               )}
             </div>
 
@@ -1029,6 +1279,11 @@ export default function LabelingWizardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <ModeToggle
+              mode={whiteMode}
+              onChange={setWhiteMode}
+              disabled={whiteRunState === "running" || whiteManualBusy || whiteBulkBusy}
+            />
             {meta && (
               <CaptureTuner
                 meta={meta}
@@ -1046,24 +1301,57 @@ export default function LabelingWizardPage() {
                 }}
                 onApplyFrames={handleApplyFrames}
                 onApplySettle={handleApplySettle}
-                disabled={whiteRunState === "running"}
+                disabled={whiteRunState === "running" || whiteManualBusy || whiteBulkBusy}
               />
             )}
-            <SweepRunner
-              color="white"
-              currentSquare={whiteCurrentSquare}
-              idx={whiteIdx}
-              state={whiteRunState}
-              phase={whitePhase}
-              onStart={() => runSweep("white")}
-              onPause={() => pauseSweep("white")}
-              onResume={() => resumeSweep("white")}
-              onAbort={() => abortSweep("white")}
-              done={whiteDoneCount}
-            />
+            {whiteMode === "arm" ? (
+              <SweepRunner
+                color="white"
+                currentSquare={whiteCurrentSquare}
+                idx={whiteIdx}
+                state={whiteRunState}
+                phase={whitePhase}
+                onStart={() => runSweep("white")}
+                onPause={() => pauseSweep("white")}
+                onResume={() => resumeSweep("white")}
+                onAbort={() => abortSweep("white")}
+                done={whiteDoneCount}
+              />
+            ) : whiteMode === "manual" ? (
+              meta && (
+                <ManualSweepRunner
+                  color="white"
+                  meta={meta}
+                  target={whiteManualTarget}
+                  setTarget={setWhiteManualTarget}
+                  busy={whiteManualBusy}
+                  onValidate={() => manualCaptureSquare("white", whiteManualTarget)}
+                  onPark={() => sendArmHomeForManual("white")}
+                />
+              )
+            ) : (
+              meta && (
+                <BulkPaintRunner
+                  color="white"
+                  meta={meta}
+                  labels={whiteBulkLabels}
+                  setLabels={setWhiteBulkLabels}
+                  frames={whiteBulkFrames}
+                  setFrames={setWhiteBulkFrames}
+                  busy={whiteBulkBusy}
+                  onCapture={() => bulkCapture("white")}
+                />
+              )
+            )}
             <CapturedGallery thumbs={whiteCapturedThumbs} color="white" />
             <NavRow
-              forwardDisabled={whiteRunState !== "done" && whiteDoneCount < 64}
+              forwardDisabled={
+                whiteMode === "bulk"
+                  ? false
+                  : whiteMode === "arm"
+                    ? whiteRunState !== "done" && whiteDoneCount < 64
+                    : whiteDoneCount < 64
+              }
               forwardLabel="Continue → Step 8"
               onBack={() => setStep(6)}
               onForward={() => setStep(8)}
@@ -1139,6 +1427,11 @@ export default function LabelingWizardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <ModeToggle
+              mode={blackMode}
+              onChange={setBlackMode}
+              disabled={blackRunState === "running" || blackManualBusy || blackBulkBusy}
+            />
             {meta && (
               <CaptureTuner
                 meta={meta}
@@ -1156,24 +1449,57 @@ export default function LabelingWizardPage() {
                 }}
                 onApplyFrames={handleApplyFrames}
                 onApplySettle={handleApplySettle}
-                disabled={blackRunState === "running"}
+                disabled={blackRunState === "running" || blackManualBusy || blackBulkBusy}
               />
             )}
-            <SweepRunner
-              color="black"
-              currentSquare={blackCurrentSquare}
-              idx={blackIdx}
-              state={blackRunState}
-              phase={blackPhase}
-              onStart={() => runSweep("black")}
-              onPause={() => pauseSweep("black")}
-              onResume={() => resumeSweep("black")}
-              onAbort={() => abortSweep("black")}
-              done={blackDoneCount}
-            />
+            {blackMode === "arm" ? (
+              <SweepRunner
+                color="black"
+                currentSquare={blackCurrentSquare}
+                idx={blackIdx}
+                state={blackRunState}
+                phase={blackPhase}
+                onStart={() => runSweep("black")}
+                onPause={() => pauseSweep("black")}
+                onResume={() => resumeSweep("black")}
+                onAbort={() => abortSweep("black")}
+                done={blackDoneCount}
+              />
+            ) : blackMode === "manual" ? (
+              meta && (
+                <ManualSweepRunner
+                  color="black"
+                  meta={meta}
+                  target={blackManualTarget}
+                  setTarget={setBlackManualTarget}
+                  busy={blackManualBusy}
+                  onValidate={() => manualCaptureSquare("black", blackManualTarget)}
+                  onPark={() => sendArmHomeForManual("black")}
+                />
+              )
+            ) : (
+              meta && (
+                <BulkPaintRunner
+                  color="black"
+                  meta={meta}
+                  labels={blackBulkLabels}
+                  setLabels={setBlackBulkLabels}
+                  frames={blackBulkFrames}
+                  setFrames={setBlackBulkFrames}
+                  busy={blackBulkBusy}
+                  onCapture={() => bulkCapture("black")}
+                />
+              )
+            )}
             <CapturedGallery thumbs={blackCapturedThumbs} color="black" />
             <NavRow
-              forwardDisabled={blackRunState !== "done" && blackDoneCount < 64}
+              forwardDisabled={
+                blackMode === "bulk"
+                  ? false
+                  : blackMode === "arm"
+                    ? blackRunState !== "done" && blackDoneCount < 64
+                    : blackDoneCount < 64
+              }
               forwardLabel="Continue → Step 11"
               onBack={() => setStep(9)}
               onForward={() => setStep(11)}
@@ -1613,10 +1939,17 @@ function RetakeGrid({
   busy: boolean;
 }) {
   const counts = color === "white" ? meta.white : meta.black;
+  const bulkCounts = color === "white" ? meta.bulk_white : meta.bulk_black;
+  // "Done" = at least one frame from either bucket. Both contribute training
+  // data, so a square that's only in bulk is still complete.
+  const doneSquares = new Set<string>();
+  for (const [sq, n] of Object.entries(counts ?? {})) if (n > 0) doneSquares.add(sq);
+  for (const [sq, n] of Object.entries(bulkCounts ?? {})) if (n > 0) doneSquares.add(sq);
   return (
     <div>
       <p className="text-sm font-jetbrains mb-2">
-        {Object.keys(counts).length}/64 squares captured. Hover any cell to retake.
+        {doneSquares.size}/64 squares captured. Hover any cell to retake (retake
+        wipes the per-square sweep frames; bulk-paint cells are preserved).
       </p>
       <div className="grid grid-cols-8 gap-1 w-fit">
         {Array.from({ length: 8 }).map((_, row) =>
@@ -1625,6 +1958,8 @@ function RetakeGrid({
             const rank = 8 - row;
             const sq = `${file}${rank}`;
             const captured = counts[sq] ?? 0;
+            const bulk = bulkCounts?.[sq] ?? 0;
+            const total = captured + bulk;
             return (
               <button
                 key={sq}
@@ -1634,12 +1969,225 @@ function RetakeGrid({
                 className="rounded text-[10px] font-jetbrains border h-10 w-10 flex flex-col items-center justify-center hover:border-cyan-400 disabled:opacity-40"
                 style={{
                   background:
-                    captured > 0
+                    total > 0
                       ? "color-mix(in oklab, var(--charm-cyan) 12%, transparent)"
                       : "color-mix(in oklab, var(--charm-red, #f87171) 12%, transparent)",
                   borderColor: "var(--charm-border)",
                 }}
-                title={`${sq}: ${captured} frames — click to retake`}
+                title={`${sq}: ${captured} sweep + ${bulk} bulk — click to retake (sweep only)`}
+              >
+                <span>{sq}</span>
+                <span style={{ opacity: 0.7 }}>{total}</span>
+              </button>
+            );
+          }),
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: SweepMode;
+  onChange: (m: SweepMode) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className="rounded-md border p-2 flex gap-2 items-center font-jetbrains text-xs flex-wrap"
+      style={{ borderColor: "var(--charm-border)" }}
+    >
+      <span style={{ color: "var(--charm-muted)" }} className="px-1">Sweep mode:</span>
+      <Button
+        size="sm"
+        variant={mode === "arm" ? "default" : "outline"}
+        onClick={() => onChange("arm")}
+        disabled={disabled}
+      >
+        Arm sweep
+      </Button>
+      <Button
+        size="sm"
+        variant={mode === "manual" ? "default" : "outline"}
+        onClick={() => onChange("manual")}
+        disabled={disabled}
+      >
+        Manual (one at a time)
+      </Button>
+      <Button
+        size="sm"
+        variant={mode === "bulk" ? "default" : "outline"}
+        onClick={() => onChange("bulk")}
+        disabled={disabled}
+      >
+        Bulk paint
+      </Button>
+    </div>
+  );
+}
+
+function BulkPaintRunner({
+  color,
+  meta,
+  labels,
+  setLabels,
+  frames,
+  setFrames,
+  busy,
+  onCapture,
+}: {
+  color: "white" | "black";
+  meta: LabelDatasetMeta;
+  labels: Record<string, BulkLabel>;
+  setLabels: (next: Record<string, BulkLabel>) => void;
+  frames: number;
+  setFrames: (n: number) => void;
+  busy: boolean;
+  onCapture: () => void;
+}) {
+  const painted = Object.keys(labels).length;
+  // Pull bulk per-square counts off the metadata so the board shows how much
+  // data has already been captured per square (across all bulk sessions).
+  const bulkCounts = {
+    empty: meta.bulk_empty ?? {},
+    white: meta.bulk_white ?? {},
+    black: meta.bulk_black ?? {},
+  };
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-md border p-3 font-jetbrains text-xs"
+        style={{
+          borderColor: "var(--charm-cyan)",
+          background: "color-mix(in oklab, var(--charm-cyan) 8%, transparent)",
+        }}
+      >
+        <p>
+          Bulk paint: place any number of {color} pieces (and other colors / empty
+          squares) on the board, paint each one with the matching brush, then
+          capture. Each painted square gets its own crop saved to{" "}
+          <code>bulk/&lt;color&gt;/&lt;sq&gt;/</code>.
+        </p>
+      </div>
+      <BulkPaintBoard
+        labels={labels}
+        onChange={setLabels}
+        busy={busy}
+        counts={bulkCounts}
+      />
+      <div className="flex items-center gap-3 font-jetbrains text-xs flex-wrap">
+        <span style={{ color: "var(--charm-muted)" }}>Photos this round:</span>
+        <Input
+          type="number"
+          min={1}
+          max={20}
+          value={frames}
+          onChange={(e) => setFrames(Math.max(1, Math.min(20, parseInt(e.target.value || "1", 10))))}
+          className="w-20"
+          disabled={busy}
+        />
+        <Button onClick={onCapture} disabled={busy || painted === 0}>
+          {busy ? "Capturing…" : `Capture ${painted} square${painted === 1 ? "" : "s"}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ManualSweepRunner({
+  color,
+  meta,
+  target,
+  setTarget,
+  busy,
+  onValidate,
+  onPark,
+}: {
+  color: "white" | "black";
+  meta: LabelDatasetMeta;
+  target: string;
+  setTarget: (sq: string) => void;
+  busy: boolean;
+  onValidate: () => void;
+  onPark: () => void;
+}) {
+  const counts = color === "white" ? meta.white : meta.black;
+  const done = Object.keys(counts).filter((sq) => (counts[sq] ?? 0) > 0).length;
+  const idx = ALL_SQUARES.indexOf(target);
+  const targetCaptured = (counts[target] ?? 0) > 0;
+  const prev = () => setTarget(ALL_SQUARES[(idx - 1 + ALL_SQUARES.length) % ALL_SQUARES.length]);
+  const next = () => setTarget(ALL_SQUARES[(idx + 1) % ALL_SQUARES.length]);
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-md border p-3 flex flex-wrap items-center gap-3 font-jetbrains"
+        style={{
+          borderColor: "var(--charm-cyan)",
+          background: "color-mix(in oklab, var(--charm-cyan) 8%, transparent)",
+        }}
+      >
+        <div className="flex flex-col">
+          <span className="text-xs" style={{ color: "var(--charm-muted)" }}>
+            Place a {color} {meta.settings.piece_type} on
+          </span>
+          <span className="text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
+            {target.toUpperCase()}
+          </span>
+          <span className="text-[11px]" style={{ color: "var(--charm-muted)" }}>
+            {targetCaptured
+              ? `already captured (${counts[target]} frames) — validating will overwrite`
+              : "not yet captured"}
+          </span>
+        </div>
+        <div className="flex flex-col gap-2 ml-auto">
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={prev} disabled={busy}>
+              ← Prev
+            </Button>
+            <Button size="sm" variant="outline" onClick={next} disabled={busy}>
+              Next →
+            </Button>
+            <Button size="sm" variant="outline" onClick={onPark} disabled={busy}>
+              Park arm
+            </Button>
+          </div>
+          <Button onClick={onValidate} disabled={busy}>
+            {busy ? "Capturing…" : `Validate & capture ${target.toUpperCase()}`}
+          </Button>
+        </div>
+      </div>
+      <p className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+        {done}/64 squares captured. Click any square below to jump there.
+      </p>
+      <div className="grid grid-cols-8 gap-1 w-fit">
+        {Array.from({ length: 8 }).map((_, row) =>
+          Array.from({ length: 8 }).map((_, col) => {
+            const file = "abcdefgh"[col];
+            const rank = 8 - row;
+            const sq = `${file}${rank}`;
+            const captured = counts[sq] ?? 0;
+            const isTarget = sq === target;
+            return (
+              <button
+                key={sq}
+                type="button"
+                disabled={busy}
+                onClick={() => setTarget(sq)}
+                className="rounded text-[10px] font-jetbrains border h-10 w-10 flex flex-col items-center justify-center hover:border-cyan-400 disabled:opacity-40"
+                style={{
+                  background: isTarget
+                    ? "color-mix(in oklab, var(--charm-cyan) 35%, transparent)"
+                    : captured > 0
+                      ? "color-mix(in oklab, var(--charm-cyan) 12%, transparent)"
+                      : "color-mix(in oklab, var(--charm-red, #f87171) 12%, transparent)",
+                  borderColor: isTarget ? "var(--charm-cyan)" : "var(--charm-border)",
+                  borderWidth: isTarget ? 2 : 1,
+                }}
+                title={`${sq}: ${captured} frames${isTarget ? " — current target" : ""}`}
               >
                 <span>{sq}</span>
                 <span style={{ opacity: 0.7 }}>{captured}</span>

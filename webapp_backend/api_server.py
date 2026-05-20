@@ -1905,6 +1905,9 @@ class LabelingCaptureEmptyPayload(BaseModel):
     params: PipelineParams = Field(default_factory=PipelineParams)
     capture: bool = True
     frames: Optional[int] = None  # override frames-per-square; defaults to settings
+    # "overwrite" wipes existing empty frames (default for first capture/recapture);
+    # "append" grows the empty-frame bucket so callers can collect more data.
+    mode: str = "overwrite"
 
 
 class LabelingCaptureSquarePayload(BaseModel):
@@ -1913,6 +1916,26 @@ class LabelingCaptureSquarePayload(BaseModel):
     params: PipelineParams = Field(default_factory=PipelineParams)
     capture: bool = True
     frames: Optional[int] = None
+    # Manual-mode callers move pieces by hand and must not trigger any arm
+    # motion. When True, skip the auto-home safety net below.
+    skip_arm_home_check: bool = False
+    # "overwrite" wipes the (color, square) folder before writing (retake);
+    # "append" keeps existing frames and adds new ones with incremented names.
+    mode: str = "overwrite"
+
+
+class LabelingCaptureBulkPayload(BaseModel):
+    # Map of square -> label, where label ∈ {"empty", "white", "black"}. Squares
+    # not present in this dict are skipped (no crop written).
+    labels: dict[str, str]
+    params: PipelineParams = Field(default_factory=PipelineParams)
+    capture: bool = True
+    # How many board photos to take this round. Each photo yields one cell
+    # per painted square. Defaults to 1 to keep the UX tight.
+    frames: int = 1
+    settle_ms: Optional[int] = None
+    # Bulk paint never moves the arm.
+    skip_arm_home_check: bool = True
 
 
 class LabelingArmPayload(BaseModel):
@@ -2014,6 +2037,16 @@ def _verify_arm_home(responses: list[str], port: Optional[str], baud: int) -> No
     )
 
 
+def _rc_to_square(row: int, col: int) -> Optional[str]:
+    """Inverse of charm.vision.cnn_dataset._square_to_rc — uses the same 180°
+    rotated mapping so a cell saved to bulk/<color>/a1/ truly is a1's cell."""
+    if not (0 <= row < 8 and 0 <= col < 8):
+        return None
+    file = chr(ord("a") + (7 - col))
+    rank = row + 1
+    return f"{file}{rank}"
+
+
 def _capture_warped_frames(params: PipelineParams, count: int, settle_ms: int, do_capture: bool) -> list[np.ndarray]:
     """Capture `count` *warped* board frames, sleeping settle_ms between captures.
 
@@ -2092,6 +2125,19 @@ def get_label_thumb(name: str, color: str, square: str):
         except ValueError as e:
             raise HTTPException(400, str(e))
     if img is None:
+        # Fall back to bulk-paint cells so the gallery / review grid still
+        # shows a thumbnail when this square was only captured via bulk.
+        if color in ("white", "black"):
+            try:
+                bulk_dir = LABEL_STORE.bulk_dir(name, color, square)
+                if bulk_dir.exists():
+                    files = sorted(p for p in bulk_dir.iterdir() if p.suffix == ".jpg")
+                    if files:
+                        cell_img = cv2.imread(str(files[0]))
+                        if cell_img is not None:
+                            return {"exists": True, "image": to_b64(cell_img)}
+            except Exception:
+                pass
         return {"exists": False, "image": None}
     # crop the relevant cell for retake thumbnails (only when color != empty)
     if color != "empty":
@@ -2115,10 +2161,11 @@ def capture_empty_for_dataset(name: str, payload: LabelingCaptureEmptyPayload):
         raise HTTPException(409, "Labeling capture already running")
     meta = LABEL_STORE.load(name)
     frames_count = int(payload.frames or meta.settings.frames_per_square)
+    mode = payload.mode if payload.mode in ("overwrite", "append") else "overwrite"
     LABELING_BUSY["busy"] = True
     try:
         frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
-        saved = LABEL_STORE.write_empty_frames(name, frames)
+        saved = LABEL_STORE.write_empty_frames(name, frames, mode=mode)
     finally:
         LABELING_BUSY["busy"] = False
     return {"saved_frames": saved, **_meta_response(name)}
@@ -2145,9 +2192,10 @@ def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload)
         # If a robot is connected and we have a home calibration, self-heal
         # by sending `home` (which blocks until the move completes) before
         # verifying. Refuse to capture if it still isn't parked.
+        # Manual-mode callers opt out entirely so capture never moves the arm.
         port = robot_adapter.connected_port() or robot_adapter.find_port()
         home_pt = _home_point()
-        if port and home_pt:
+        if not payload.skip_arm_home_check and port and home_pt:
             try:
                 pos_resp = robot_adapter.send_commands(
                     ["pos"], port, 9600, max_wait=5.0, stop_on="Position:"
@@ -2160,10 +2208,78 @@ def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload)
                 home_resp = _send_motion(["home"], port, 9600)
                 _verify_arm_home(home_resp, port, 9600)
         frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
-        saved = LABEL_STORE.write_square_frames(name, color, payload.square.lower(), frames)
+        mode = payload.mode if payload.mode in ("overwrite", "append") else "overwrite"
+        saved = LABEL_STORE.write_square_frames(
+            name, color, payload.square.lower(), frames, mode=mode
+        )
     finally:
         LABELING_BUSY["busy"] = False
     return {"saved_frames": saved, **_meta_response(name)}
+
+
+@app.post("/api/labeling/datasets/{name}/capture-bulk")
+def capture_bulk_for_dataset(name: str, payload: LabelingCaptureBulkPayload):
+    """Take one (or a few) warped board photos and save per-cell crops for
+    every square the caller has labeled.
+
+    The painted-board paradigm: the user places multiple pieces on the board,
+    paints each occupied square's color (and optionally marks some empty
+    squares), then hits capture. The backend extracts each painted cell from
+    the warped image and appends it to ``bulk/<color>/<sq>/`` so the CNN
+    dataset builder can pick it up later.
+    """
+    if not LABEL_STORE.exists(name):
+        raise HTTPException(404, f"Dataset not found: {name}")
+    if LABELING_BUSY["busy"]:
+        raise HTTPException(409, "Labeling capture already running")
+    if not payload.labels:
+        raise HTTPException(400, "labels is empty — paint at least one square")
+    # Normalize and validate labels up front so a bad request fails before we
+    # touch the camera.
+    norm: dict[str, str] = {}
+    for raw_sq, raw_lbl in payload.labels.items():
+        sq = str(raw_sq).lower().strip()
+        if sq not in LABELING_SQUARES:
+            raise HTTPException(400, f"Invalid square in labels: {raw_sq}")
+        lbl = str(raw_lbl).lower().strip()
+        if lbl not in ("empty", "white", "black"):
+            raise HTTPException(400, f"Invalid label for {sq}: {raw_lbl}")
+        norm[sq] = lbl
+
+    meta = LABEL_STORE.load(name)
+    frames_count = max(1, int(payload.frames or 1))
+    settle_ms = (
+        int(payload.settle_ms)
+        if payload.settle_ms is not None
+        else meta.settings.settle_ms
+    )
+    LABELING_BUSY["busy"] = True
+    try:
+        # Capture <frames_count> warped board photos. For each, slice into 64
+        # cells and append the painted ones.
+        labeling_params = payload.params.model_copy(update={"apply_inner_warp": True})
+        totals = {"empty": 0, "white": 0, "black": 0}
+        for fi in range(frames_count):
+            source_path = str(
+                _capture_or_resolve_image(labeling_params, capture=payload.capture)
+            )
+            warped = _warped_board_for_tuning(labeling_params, source_path)
+            cells = extract_8x8_cells(warped)
+            # Build a square -> cell-image map using the rotated mapping shared
+            # by the CNN builder so the crop saved to "a1" is actually a1.
+            cells_by_square: dict[str, np.ndarray] = {}
+            for cell in cells:
+                sq = _rc_to_square(cell.row, cell.col)
+                if sq is not None:
+                    cells_by_square[sq] = cell.image
+            written = LABEL_STORE.write_bulk_cells(name, norm, cells_by_square)
+            for k in totals:
+                totals[k] += written.get(k, 0)
+            if settle_ms > 0 and fi + 1 < frames_count:
+                time.sleep(settle_ms / 1000.0)
+    finally:
+        LABELING_BUSY["busy"] = False
+    return {"cells_written": totals, **_meta_response(name)}
 
 
 @app.post("/api/labeling/datasets/{name}/arm")
@@ -2429,6 +2545,7 @@ def cnn_list_source_datasets():
         empty_dir = child / "empty"
         white_dir = child / "white"
         black_dir = child / "black"
+        bulk_dir = child / "bulk"
         empty_frames = sum(1 for _ in empty_dir.glob("*.jpg")) if empty_dir.exists() else 0
         white_squares = sum(1 for d in white_dir.iterdir() if d.is_dir()) if white_dir.exists() else 0
         black_squares = sum(1 for d in black_dir.iterdir() if d.is_dir()) if black_dir.exists() else 0
@@ -2440,6 +2557,14 @@ def cnn_list_source_datasets():
             sum(1 for d in black_dir.iterdir() if d.is_dir() for _ in d.glob("*.jpg"))
             if black_dir.exists() else 0
         )
+        bulk_cells = {"empty": 0, "white": 0, "black": 0}
+        if bulk_dir.exists():
+            for cls in ("empty", "white", "black"):
+                cls_dir = bulk_dir / cls
+                if cls_dir.exists():
+                    bulk_cells[cls] = sum(
+                        1 for d in cls_dir.iterdir() if d.is_dir() for _ in d.glob("*.jpg")
+                    )
         out.append({
             "name": child.name,
             "empty_frames": empty_frames,
@@ -2447,7 +2572,13 @@ def cnn_list_source_datasets():
             "white_frames": white_frames,
             "black_squares": black_squares,
             "black_frames": black_frames,
-            "total_frames": empty_frames + white_frames + black_frames,
+            "bulk_empty_cells": bulk_cells["empty"],
+            "bulk_white_cells": bulk_cells["white"],
+            "bulk_black_cells": bulk_cells["black"],
+            "total_frames": (
+                empty_frames + white_frames + black_frames
+                + bulk_cells["empty"] + bulk_cells["white"] + bulk_cells["black"]
+            ),
         })
     return {"datasets": out}
 
@@ -2935,33 +3066,95 @@ class CnnFeedbackPayload(BaseModel):
 
 @app.post("/api/cnn/feedback")
 def cnn_feedback(payload: CnnFeedbackPayload):
+    """Record a "this prediction was wrong" correction by writing the cell
+    crop as a bulk-paint cell back into the source labeling dataset.
+
+    The next CNN dataset build will pick it up automatically (the builder
+    iterates ``bulk/<class>/<sq>/`` and copies each cell into train/val).
+    Falls back to the legacy jsonl queue when the source can't be resolved
+    (e.g. a model trained before source.json existed) so feedback is never
+    silently dropped.
+    """
     if payload.true_label not in {"empty", "white", "black"}:
         raise HTTPException(400, "true_label must be one of empty/white/black")
 
     run_id = payload.run_id
-    # Find the dataset this run was trained on, so we can write next to it.
+    # 1) run_id → cnn_<name> via metrics.json
     metrics_path = CNN_MODELS_DIR / run_id / "metrics.json"
-    dataset = None
+    cnn_dataset = None
     if metrics_path.exists():
         try:
-            dataset = json.loads(metrics_path.read_text()).get("dataset")
+            cnn_dataset = json.loads(metrics_path.read_text()).get("dataset")
         except Exception:
-            dataset = None
-    if not dataset:
+            cnn_dataset = None
+    if not cnn_dataset:
         raise HTTPException(404, f"Cannot resolve dataset for run {run_id}")
 
-    queue_path = LABELED_DATASETS_DIR / dataset / "retrain_queue.jsonl"
+    # 2) cnn_<name> → source labeling dataset via source.json (written by
+    #    build_cnn_dataset). Older runs may not have this — fall back to a
+    #    jsonl queue so we don't lose the correction.
+    source_json = LABELED_DATASETS_DIR / cnn_dataset / "source.json"
+    source_name = None
+    if source_json.exists():
+        try:
+            source_name = json.loads(source_json.read_text()).get("source_dataset")
+        except Exception:
+            source_name = None
+
+    sq = _rc_to_square(payload.row, payload.col)
+    if not sq:
+        raise HTTPException(400, f"Invalid cell row={payload.row} col={payload.col}")
+
+    # Decode the 100x100 crop from the scan panel. The frontend always sends
+    # one — but be defensive in case it doesn't.
+    crop_img = None
+    if payload.crop_b64:
+        try:
+            import base64
+            raw = base64.b64decode(payload.crop_b64)
+            arr = np.frombuffer(raw, dtype=np.uint8)
+            crop_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception:
+            crop_img = None
+
+    if source_name and LABEL_STORE.exists(source_name) and crop_img is not None:
+        # Append the crop as a single-cell bulk entry so the next CNN build
+        # consumes it. Same path as the bulk-paint capture flow.
+        labels = {sq: payload.true_label}
+        written = LABEL_STORE.write_bulk_cells(
+            source_name, labels, {sq: crop_img}
+        )
+        return {
+            "queued": False,
+            "appended_to_source": True,
+            "source_dataset": source_name,
+            "square": sq,
+            "true_label": payload.true_label,
+            "cells_written": written,
+        }
+
+    # Fallback path: keep the legacy jsonl queue so corrections aren't lost
+    # when the cnn dataset has no source link or the crop was missing.
+    queue_path = LABELED_DATASETS_DIR / cnn_dataset / "retrain_queue.jsonl"
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "row": payload.row,
         "col": payload.col,
+        "square": sq,
         "true_label": payload.true_label,
         "crop_b64": payload.crop_b64,
         "ts": time.time(),
     }
     with queue_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
-    return {"queued": True, "queue_path": str(queue_path)}
+    return {
+        "queued": True,
+        "queue_path": str(queue_path),
+        "reason": (
+            "source dataset not resolvable — rebuild the CNN dataset to get a "
+            "source.json link, then future feedback will append directly."
+        ),
+    }
 
 
 if __name__ == "__main__":

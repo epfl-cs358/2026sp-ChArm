@@ -49,6 +49,7 @@ export default function CnnScanPanel({ initialScan = null }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
 
   const refreshActive = useCallback(async () => {
     try {
@@ -103,14 +104,25 @@ export default function CnnScanPanel({ initialScan = null }: Props) {
     async (trueLabel: LabelKey) => {
       if (!scan || !selectedCell || !active?.run_id) return;
       setFeedbackBusy(true);
+      setFeedbackMsg(null);
       try {
-        await api.cnnFeedback({
+        const res = await api.cnnFeedback({
           run_id: active.run_id,
           row: selectedCell.row,
           col: selectedCell.col,
           true_label: trueLabel,
           crop_b64: selectedCrop ?? undefined,
         });
+        if (res.appended_to_source) {
+          setFeedbackMsg(
+            `Saved as bulk cell to source dataset "${res.source_dataset}" at ${res.square}. ` +
+              `Re-run Step 3 (build) + Step 4 (train) to fold it into the model.`,
+          );
+        } else {
+          setFeedbackMsg(
+            `Queued for retrain. ${res.reason ?? "Rebuild the CNN dataset so future feedback can append directly."}`,
+          );
+        }
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -323,7 +335,10 @@ export default function CnnScanPanel({ initialScan = null }: Props) {
                     className="text-xs font-jetbrains flex flex-col gap-1.5 pt-2 border-t"
                     style={{ color: "var(--charm-muted)", borderColor: "var(--charm-border)" }}
                   >
-                    <span>mark this prediction as wrong — adds to retrain queue:</span>
+                    <span>
+                      mark this prediction as wrong — appends a hard-negative
+                      bulk cell to the source dataset:
+                    </span>
                     <div className="flex gap-2">
                       {(["empty", "white", "black"] as const).map((cls) =>
                         cls === selectedPrediction.label ? null : (
@@ -339,6 +354,9 @@ export default function CnnScanPanel({ initialScan = null }: Props) {
                         ),
                       )}
                     </div>
+                    {feedbackMsg && (
+                      <span style={{ color: "var(--charm-cyan)" }}>{feedbackMsg}</span>
+                    )}
                   </div>
                 </>
               ) : (

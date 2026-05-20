@@ -6,6 +6,10 @@ Storage layout under ``python_code/labeled_datasets/<name>/``:
     empty/frame_0.jpg ...    — N frames of the empty board (warped)
     white/<sq>/frame_0.jpg   — N frames of a white piece at <sq>
     black/<sq>/frame_0.jpg   — N frames of a black piece at <sq>
+    bulk/<color>/<sq>/cell_*.jpg
+                             — single-cell crops (100x100) from bulk-paint
+                               sessions where many squares are labeled from
+                               one capture. color ∈ {empty, white, black}.
     exemplar_config.json     — produced by compute_stats (per-square features)
     accuracy.json            — produced by compute_stats (per-square LOO accuracy)
 """
@@ -16,6 +20,7 @@ import json
 import re
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -93,6 +98,10 @@ class DatasetMetadata:
     empty_frames: int = 0
     white: dict[str, int] = field(default_factory=dict)
     black: dict[str, int] = field(default_factory=dict)
+    # Per-square counts of single-cell crops captured via bulk paint.
+    bulk_empty: dict[str, int] = field(default_factory=dict)
+    bulk_white: dict[str, int] = field(default_factory=dict)
+    bulk_black: dict[str, int] = field(default_factory=dict)
     has_exemplar_config: bool = False
     has_accuracy: bool = False
 
@@ -105,6 +114,9 @@ class DatasetMetadata:
             "empty_frames": self.empty_frames,
             "white": self.white,
             "black": self.black,
+            "bulk_empty": self.bulk_empty,
+            "bulk_white": self.bulk_white,
+            "bulk_black": self.bulk_black,
             "has_exemplar_config": self.has_exemplar_config,
             "has_accuracy": self.has_accuracy,
         }
@@ -119,6 +131,9 @@ class DatasetMetadata:
             empty_frames=int(data.get("empty_frames", 0)),
             white={k: int(v) for k, v in data.get("white", {}).items()},
             black={k: int(v) for k, v in data.get("black", {}).items()},
+            bulk_empty={k: int(v) for k, v in data.get("bulk_empty", {}).items()},
+            bulk_white={k: int(v) for k, v in data.get("bulk_white", {}).items()},
+            bulk_black={k: int(v) for k, v in data.get("bulk_black", {}).items()},
             has_exemplar_config=bool(data.get("has_exemplar_config", False)),
             has_accuracy=bool(data.get("has_accuracy", False)),
         )
@@ -200,16 +215,26 @@ class DatasetStore:
         existing = [p for p in d.iterdir() if p.is_file() and p.suffix == ".jpg"]
         return len(existing)
 
-    def write_empty_frames(self, name: str, frames: list[np.ndarray]) -> int:
-        """Overwrite empty frames with a fresh batch and return count saved."""
+    def write_empty_frames(
+        self,
+        name: str,
+        frames: list[np.ndarray],
+        mode: str = "overwrite",
+    ) -> int:
+        """Write empty frames; mode ∈ {"overwrite", "append"}.
+
+        Returns the number of frames just written. The metadata count reflects
+        the total frames on disk after the write.
+        """
         d = self.empty_dir(name)
-        if d.exists():
+        if mode == "overwrite" and d.exists():
             shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
+        start = self._next_frame_index(d) if mode == "append" else 0
         for i, frame in enumerate(frames):
-            cv2.imwrite(str(d / f"frame_{i}.jpg"), frame)
+            cv2.imwrite(str(d / f"frame_{start + i}.jpg"), frame)
         meta = self.load(name)
-        meta.empty_frames = len(frames)
+        meta.empty_frames = self._next_frame_index(d)
         self.save(meta)
         return len(frames)
 
@@ -219,22 +244,96 @@ class DatasetStore:
         color: str,
         square: str,
         frames: list[np.ndarray],
+        mode: str = "overwrite",
     ) -> int:
-        """Overwrite frames for a (color, square) cell. Used for first capture and retake."""
+        """Write frames for a (color, square) cell.
+
+        mode ∈ {"overwrite", "append"}. Retakes use "overwrite"; add-more-data
+        flows use "append" so existing frames are preserved and new ones are
+        suffixed with the next available index.
+        """
         d = self.square_dir(name, color, square)
-        if d.exists():
+        if mode == "overwrite" and d.exists():
             shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
+        start = self._next_frame_index(d) if mode == "append" else 0
         for i, frame in enumerate(frames):
-            cv2.imwrite(str(d / f"frame_{i}.jpg"), frame)
+            cv2.imwrite(str(d / f"frame_{start + i}.jpg"), frame)
         meta = self.load(name)
         bucket = meta.white if color == "white" else meta.black
-        bucket[square.lower()] = len(frames)
+        bucket[square.lower()] = self._next_frame_index(d)
         # invalidate downstream artifacts since data changed
         meta.has_exemplar_config = False
         meta.has_accuracy = False
         self.save(meta)
         return len(frames)
+
+    # --------- bulk-paint cell storage ---------
+
+    def bulk_dir(self, name: str, color: str, square: str) -> Path:
+        color = _check_bulk_color(color)
+        sq = _check_square(square)
+        return self.dataset_dir(name) / "bulk" / color / sq
+
+    def write_bulk_cells(
+        self,
+        name: str,
+        labels: dict[str, str],
+        cells_by_square: dict[str, np.ndarray],
+    ) -> dict[str, int]:
+        """Append single-cell crops to ``bulk/<color>/<sq>/`` for each label.
+
+        ``labels`` maps square → "empty" | "white" | "black". ``cells_by_square``
+        maps square → 100x100 BGR image (the warped board's per-cell crop).
+        Squares missing from either dict are skipped silently. Returns a dict
+        ``{"empty": n, "white": n, "black": n}`` of cells just written.
+        """
+        meta = self.load(name)
+        written = {"empty": 0, "white": 0, "black": 0}
+        for sq, label in labels.items():
+            label = label.lower().strip()
+            if label not in ("empty", "white", "black"):
+                continue
+            cell = cells_by_square.get(sq)
+            if cell is None:
+                continue
+            d = self.bulk_dir(name, label, sq)
+            d.mkdir(parents=True, exist_ok=True)
+            fname = d / f"cell_{uuid.uuid4().hex}.jpg"
+            cv2.imwrite(str(fname), cell)
+            written[label] += 1
+            bucket = (
+                meta.bulk_empty
+                if label == "empty"
+                else meta.bulk_white
+                if label == "white"
+                else meta.bulk_black
+            )
+            bucket[sq] = bucket.get(sq, 0) + 1
+        if any(written.values()):
+            meta.has_exemplar_config = False
+            meta.has_accuracy = False
+            self.save(meta)
+        return written
+
+    def iter_bulk_cells(
+        self, name: str, color: str
+    ) -> Iterable[tuple[str, np.ndarray]]:
+        """Yield (square, cell_image) for every bulk cell of the given color."""
+        color = _check_bulk_color(color)
+        base = self.dataset_dir(name) / "bulk" / color
+        if not base.exists():
+            return
+        for sq_dir in sorted(base.iterdir()):
+            if not sq_dir.is_dir():
+                continue
+            sq = sq_dir.name
+            for p in sorted(sq_dir.iterdir()):
+                if p.suffix != ".jpg":
+                    continue
+                img = cv2.imread(str(p))
+                if img is not None:
+                    yield sq, img
 
     def read_square_first_frame(
         self, name: str, color: str, square: str
@@ -287,6 +386,13 @@ def _check_color(color: str) -> str:
     c = color.lower().strip()
     if c not in ("white", "black"):
         raise ValueError(f"Invalid color: {color}")
+    return c
+
+
+def _check_bulk_color(color: str) -> str:
+    c = color.lower().strip()
+    if c not in ("empty", "white", "black"):
+        raise ValueError(f"Invalid bulk color: {color}")
     return c
 
 

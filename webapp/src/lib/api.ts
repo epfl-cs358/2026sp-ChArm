@@ -310,6 +310,7 @@ export const api = {
     params: PipelineParams;
     capture?: boolean;
     frames?: number;
+    mode?: "overwrite" | "append";
   }) =>
     post<{ saved_frames: number } & LabelDatasetResponse>(
       `/api/labeling/datasets/${encodeURIComponent(name)}/capture-empty`,
@@ -322,9 +323,23 @@ export const api = {
     params: PipelineParams;
     capture?: boolean;
     frames?: number;
+    skip_arm_home_check?: boolean;
+    mode?: "overwrite" | "append";
   }) =>
     post<{ saved_frames: number } & LabelDatasetResponse>(
       `/api/labeling/datasets/${encodeURIComponent(name)}/capture-square`,
+      payload,
+    ),
+
+  captureLabelBulk: (name: string, payload: {
+    labels: Record<string, "empty" | "white" | "black">;
+    params: PipelineParams;
+    capture?: boolean;
+    frames?: number;
+    settle_ms?: number;
+  }) =>
+    post<{ cells_written: { empty: number; white: number; black: number } } & LabelDatasetResponse>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/capture-bulk`,
       payload,
     ),
 
@@ -436,7 +451,16 @@ export const api = {
     true_label: "empty" | "white" | "black";
     crop_b64?: string;
   }) =>
-    post<{ queued: boolean; queue_path: string }>("/api/cnn/feedback", payload),
+    post<{
+      queued: boolean;
+      appended_to_source?: boolean;
+      source_dataset?: string;
+      square?: string;
+      true_label?: string;
+      cells_written?: { empty: number; white: number; black: number };
+      queue_path?: string;
+      reason?: string;
+    }>("/api/cnn/feedback", payload),
 };
 
 // --- CNN-related response types ---
@@ -455,6 +479,9 @@ export interface CnnSourceDatasetMeta {
   white_frames: number;
   black_squares: number;
   black_frames: number;
+  bulk_empty_cells?: number;
+  bulk_white_cells?: number;
+  bulk_black_cells?: number;
   total_frames: number;
 }
 
@@ -587,6 +614,9 @@ export interface LabelDatasetMeta {
   empty_frames: number;
   white: Record<string, number>;
   black: Record<string, number>;
+  bulk_empty?: Record<string, number>;
+  bulk_white?: Record<string, number>;
+  bulk_black?: Record<string, number>;
   has_exemplar_config: boolean;
   has_accuracy: boolean;
 }
