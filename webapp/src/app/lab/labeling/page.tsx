@@ -114,6 +114,7 @@ export default function LabelingWizardPage() {
   const whiteRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
   const [whiteRunState, setWhiteRunState] = useState<typeof whiteRunRef.current>("idle");
   const [whiteCurrentSquare, setWhiteCurrentSquare] = useState<string>("");
+  const whitePawnSquareRef = useRef<string | null>(null);
 
   // ---------- Step 9: black piece placed confirm ----------
   const [blackPlaced, setBlackPlaced] = useState(false);
@@ -124,6 +125,7 @@ export default function LabelingWizardPage() {
   const blackRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
   const [blackRunState, setBlackRunState] = useState<typeof blackRunRef.current>("idle");
   const [blackCurrentSquare, setBlackCurrentSquare] = useState<string>("");
+  const blackPawnSquareRef = useRef<string | null>(null);
 
   // ---------- Step 12: stats ----------
   const [accuracy, setAccuracy] = useState<LabelAccuracyReport | null>(null);
@@ -302,25 +304,24 @@ export default function LabelingWizardPage() {
   type SweepColor = "white" | "black";
 
   const doSquare = useCallback(
-    async (color: SweepColor, square: string) => {
+    async (color: SweepColor, square: string, fromSquare: string) => {
       if (!activeName || !meta) return;
-      // 1) pick from source
-      await api.labelingArm(activeName, { color, square, action: "pickup_source" });
-      // 2) place on target
-      await api.labelingArm(activeName, { color, square, action: "place_target" });
-      // 3) park the arm at home so it is out of frame for every captured picture
-      await api.labelingArm(activeName, { color, square, action: "home" });
-      // 4) wait an extra beat past settle so the arm clears the frame
-      await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms / 2)));
-      // 5) capture frames
+      // 1) move pawn onto the target square and park at home
+      await api.labelingArm(activeName, {
+        color,
+        square,
+        action: "move_piece",
+        from_square: fromSquare,
+      });
+      // 2) wait for the arm to settle before capturing
+      await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
+      // 3) capture frames
       await api.captureLabelSquare(activeName, {
         color,
         square,
         params: LABELING_PARAMS,
         capture: true,
       });
-      // 5) return to source
-      await api.labelingArm(activeName, { color, square, action: "return_to_source" });
       const fresh = await api.getLabelDataset(activeName);
       setMeta(fresh.metadata);
     },
@@ -336,9 +337,14 @@ export default function LabelingWizardPage() {
       const setIdx = color === "white" ? setWhiteIdx : setBlackIdx;
       const setCurrentSquare =
         color === "white" ? setWhiteCurrentSquare : setBlackCurrentSquare;
+      const pawnSquareRef = color === "white" ? whitePawnSquareRef : blackPawnSquareRef;
 
       runRef.current = "running";
       setRunState("running");
+
+      if (!pawnSquareRef.current || idxRef.current === 0) {
+        pawnSquareRef.current = meta.settings.source_square;
+      }
 
       for (let i = idxRef.current; i < ALL_SQUARES.length; i++) {
         // honor abort/pause between squares.
@@ -362,7 +368,9 @@ export default function LabelingWizardPage() {
         setIdx(i);
         setCurrentSquare(sq);
         try {
-          await doSquare(color, sq);
+          const fromSquare = pawnSquareRef.current ?? meta.settings.source_square;
+          await doSquare(color, sq, fromSquare);
+          pawnSquareRef.current = sq;
         } catch (e) {
           setError(`square ${sq}: ${(e as Error).message}`);
           runRef.current = "paused";
@@ -404,7 +412,14 @@ export default function LabelingWizardPage() {
     setBusy(true);
     setError(null);
     try {
-      await doSquare(color, sq);
+      if (!meta) return;
+      await doSquare(color, sq, meta.settings.source_square);
+      await api.labelingArm(activeName, {
+        color,
+        square: meta.settings.source_square,
+        action: "move_piece",
+        from_square: sq,
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1268,8 +1283,8 @@ function CaptureTuner({
   // not the draft, so the number doesn't lie before Apply is pressed.
   const frames = meta.settings.frames_per_square;
   const settleSec = meta.settings.settle_ms / 1000;
-  // Rough heuristic per square: ~10s arm overhead (pickup + place + home +
-  // return_to_source) + frames × (delay + ~0.8s for camera grab and warp).
+  // Rough heuristic per square: ~10s arm overhead (pickup + place + home)
+  // + frames × (delay + ~0.8s for camera grab and warp).
   const perSquareSec = 10 + frames * (settleSec + 0.8);
   const totalMin = (perSquareSec * 64) / 60;
   return (

@@ -30,7 +30,7 @@ void ScaraArm::calibrate() {
     Serial.println("Calbrating lead screw");
     leadScrew.calibrate();
     Serial.println("Lead screw calibration complete");
-    leadScrew.moveBy_mm(60.0f); //go up to clear king and box during rest of calibration
+    leadScrew.moveBy_mm(120.0f); //go up to clear king and box during rest of calibration
 
     Serial.println("Calibrating base joint");
     //set new soft limits
@@ -39,7 +39,7 @@ void ScaraArm::calibrate() {
     joint1.moveBy(137.0f);
     joint1.setZero();
     joint1.setMinAngle(-137.0f);
-    joint1.setMaxAngle(137.0f);
+    joint1.setMaxAngle(230.0f);
 
     Serial.println("Calibrating forearm joint");
     joint2.calibrate();

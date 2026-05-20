@@ -43,7 +43,7 @@ static bool calibrationMode = false;
 static const float JOG_XY_MM     = 3.0f;
 static const float JOG_Z_MM      = 1.5f;
 static const float CAL_JOG_XY_MM = 1.0f;
-static const float CAL_JOG_Z_MM  = 0.5f;
+static const float CAL_JOG_Z_MM  = 7.5f;
 
 // ── Board calibration ────────────────────────────────────────────────────────
 // 3-corner vector decomposition: capture arm (x,y) at H1, A1, H8.

@@ -1,22 +1,25 @@
 {
   "name": "SPOT_20MAI_LIGHT",
   "created_at": 1779280049.8181133,
-  "updated_at": 1779280900.200218,
+  "updated_at": 1779291297.9960523,
   "settings": {
     "frames_per_square": 2,
-    "settle_ms": 400,
+    "settle_ms": 500,
     "source_square": "h8",
     "piece_type": "pawn",
     "lighting_note": "light environnement"
   },
   "empty_frames": 2,
   "white": {
-    "a1": 2,
-    "b1": 2,
-    "c1": 2,
-    "d1": 2,
-    "e1": 2,
-    "f1": 2
+    "a1": 5,
+    "b1": 5,
+    "c1": 5,
+    "d1": 5,
+    "e1": 5,
+    "f1": 5,
+    "g1": 5,
+    "h1": 5,
+    "a2": 5
   },
   "black": {},
   "has_exemplar_config": false,

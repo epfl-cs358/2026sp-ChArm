@@ -1918,7 +1918,8 @@ class LabelingCaptureSquarePayload(BaseModel):
 class LabelingArmPayload(BaseModel):
     color: str
     square: str  # destination square
-    action: str  # "pickup_source" | "place_target" | "return_to_source" | "home"
+    action: str  # "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece"
+    from_square: Optional[str] = None
     port: Optional[str] = None
     baud: int = 9600
 
@@ -2063,6 +2064,32 @@ def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload)
     frames_count = int(payload.frames or meta.settings.frames_per_square)
     LABELING_BUSY["busy"] = True
     try:
+        # If a robot is connected, wait until it's at its configured `home`
+        # position before taking labeled captures so the arm is out of frame.
+        port = robot_adapter.connected_port() or robot_adapter.find_port()
+        if port:
+            baud = 9600
+            try:
+                calib = robot_adapter.load_calibration(ROBOT_CAL_PATH)
+                home_pt = calib.get("home") or {}
+                if home_pt:
+                    deadline = time.time() + max(5.0, meta.settings.settle_ms / 1000.0 + 5.0)
+                    while time.time() < deadline:
+                        try:
+                            resp = robot_adapter.send_commands(["pos"], port, baud, max_wait=2.0)
+                            pos = robot_adapter.parse_position(resp)
+                            if pos is not None:
+                                dx = abs(pos.get("x", 0.0) - float(home_pt.get("x", 0.0)))
+                                dy = abs(pos.get("y", 0.0) - float(home_pt.get("y", 0.0)))
+                                dz = abs(pos.get("z", 0.0) - float(home_pt.get("z", 0.0)))
+                                if dx < 5.0 and dy < 5.0 and dz < 15.0:
+                                    break
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+            except Exception:
+                pass
+
         frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
         saved = LABEL_STORE.write_square_frames(name, color, payload.square.lower(), frames)
     finally:
@@ -2093,11 +2120,18 @@ def labeling_arm(name: str, payload: LabelingArmPayload):
     if action == "pickup_source":
         commands = [f"pick {piece} {src}"]
     elif action == "place_target":
-        commands = [f"put {piece} {target}"]
+        # After placing the piece on the target square, send the arm home so
+        # captures can be taken reliably with the arm out of the camera view.
+        commands = [f"put {piece} {target}", "home"]
     elif action == "return_to_source":
         commands = [f"pick {piece} {target}", f"put {piece} {src}", "home"]
     elif action == "home":
         commands = ["home"]
+    elif action == "move_piece":
+        from_square = payload.from_square
+        if not from_square:
+            raise HTTPException(400, "from_square is required for move_piece")
+        commands = [f"pick {piece} {from_square.lower()}", f"put {piece} {target}", "home"]
     else:
         raise HTTPException(400, f"Unknown action: {action}")
 

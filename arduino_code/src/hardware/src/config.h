@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const unsigned int DEFAULT_STEP_DELAY_US = 300;
+const unsigned int DEFAULT_STEP_DELAY_US = 400;
 
 // Motor
 const int MICROSTEPS = 16;
