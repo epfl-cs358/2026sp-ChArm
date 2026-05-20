@@ -331,7 +331,7 @@ export const api = {
   labelingArm: (name: string, payload: {
     color: "white" | "black";
     square: string;
-    action: "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece";
+    action: "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece" | "pick_and_place";
     from_square?: string;
     port?: string;
     baud?: number;

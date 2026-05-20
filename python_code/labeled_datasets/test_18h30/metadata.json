@@ -1,0 +1,17 @@
+{
+  "name": "test_18h30",
+  "created_at": 1779294198.98228,
+  "updated_at": 1779294256.1799405,
+  "settings": {
+    "frames_per_square": 3,
+    "settle_ms": 600,
+    "source_square": "h8",
+    "piece_type": "pawn",
+    "lighting_note": ""
+  },
+  "empty_frames": 3,
+  "white": {},
+  "black": {},
+  "has_exemplar_config": false,
+  "has_accuracy": false
+}

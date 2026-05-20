@@ -1918,7 +1918,7 @@ class LabelingCaptureSquarePayload(BaseModel):
 class LabelingArmPayload(BaseModel):
     color: str
     square: str  # destination square
-    action: str  # "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece"
+    action: str  # "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece" | "pick_and_place"
     from_square: Optional[str] = None
     port: Optional[str] = None
     baud: int = 9600
@@ -1936,6 +1936,82 @@ def _meta_response(name: str) -> dict:
             "accuracy": str(accuracy_path) if accuracy_path.exists() else None,
         },
     }
+
+
+# Per-motion-command wait. Long enough to cover a full pick-put-home cycle
+# on a slow arm, but bounded so a stuck firmware can't hang the API.
+_MOTION_MAX_WAIT_S = 60.0
+
+# Tolerances when checking whether the arm has parked at its home pose.
+_HOME_XY_TOL_MM = 5.0
+_HOME_Z_TOL_MM = 15.0
+
+
+def _send_motion(commands: list[str], port: Optional[str], baud: int) -> list[str]:
+    """Send motion commands, waiting for each to actually finish on the arm.
+
+    Every blocking firmware command (`home`, `pick`, `put`, `moveXYZ`, ...)
+    falls through to a trailing `Position: (x, y, z)` print *after* the
+    stepper motion completes. We use that as the per-command completion
+    marker so `send_commands` doesn't return mid-move.
+    """
+    return robot_adapter.send_commands(
+        commands,
+        port,
+        baud,
+        max_wait=_MOTION_MAX_WAIT_S,
+        stop_on="Position:",
+    )
+
+
+def _home_point() -> Optional[dict]:
+    try:
+        calib = robot_adapter.load_calibration(ROBOT_CAL_PATH)
+    except Exception:
+        return None
+    home_pt = calib.get("home") or {}
+    return home_pt or None
+
+
+def _position_matches_home(pos: Optional[dict], home_pt: dict) -> bool:
+    if pos is None:
+        return False
+    dx = abs(pos.get("x", 0.0) - float(home_pt.get("x", 0.0)))
+    dy = abs(pos.get("y", 0.0) - float(home_pt.get("y", 0.0)))
+    dz = abs(pos.get("z", 0.0) - float(home_pt.get("z", 0.0)))
+    return dx < _HOME_XY_TOL_MM and dy < _HOME_XY_TOL_MM and dz < _HOME_Z_TOL_MM
+
+
+def _verify_arm_home(responses: list[str], port: Optional[str], baud: int) -> None:
+    """Confirm the arm is parked at home. Raises HTTPException if not.
+
+    Uses the trailing `Position:` line that the firmware prints after a
+    blocking command — no polling. If the move-response doesn't already
+    contain a matching position, do a single explicit `pos` query as a
+    safety net before giving up.
+    """
+    if not port:
+        port = robot_adapter.connected_port() or robot_adapter.find_port()
+    if not port:
+        return
+    home_pt = _home_point()
+    if not home_pt:
+        return
+    if _position_matches_home(robot_adapter.parse_position(responses), home_pt):
+        return
+    try:
+        resp = robot_adapter.send_commands(
+            ["pos"], port, baud, max_wait=5.0, stop_on="Position:"
+        )
+        if _position_matches_home(robot_adapter.parse_position(resp), home_pt):
+            return
+        reported = robot_adapter.parse_position(resp)
+    except Exception as e:
+        raise HTTPException(504, f"Arm home verification failed: {e}")
+    raise HTTPException(
+        504,
+        f"Arm did not reach home pose. Expected {home_pt}, got {reported}.",
+    )
 
 
 def _capture_warped_frames(params: PipelineParams, count: int, settle_ms: int, do_capture: bool) -> list[np.ndarray]:
@@ -2064,32 +2140,25 @@ def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload)
     frames_count = int(payload.frames or meta.settings.frames_per_square)
     LABELING_BUSY["busy"] = True
     try:
-        # If a robot is connected, wait until it's at its configured `home`
-        # position before taking labeled captures so the arm is out of frame.
+        # Safety net: sweep callers already homed the arm and waited for the
+        # trailing `Position:` marker, but a direct/retake call may not have.
+        # If a robot is connected and we have a home calibration, self-heal
+        # by sending `home` (which blocks until the move completes) before
+        # verifying. Refuse to capture if it still isn't parked.
         port = robot_adapter.connected_port() or robot_adapter.find_port()
-        if port:
-            baud = 9600
+        home_pt = _home_point()
+        if port and home_pt:
             try:
-                calib = robot_adapter.load_calibration(ROBOT_CAL_PATH)
-                home_pt = calib.get("home") or {}
-                if home_pt:
-                    deadline = time.time() + max(5.0, meta.settings.settle_ms / 1000.0 + 5.0)
-                    while time.time() < deadline:
-                        try:
-                            resp = robot_adapter.send_commands(["pos"], port, baud, max_wait=2.0)
-                            pos = robot_adapter.parse_position(resp)
-                            if pos is not None:
-                                dx = abs(pos.get("x", 0.0) - float(home_pt.get("x", 0.0)))
-                                dy = abs(pos.get("y", 0.0) - float(home_pt.get("y", 0.0)))
-                                dz = abs(pos.get("z", 0.0) - float(home_pt.get("z", 0.0)))
-                                if dx < 5.0 and dy < 5.0 and dz < 15.0:
-                                    break
-                        except Exception:
-                            pass
-                        time.sleep(0.2)
+                pos_resp = robot_adapter.send_commands(
+                    ["pos"], port, 9600, max_wait=5.0, stop_on="Position:"
+                )
             except Exception:
-                pass
-
+                pos_resp = []
+            if not _position_matches_home(
+                robot_adapter.parse_position(pos_resp), home_pt
+            ):
+                home_resp = _send_motion(["home"], port, 9600)
+                _verify_arm_home(home_resp, port, 9600)
         frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
         saved = LABEL_STORE.write_square_frames(name, color, payload.square.lower(), frames)
     finally:
@@ -2102,9 +2171,12 @@ def labeling_arm(name: str, payload: LabelingArmPayload):
     """Drive the arm during dataset capture.
 
     - pickup_source: pick a {color} {piece_type} from the configured source square.
-    - place_target: put it on `square`.
-    - return_to_source: pick it back from `square` and put it on the source.
-    - home: send the arm to its home position.
+    - place_target: put it on `square`, then home.
+    - return_to_source: pick it back from `square`, put it on the source, then home.
+    - home: send the arm to its home position and block until it arrives.
+    - move_piece: pick from `from_square`, put on `square`, then home.
+    - pick_and_place: like move_piece but without the trailing home (caller
+      issues `home` separately so the UI can show distinct phases).
     """
     if not LABEL_STORE.exists(name):
         raise HTTPException(404, f"Dataset not found: {name}")
@@ -2117,26 +2189,48 @@ def labeling_arm(name: str, payload: LabelingArmPayload):
 
     action = payload.action
     commands: list[str]
+    wait_home_after = False
     if action == "pickup_source":
         commands = [f"pick {piece} {src}"]
     elif action == "place_target":
         # After placing the piece on the target square, send the arm home so
         # captures can be taken reliably with the arm out of the camera view.
         commands = [f"put {piece} {target}", "home"]
+        wait_home_after = True
     elif action == "return_to_source":
         commands = [f"pick {piece} {target}", f"put {piece} {src}", "home"]
+        wait_home_after = True
     elif action == "home":
         commands = ["home"]
+        wait_home_after = True
     elif action == "move_piece":
         from_square = payload.from_square
         if not from_square:
             raise HTTPException(400, "from_square is required for move_piece")
         commands = [f"pick {piece} {from_square.lower()}", f"put {piece} {target}", "home"]
+        wait_home_after = True
+    elif action == "pick_and_place":
+        # Like `move_piece` but without the trailing `home`. Use this when the
+        # caller will issue `home` as a separate step (e.g. so the UI can show
+        # an explicit "homing" phase between move and capture).
+        from_square = payload.from_square
+        if not from_square:
+            raise HTTPException(400, "from_square is required for pick_and_place")
+        commands = [f"pick {piece} {from_square.lower()}", f"put {piece} {target}"]
     else:
         raise HTTPException(400, f"Unknown action: {action}")
 
     try:
-        responses = robot_adapter.send_commands(commands, payload.port, payload.baud)
+        responses = _send_motion(commands, payload.port, payload.baud)
+        # The Arduino's `home` command (like `pick`/`put`) blocks on stepper
+        # motion and only prints its trailing `Position:` line once the move
+        # is finished — `_send_motion` waits for that marker per command, so
+        # by the time we're here the arm has stopped. Verify it actually
+        # parked at home before letting the caller capture frames.
+        if wait_home_after:
+            _verify_arm_home(responses, payload.port, payload.baud)
+    except HTTPException:
+        raise
     except Exception as e:
         robot_adapter.close()
         raise HTTPException(500, str(e))

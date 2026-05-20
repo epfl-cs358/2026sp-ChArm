@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import ArucoCalibration from "@/components/ArucoCalibration";
+import { imageSrc } from "@/lib/image";
 
 // --- Step list (also drives the breadcrumb at the top) ---
 const STEPS = [
@@ -109,11 +110,16 @@ export default function LabelingWizardPage() {
 
   // ---------- Step 7: white sweep ----------
   // sweepState: idle, running, paused, aborted, done
+  type SweepPhase = "idle" | "moving" | "homing" | "waiting" | "capturing";
   const [whiteIdx, setWhiteIdx] = useState(0);
   const whiteIdxRef = useRef(0);
   const whiteRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
   const [whiteRunState, setWhiteRunState] = useState<typeof whiteRunRef.current>("idle");
   const [whiteCurrentSquare, setWhiteCurrentSquare] = useState<string>("");
+  const [whitePhase, setWhitePhase] = useState<SweepPhase>("idle");
+  const [whiteCapturedThumbs, setWhiteCapturedThumbs] = useState<
+    { square: string; image: string | null }[]
+  >([]);
   const whitePawnSquareRef = useRef<string | null>(null);
 
   // ---------- Step 9: black piece placed confirm ----------
@@ -125,6 +131,10 @@ export default function LabelingWizardPage() {
   const blackRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
   const [blackRunState, setBlackRunState] = useState<typeof blackRunRef.current>("idle");
   const [blackCurrentSquare, setBlackCurrentSquare] = useState<string>("");
+  const [blackPhase, setBlackPhase] = useState<SweepPhase>("idle");
+  const [blackCapturedThumbs, setBlackCapturedThumbs] = useState<
+    { square: string; image: string | null }[]
+  >([]);
   const blackPawnSquareRef = useRef<string | null>(null);
 
   // ---------- Step 12: stats ----------
@@ -182,6 +192,47 @@ export default function LabelingWizardPage() {
       .then((r) => setEmptyThumb(r.image))
       .catch(() => setEmptyThumb(null));
   }, [activeName, meta?.empty_frames]);
+
+  // Seed the captured-thumb galleries from the dataset on initial load, so a
+  // resumed (or reviewed) sweep shows the previously captured squares too.
+  useEffect(() => {
+    if (!activeName) {
+      setWhiteCapturedThumbs([]);
+      setBlackCapturedThumbs([]);
+      return;
+    }
+    let cancelled = false;
+    const seedColor = async (color: "white" | "black") => {
+      try {
+        const ds = await api.getLabelDataset(activeName);
+        const counts = color === "white" ? ds.metadata.white : ds.metadata.black;
+        const squares = Object.keys(counts).filter((sq) => counts[sq] > 0);
+        if (squares.length === 0) return;
+        // Order by sweep order so newest-first matches the live gallery order
+        squares.sort(
+          (a, b) => ALL_SQUARES.indexOf(b) - ALL_SQUARES.indexOf(a),
+        );
+        const results = await Promise.all(
+          squares.map((sq) =>
+            api
+              .getLabelThumb(activeName, color, sq)
+              .then((r) => ({ square: sq, image: r.exists ? r.image : null }))
+              .catch(() => ({ square: sq, image: null as string | null })),
+          ),
+        );
+        if (cancelled) return;
+        if (color === "white") setWhiteCapturedThumbs(results);
+        else setBlackCapturedThumbs(results);
+      } catch {
+        /* best-effort seeding */
+      }
+    };
+    seedColor("white");
+    seedColor("black");
+    return () => {
+      cancelled = true;
+    };
+  }, [activeName]);
 
   // ---------- handlers: step 1 ----------
   const allStep1Applied = useMemo(
@@ -306,24 +357,53 @@ export default function LabelingWizardPage() {
   const doSquare = useCallback(
     async (color: SweepColor, square: string, fromSquare: string) => {
       if (!activeName || !meta) return;
-      // 1) move pawn onto the target square and park at home
+      const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
+      const setThumbs =
+        color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
+
+      // 1) pick from the previous square, put on the target square (no home yet)
+      setPhase("moving");
       await api.labelingArm(activeName, {
         color,
         square,
-        action: "move_piece",
+        action: "pick_and_place",
         from_square: fromSquare,
       });
-      // 2) wait for the arm to settle before capturing
+
+      // 2) send the arm home — the backend blocks until the arm reaches home
+      //    so we can deterministically capture without the arm in frame.
+      setPhase("homing");
+      await api.labelingArm(activeName, {
+        color,
+        square,
+        action: "home",
+      });
+
+      // 3) settle so any wobble dampens before grabbing frames
+      setPhase("waiting");
       await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
-      // 3) capture frames
+
+      // 4) capture frames for the target square
+      setPhase("capturing");
       await api.captureLabelSquare(activeName, {
         color,
         square,
         params: LABELING_PARAMS,
         capture: true,
       });
+
+      // 5) refresh metadata and add a thumbnail of the just-captured cell
       const fresh = await api.getLabelDataset(activeName);
       setMeta(fresh.metadata);
+      try {
+        const thumb = await api.getLabelThumb(activeName, color, square);
+        setThumbs((prev) => [
+          { square, image: thumb.exists ? thumb.image : null },
+          ...prev.filter((t) => t.square !== square),
+        ]);
+      } catch {
+        // thumbnail is best-effort; ignore failures
+      }
     },
     [activeName, meta],
   );
@@ -337,8 +417,13 @@ export default function LabelingWizardPage() {
       const setIdx = color === "white" ? setWhiteIdx : setBlackIdx;
       const setCurrentSquare =
         color === "white" ? setWhiteCurrentSquare : setBlackCurrentSquare;
+      const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
       const pawnSquareRef = color === "white" ? whitePawnSquareRef : blackPawnSquareRef;
 
+      // Don't start a second loop if one is already running (e.g. user
+      // clicked Start twice). Re-entering runSweep while running would race
+      // two for-loops against the same idxRef.
+      if (runRef.current === "running") return;
       runRef.current = "running";
       setRunState("running");
 
@@ -346,42 +431,49 @@ export default function LabelingWizardPage() {
         pawnSquareRef.current = meta.settings.source_square;
       }
 
-      for (let i = idxRef.current; i < ALL_SQUARES.length; i++) {
-        // honor abort/pause between squares.
-        // runRef is mutated by other handlers, so TS narrowing isn't useful here.
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const state = runRef.current as string;
-          if (state === "aborted") {
-            setRunState("aborted");
+      try {
+        for (let i = idxRef.current; i < ALL_SQUARES.length; i++) {
+          // honor abort/pause between squares.
+          // runRef is mutated by other handlers, so TS narrowing isn't useful here.
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const state = runRef.current as string;
+            if (state === "aborted") {
+              setRunState("aborted");
+              setPhase("idle");
+              return;
+            }
+            if (state === "paused") {
+              setPhase("idle");
+              await new Promise((r) => setTimeout(r, 200));
+              continue;
+            }
+            break;
+          }
+
+          const sq = ALL_SQUARES[i];
+          idxRef.current = i;
+          setIdx(i);
+          setCurrentSquare(sq);
+          try {
+            const fromSquare = pawnSquareRef.current ?? meta.settings.source_square;
+            await doSquare(color, sq, fromSquare);
+            pawnSquareRef.current = sq;
+          } catch (e) {
+            setError(`square ${sq}: ${(e as Error).message}`);
+            runRef.current = "paused";
+            setRunState("paused");
+            setPhase("idle");
             return;
           }
-          if (state === "paused") {
-            await new Promise((r) => setTimeout(r, 200));
-            continue;
-          }
-          break;
         }
-
-        const sq = ALL_SQUARES[i];
-        idxRef.current = i;
-        setIdx(i);
-        setCurrentSquare(sq);
-        try {
-          const fromSquare = pawnSquareRef.current ?? meta.settings.source_square;
-          await doSquare(color, sq, fromSquare);
-          pawnSquareRef.current = sq;
-        } catch (e) {
-          setError(`square ${sq}: ${(e as Error).message}`);
-          runRef.current = "paused";
-          setRunState("paused");
-          return;
-        }
+        idxRef.current = ALL_SQUARES.length;
+        setIdx(ALL_SQUARES.length);
+        runRef.current = "done";
+        setRunState("done");
+      } finally {
+        setPhase("idle");
       }
-      idxRef.current = ALL_SQUARES.length;
-      setIdx(ALL_SQUARES.length);
-      runRef.current = "done";
-      setRunState("done");
     },
     [activeName, meta, doSquare],
   );
@@ -389,21 +481,32 @@ export default function LabelingWizardPage() {
   const pauseSweep = (color: SweepColor) => {
     const runRef = color === "white" ? whiteRunRef : blackRunRef;
     const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
+    // Don't clobber a finished sweep into "paused".
+    if (runRef.current !== "running") return;
     runRef.current = "paused";
     setRunState("paused");
   };
   const resumeSweep = (color: SweepColor) => {
-    if ((color === "white" ? whiteRunRef : blackRunRef).current === "paused") {
-      runSweep(color);
-    } else {
-      runSweep(color);
+    const runRef = color === "white" ? whiteRunRef : blackRunRef;
+    const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
+    // If currently paused, the existing loop is polling runRef.current. Just
+    // flip it back to "running" and let that loop continue — starting a new
+    // runSweep here would race two loops against the same idxRef.
+    if (runRef.current === "paused") {
+      runRef.current = "running";
+      setRunState("running");
+      return;
     }
+    // Otherwise (idle, done, aborted), start fresh from the current index.
+    runSweep(color);
   };
   const abortSweep = (color: SweepColor) => {
     const runRef = color === "white" ? whiteRunRef : blackRunRef;
     const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
+    const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
     runRef.current = "aborted";
     setRunState("aborted");
+    setPhase("idle");
   };
 
   // ---------- handlers: retake one square ----------
@@ -951,12 +1054,14 @@ export default function LabelingWizardPage() {
               currentSquare={whiteCurrentSquare}
               idx={whiteIdx}
               state={whiteRunState}
+              phase={whitePhase}
               onStart={() => runSweep("white")}
               onPause={() => pauseSweep("white")}
               onResume={() => resumeSweep("white")}
               onAbort={() => abortSweep("white")}
               done={whiteDoneCount}
             />
+            <CapturedGallery thumbs={whiteCapturedThumbs} color="white" />
             <NavRow
               forwardDisabled={whiteRunState !== "done" && whiteDoneCount < 64}
               forwardLabel="Continue → Step 8"
@@ -1059,12 +1164,14 @@ export default function LabelingWizardPage() {
               currentSquare={blackCurrentSquare}
               idx={blackIdx}
               state={blackRunState}
+              phase={blackPhase}
               onStart={() => runSweep("black")}
               onPause={() => pauseSweep("black")}
               onResume={() => resumeSweep("black")}
               onAbort={() => abortSweep("black")}
               done={blackDoneCount}
             />
+            <CapturedGallery thumbs={blackCapturedThumbs} color="black" />
             <NavRow
               forwardDisabled={blackRunState !== "done" && blackDoneCount < 64}
               forwardLabel="Continue → Step 11"
@@ -1347,11 +1454,20 @@ function CaptureTuner({
   );
 }
 
+const PHASE_LABEL: Record<"idle" | "moving" | "homing" | "waiting" | "capturing", string> = {
+  idle: "—",
+  moving: "pick + put",
+  homing: "homing",
+  waiting: "settling",
+  capturing: "capturing frames",
+};
+
 function SweepRunner({
   color,
   currentSquare,
   idx,
   state,
+  phase,
   onStart,
   onPause,
   onResume,
@@ -1362,6 +1478,7 @@ function SweepRunner({
   currentSquare: string;
   idx: number;
   state: "idle" | "running" | "paused" | "aborted" | "done";
+  phase: "idle" | "moving" | "homing" | "waiting" | "capturing";
   onStart: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -1370,6 +1487,7 @@ function SweepRunner({
 }) {
   const total = ALL_SQUARES.length;
   const progress = Math.min(idx, total);
+  const phaseLabel = state === "running" ? PHASE_LABEL[phase] : PHASE_LABEL.idle;
   return (
     <div className="space-y-3">
       <p className="text-sm font-jetbrains">
@@ -1381,6 +1499,9 @@ function SweepRunner({
             : state === "aborted"
               ? `aborted at square ${progress + 1}/${total}`
               : "idle"}
+        {state === "running" && (
+          <span style={{ color: "var(--charm-cyan)" }}> · {phaseLabel}</span>
+        )}
       </p>
       <div className="w-full bg-muted rounded h-2 overflow-hidden">
         <div
@@ -1415,6 +1536,64 @@ function SweepRunner({
             </Button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function CapturedGallery({
+  thumbs,
+  color,
+}: {
+  thumbs: { square: string; image: string | null }[];
+  color: "white" | "black";
+}) {
+  if (thumbs.length === 0) return null;
+  return (
+    <div
+      className="rounded-md border p-3 space-y-2"
+      style={{ borderColor: "var(--charm-border)" }}
+    >
+      <p className="text-xs font-jetbrains uppercase tracking-widest" style={{ color: "var(--charm-muted)" }}>
+        Captured so far ({thumbs.length}) — newest first
+      </p>
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {thumbs.map((t) => (
+          <div
+            key={t.square}
+            className="flex flex-col items-center gap-1 shrink-0"
+            style={{ width: 56 }}
+          >
+            <div
+              className="rounded border overflow-hidden flex items-center justify-center"
+              style={{
+                width: 56,
+                height: 56,
+                borderColor:
+                  color === "white"
+                    ? "color-mix(in oklab, var(--charm-cyan) 40%, transparent)"
+                    : "color-mix(in oklab, var(--charm-amber, #fbbf24) 40%, transparent)",
+                background: "color-mix(in oklab, var(--charm-cyan) 4%, transparent)",
+              }}
+            >
+              {t.image ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={imageSrc(t.image)}
+                  alt={`${color} ${t.square}`}
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                />
+              ) : (
+                <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                  no img
+                </span>
+              )}
+            </div>
+            <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+              {t.square}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );

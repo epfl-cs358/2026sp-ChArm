@@ -1,0 +1,23 @@
+{
+  "name": "test_3",
+  "created_at": 1779293148.7671938,
+  "updated_at": 1779293389.1167462,
+  "settings": {
+    "frames_per_square": 2,
+    "settle_ms": 600,
+    "source_square": "h8",
+    "piece_type": "pawn",
+    "lighting_note": ""
+  },
+  "empty_frames": 2,
+  "white": {
+    "a1": 2,
+    "b1": 2,
+    "c1": 2,
+    "d1": 2,
+    "e1": 2
+  },
+  "black": {},
+  "has_exemplar_config": false,
+  "has_accuracy": false
+}

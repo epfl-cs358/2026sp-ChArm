@@ -183,7 +183,12 @@ def _read_lines(ser, idle_timeout: float = 0.25, max_wait: float = 8.0, stop_on_
                     break
             idle_deadline = time.monotonic() + idle_timeout
             continue
-        if time.monotonic() >= idle_deadline:
+        # When a stop marker is set, the caller is committed to waiting for it
+        # — don't let idle-silence cut us off mid-motion. A blocking Arduino
+        # command (`home`, `pick`, `put`, ...) prints its header, then runs
+        # the stepper silently for seconds, then prints a trailing line. Only
+        # `max_wait` should bound the wait in that case.
+        if stop_on_marker is None and time.monotonic() >= idle_deadline:
             break
     return lines
 
