@@ -26,12 +26,49 @@ const float Z_MAX_MM = LINK3_LENGTH;
 const float STARTS = 4.0f;
 const float PITCH = 2.0f;
 const float LEAD = STARTS * PITCH;
-const float STEPS_PER_MM = STEPS_PER_REV * MICROSTEPS / LEAD;
+const float STEPS_PER_MM = STEPS_PER_REV * 2 / LEAD;
 const float GRIPPER_LENGTH  = 100.0f;
 
 // Gripper
 const int OPEN_ANGLE = 65;
 const int CLOSED_ANGLE = 0;
+
+// Chess piece types (used for pick/place Z height lookup)
+enum ChessPiece {
+  PAWN = 0,
+  KNIGHT = 1,
+  BISHOP = 2,
+  ROOK = 3,
+  QUEEN = 4,
+  KING = 5
+};
+
+// Pick/place Z presets per piece type (mm)
+// Common hover/travel height (safe for all pieces)
+const float PICKPLACE_HOVER_Z_MM = 90.0f;
+
+// Pick Z (lower to grip) per piece type
+const float PICK_Z[6] = {
+  4.0f,  // PAWN
+  0.0f,  // KNIGHT
+  8.0f,  // BISHOP
+  7.0f,  // ROOK
+  11.0f,  // QUEEN
+  11.0f   // KING
+};
+
+// Place Z (lower to set down) per piece type
+const float PLACE_Z[6] = {
+  14.0f,  // PAWN
+  10.0f,  // KNIGHT
+  18.0f,  // BISHOP
+  17.0f,  // ROOK
+  21.0f,  // QUEEN
+  21.0f   // KING
+};
+
+// Trash position Z (hardcoded, not calibrated)
+const float TRASH_Z = 60.0f;
 
 #endif
 

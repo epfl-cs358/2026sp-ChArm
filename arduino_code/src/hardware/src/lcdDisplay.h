@@ -12,15 +12,23 @@ public:
     void begin();
 
     // Update both lines; only refreshes if content changed
-    void update(String line1, String line2);
+    void update(const String& line1, const String& line2);
 
     // Clear the display
     void clear();
 
+    // Call frequently from loop(): periodically re-initializes the HD44780
+    // interface so a noise glitch that desyncs the 4-bit nibble counter
+    // self-heals instead of staying garbled until reset.
+    void tick();
+
 private:
     LiquidCrystal lcd;
-    String lastLine1;
-    String lastLine2;
+    char lastLine1[17];
+    char lastLine2[17];
+    unsigned long lastResyncMs;
+
+    static const unsigned long RESYNC_INTERVAL_MS = 1000;
 };
 
 #endif

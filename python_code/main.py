@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 SRC_PATH = ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-from charm.game import BoardStateTracker, update_tracker_from_image
+# from charm.game import BoardStateTracker, update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
 from charm.vision.transferphoto import fetch_raw_image
 from charm.vision.calibration_config import (

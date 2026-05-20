@@ -21,16 +21,18 @@ const int Z_LIMIT_BOTTOM_PIN = 11;
 const int GRIPPER_PIN = 46;
 
 // button pins
-const int CLK_PIN = 25;
-const int DT_PIN = 23;
-const int SW_PIN = 21;
+const int SW_PIN = 24;
+const int DT_PIN = 19;
+const int CLK_PIN = 18;
+
+
 
 // lcd pins
-const int RS_PIN = 34;
-const int E_PIN = 35;
-const int D4_PIN = 27;
-const int D5_PIN = 29;
-const int D6_PIN = 31;
-const int D7_PIN = 33;
+const int RS_PIN = 44;
+const int E_PIN = 42;
+const int D4_PIN = 38;
+const int D5_PIN = 36;
+const int D6_PIN = 34;
+const int D7_PIN = 32;
 
 #endif
