@@ -17,31 +17,31 @@ class OccupancyResult:
 
 
 def compute_occupancy_score(cell_image: np.ndarray) -> float:
-    """
-    Compute a simple edge-density score on the center ROI of the cell.
-    Higher score -> more likely occupied.
-    """
     h, w = cell_image.shape[:2]
 
-    x1 = int(w * 0.2)
-    x2 = int(w * 0.8)
-    y1 = int(h * 0.2)
-    y2 = int(h * 0.8)
+    x1 = int(w * 0.20)
+    x2 = int(w * 0.80)
+    y1 = int(h * 0.15)
+    y2 = int(h * 0.85)
 
     roi = cell_image[y1:y2, x1:x2]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Lower thresholds to catch weak edges from white pieces on light squares
-    edges = cv2.Canny(blurred, 15, 50)
-    edge_score = float(np.mean(edges))
+    clahe = cv2.createCLAHE(
+        clipLimit=4.0,
+        tileGridSize=(3, 3),
+    )
+    enhanced = clahe.apply(gray)
 
-    # White pieces are 3D with shadows; empty squares are flat and uniform.
-    # Std dev captures this variance even when edges are weak.
-    std_score = float(np.std(blurred)) * 0.4
+    # After CLAHE, pieces usually create stronger local contrast than empty squares.
+    std_score = float(np.std(enhanced))
 
-    return edge_score + std_score
+    edges = cv2.Canny(enhanced, 20, 70)
+
+    edge_score = float(np.count_nonzero(edges)) / edges.size * 100.0
+
+    return std_score * 0.4 + edge_score * 0.6
 
 
 def detect_occupancy(
