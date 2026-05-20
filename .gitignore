@@ -1,0 +1,18 @@
+# Python virtualenvs (never commit these — they contain >1GB of binaries)
+venv/
+.venv/
+env/
+test_env/
+python_code/venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
