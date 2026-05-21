@@ -52,55 +52,6 @@ export const api = {
   runPipeline: (params: PipelineParams) =>
     post<PipelineResult>("/api/pipeline/run", params),
 
-  tuneCv: (payload: {
-    annotations: { row: number; col: number; label: "empty" | "white" | "black" }[];
-    params: PipelineParams;
-    image_path?: string;
-  }) =>
-    post<{
-      status: string;
-      path: string;
-      tuning: {
-        occupancy_threshold: number;
-        occupancy_delta_threshold?: number;
-        white_threshold: number;
-        black_threshold: number;
-        white_delta_threshold?: number;
-        black_delta_threshold?: number;
-        saved_at: number;
-        samples: Record<
-          string,
-          {
-            row: number;
-            col: number;
-            occupancy_score: number;
-            brightness_score: number;
-            dark_score?: number;
-            occupancy_delta?: number;
-            bright_delta?: number;
-            dark_delta?: number;
-          }[]
-        >;
-      };
-    }>("/api/pipeline/tune", payload),
-
-  getCvTuning: () =>
-    get<{
-      exists: boolean;
-      tuning: {
-        occupancy_threshold: number;
-        occupancy_delta_threshold?: number;
-        white_threshold: number;
-        black_threshold: number;
-        white_delta_threshold?: number;
-        black_delta_threshold?: number;
-        saved_at?: number;
-      } | null;
-    }>("/api/pipeline/tuning"),
-
-  clearCvTuning: () =>
-    fetch(`${API}/api/pipeline/tuning`, { method: "DELETE" }).then((r) => r.json()),
-
   captureEmptyReference: (payload?: { params?: PipelineParams; image_path?: string; capture?: boolean }) =>
     post<{ status: string; path: string; image: string; source_image?: string; saved_at?: number }>(
       "/api/empty-reference/capture",
@@ -190,26 +141,6 @@ export const api = {
   captureFromCamera: (url?: string) => post<{ status: string; image: string; path: string }>("/api/capture", { url }),
 
   getDefaults: () => get<PipelineParams>("/api/params/defaults"),
-
-  getSavedParams: () =>
-    get<{
-      exists: boolean;
-      path: string;
-      data?: {
-        params: PipelineParams;
-        score?: Record<string, unknown>;
-        labels?: string[][];
-        source_image?: string;
-        saved_at?: number;
-      };
-    }>("/api/params/saved"),
-
-  saveParams: (payload: {
-    params: PipelineParams;
-    score?: unknown;
-    labels?: string[][];
-    source_image?: string;
-  }) => put<{ status: string; path: string }>("/api/params/saved", payload),
 
   savePipelineSnapshot: (payload: {
     params: PipelineParams;

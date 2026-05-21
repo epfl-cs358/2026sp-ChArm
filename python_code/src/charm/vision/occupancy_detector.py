@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -15,82 +14,61 @@ class OccupancyResult:
     col: int
     occupied: bool
     score: float
-    delta: Optional[float] = None
 
 
-def _center_roi(image: np.ndarray) -> np.ndarray:
-    h, w = image.shape[:2]
-    x1, x2 = int(w * 0.3), int(w * 0.7)
-    y1, y2 = int(h * 0.3), int(h * 0.7)
-    return image[y1:y2, x1:x2]
+def remove_slow_lighting(gray: np.ndarray) -> np.ndarray:
+    """
+    Remove broad lighting/shadow gradients while keeping local piece texture.
+
+    Shadows usually change slowly across a cell.  A chess piece creates smaller
+    local edges and contrast, so subtracting a heavily blurred background makes
+    occupancy scoring less sensitive to uneven light.
+    """
+    h, w = gray.shape[:2]
+    kernel_size = max(15, (min(h, w) // 2) | 1)
+    background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
+    corrected = cv2.addWeighted(gray, 1.0, background, -1.0, 128.0)
+    return corrected
 
 
 def compute_occupancy_score(cell_image: np.ndarray) -> float:
-    """Edge density + std-dev on a center ROI. Higher = more likely occupied."""
-    roi = _center_roi(cell_image)
+    h, w = cell_image.shape[:2]
+
+    x1 = int(w * 0.20)
+    x2 = int(w * 0.80)
+    y1 = int(h * 0.15)
+    y2 = int(h * 0.85)
+
+    roi = cell_image[y1:y2, x1:x2]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    corrected = remove_slow_lighting(gray)
 
-    edges = cv2.Canny(blurred, 15, 50)
-    edge_score = float(np.mean(edges))
+    clahe = cv2.createCLAHE(
+        clipLimit=4.0,
+        tileGridSize=(3, 3),
+    )
+    enhanced = clahe.apply(corrected)
 
-    std_score = float(np.std(blurred)) * 0.4
+    # After CLAHE, pieces usually create stronger local contrast than empty squares.
+    std_score = float(np.std(enhanced))
 
-    return edge_score + std_score
+    edges = cv2.Canny(enhanced, 20, 70)
 
+    edge_score = float(np.count_nonzero(edges)) / edges.size * 100.0
 
-def compute_reference_delta(cell_image: np.ndarray, reference_image: np.ndarray) -> float:
-    """Mean LAB CIE76 distance between center ROIs of cell and reference.
-
-    Robust to square color: white pieces are far from green or pink in LAB even
-    when grayscale is similar. ~0 for an empty cell matching the reference;
-    typically >15 once a piece is present.
-    """
-    h = min(cell_image.shape[0], reference_image.shape[0])
-    w = min(cell_image.shape[1], reference_image.shape[1])
-    a = _center_roi(cell_image[:h, :w])
-    b = _center_roi(reference_image[:h, :w])
-
-    a_lab = cv2.cvtColor(a, cv2.COLOR_BGR2LAB).astype(np.float32)
-    b_lab = cv2.cvtColor(b, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-    diff = a_lab - b_lab
-    dist = np.sqrt(np.sum(diff * diff, axis=2))
-    return float(np.mean(dist))
+    return std_score * 0.4 + edge_score * 0.6
 
 
 def detect_occupancy(
     cells: list[SquareCell],
-    threshold: float = 8.0,
-    reference_cells: Optional[list[SquareCell]] = None,
-    delta_threshold: float = 12.0,
+    threshold: float = 8,
 ) -> list[OccupancyResult]:
-    """Classify each cell as occupied/empty.
-
-    When `reference_cells` is provided, a cell is occupied iff
-    `delta > delta_threshold` AND `score > threshold`. The two signals are
-    largely independent: `score` (edge density + std) rejects smooth lighting
-    gradients that would otherwise spoof the LAB-delta check, while
-    `delta` rejects edge-dense but already-empty patterns. Requiring both is
-    robust to lighting drift the reference can't predict (e.g. reflections
-    from nearby pieces onto empty squares).
-
-    Without a reference, falls back to the absolute edge+std score alone.
-    """
-    ref_map = {(c.row, c.col): c for c in reference_cells} if reference_cells else {}
-
     results: list[OccupancyResult] = []
+
     for cell in cells:
         score = compute_occupancy_score(cell.image)
-        ref_cell = ref_map.get((cell.row, cell.col))
-        delta: Optional[float] = None
-
-        if ref_cell is not None:
-            delta = compute_reference_delta(cell.image, ref_cell.image)
-            occupied = (delta > delta_threshold) and (score > threshold)
-        else:
-            occupied = score > threshold
+        occupied = score > threshold
 
         results.append(
             OccupancyResult(
@@ -98,7 +76,6 @@ def detect_occupancy(
                 col=cell.col,
                 occupied=occupied,
                 score=score,
-                delta=delta,
             )
         )
 
@@ -137,10 +114,7 @@ def draw_occupancy_debug(
             thickness,
         )
 
-        if result.delta is not None:
-            label = f"{int(result.occupied)}:d{result.delta:.1f}"
-        else:
-            label = f"{int(result.occupied)}:{result.score:.1f}"
+        label = f"{int(result.occupied)}:{result.score:.1f}"
         cv2.putText(
             debug_image,
             label,

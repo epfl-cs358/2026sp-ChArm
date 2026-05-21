@@ -335,31 +335,17 @@ function ClassifierPanel({
 function SupervisionPanel({
   labels,
   result,
-  bestScore,
-  searching,
-  paused,
   savedStatus,
   onClear,
   onSetDetected,
-  onPauseToggle,
-  onSaveParams,
   onSaveSnapshot,
-  onLoadParams,
-  onSearch,
 }: {
   labels: SupervisedLabel[][];
   result: PipelineResult | null;
-  bestScore: SupervisionScore | null;
-  searching: boolean;
-  paused: boolean;
   savedStatus: string | null;
   onClear: () => void;
   onSetDetected: () => void;
-  onPauseToggle: () => void;
-  onSaveParams: () => void;
   onSaveSnapshot: () => void;
-  onLoadParams: () => void;
-  onSearch: () => void;
 }) {
   const score = scoreResult(result, labels);
   const compactButtonClass =
@@ -386,51 +372,17 @@ function SupervisionPanel({
         <div className="grid grid-cols-1 gap-1.5">
           <button
             onClick={onSetDetected}
-            disabled={result === null || searching}
+            disabled={result === null}
             className={`${compactButtonClass} w-full`}
           >
             Detected → Expected
           </button>
           <button
-            onClick={onSearch}
-            disabled={searching}
-            className="btn-cyan px-2 py-1 rounded-md text-[10px] font-mono disabled:opacity-50 w-full"
-          >
-            {searching ? "Searching..." : `Auto tune x${RANDOM_SEARCH_TRIALS}`}
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 gap-1.5">
-          <button
-            onClick={onSaveParams}
-            disabled={result === null || searching}
-            className={`${compactButtonClass} w-full`}
-          >
-            Save JSON
-          </button>
-          <button
             onClick={onSaveSnapshot}
-            disabled={result === null || searching}
+            disabled={result === null}
             className={`${compactButtonClass} w-full`}
           >
             Save Images
-          </button>
-          <button
-            onClick={onLoadParams}
-            disabled={searching}
-            className={`${compactButtonClass} w-full`}
-          >
-            Load JSON
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 gap-1.5">
-          <button
-            onClick={onPauseToggle}
-            disabled={!searching}
-            className={`${compactButtonClass} w-full`}
-          >
-            {paused ? "Resume" : "Pause"}
           </button>
           <button
             onClick={onClear}
@@ -440,14 +392,9 @@ function SupervisionPanel({
           </button>
         </div>
 
-        {(bestScore && bestScore.labeled > 0) || savedStatus ? (
+        {savedStatus ? (
           <div className="mt-auto pt-2 text-[10px] font-mono text-center flex flex-col gap-1">
-            {bestScore && bestScore.labeled > 0 && (
-              <span className="text-amber-DEFAULT">
-                best F1 {bestScore.macroF1.toFixed(2)}
-              </span>
-            )}
-            {savedStatus && <span className="text-text-muted truncate">{savedStatus}</span>}
+            <span className="text-text-muted truncate">{savedStatus}</span>
           </div>
         ) : null}
       </div>
@@ -820,86 +767,6 @@ export default function LabPage() {
     );
   }, []);
 
-  const randomSearch = useCallback(async () => {
-    const labelSnapshot = supervisedLabels.map((row) => [...row]);
-    const initialScore = scoreResult(resultA, labelSnapshot);
-
-    setSearching(true);
-    setSearchPaused(false);
-    setError(null);
-
-    let best = {
-      score: initialScore,
-      params: resultAParams,
-      result: resultA,
-    };
-
-    try {
-      for (let trial = 0; trial < RANDOM_SEARCH_TRIALS; trial += 1) {
-        await waitWhilePaused(() => searchPausedRef.current);
-
-        const candidateParams = randomizeParams(paramsA);
-        setParamsA(candidateParams);
-        await wait(RANDOM_SEARCH_DELAY_MS);
-        await waitWhilePaused(() => searchPausedRef.current);
-
-        const candidateResult = await runWithParams(candidateParams);
-        const candidateScore = scoreResult(candidateResult, labelSnapshot);
-        setResultA(candidateResult);
-        setResultAParams(candidateParams);
-        setBestScore((current) =>
-          !current || candidateScore.accuracy > current.accuracy ? candidateScore : current,
-        );
-
-        if (candidateScore.objective > best.score.objective) {
-          best = {
-            score: candidateScore,
-            params: candidateParams,
-            result: candidateResult,
-          };
-        }
-
-        if (candidateScore.accuracy === 1) {
-          best = {
-            score: candidateScore,
-            params: candidateParams,
-            result: candidateResult,
-          };
-          break;
-        }
-      }
-
-      setBestScore(best.score);
-      setParamsA(best.params);
-      setResultA(best.result);
-      setResultAParams(best.params);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Random search failed");
-    } finally {
-      setSearching(false);
-      setSearchPaused(false);
-    }
-  }, [paramsA, resultA, resultAParams, runWithParams, supervisedLabels]);
-
-  const saveCurrentParams = useCallback(async () => {
-    try {
-      const score = scoreResult(resultA, supervisedLabels);
-      const response = await api.saveParams({
-        params: paramsA,
-        score,
-        labels: toBoardLabels(supervisedLabels),
-        source_image: resultA?.image_path,
-      });
-      setSavedStatus(`Saved JSON: ${response.path} (${Math.round(score.accuracy * 100)}%, F1 ${score.macroF1.toFixed(2)})`);
-      // Refresh annotation stats after saving (save_params may have added an annotation)
-      api.getAnnotations()
-        .then((r) => setAnnotationStats({ count: r.count, n_white: r.n_white, n_black: r.n_black, n_scenes: r.n_scenes }))
-        .catch(() => null);
-    } catch {
-      setSavedStatus("Could not save params JSON");
-    }
-  }, [paramsA, resultA, supervisedLabels]);
-
   const saveCurrentSnapshot = useCallback(async () => {
     if (!resultA) return;
     try {
@@ -934,29 +801,6 @@ export default function LabPage() {
       setSavedStatus("Could not save images");
     }
   }, [resultA, resultAParams, supervisedLabels]);
-
-  const loadSavedParamsJson = useCallback(async () => {
-    try {
-      const response = await api.getSavedParams();
-      if (!response.exists || !response.data?.params) {
-        setSavedStatus("No saved JSON found");
-        return;
-      }
-      const loaded = { ...DEFAULT_PARAMS, ...response.data.params };
-      setParamsA(loaded);
-      setResultAParams(loaded);
-      if (response.data.labels) {
-        setSupervisedLabels(
-          response.data.labels.map((row) =>
-            row.map((label) => (label === "black" || label === "white" ? label : "unlabeled")),
-          ),
-        );
-      }
-      setSavedStatus(`Loaded JSON: ${response.path}`);
-    } catch {
-      setSavedStatus("Could not load params JSON");
-    }
-  }, []);
 
   const handleRetrain = useCallback(async () => {
     setRetraining(true);
@@ -1176,24 +1020,15 @@ export default function LabPage() {
                 <SupervisionPanel
                   labels={supervisedLabels}
                   result={resultA}
-                  bestScore={bestScore}
-                  searching={searching}
-                  paused={searchPaused}
                   savedStatus={savedStatus}
                   onClear={() => {
                     setSupervisedLabels(createUnlabeledGrid());
-                    setBestScore(null);
                   }}
                   onSetDetected={() => {
                     if (!resultA) return;
                     setSupervisedLabels(resultToSupervisedLabels(resultA));
-                    setBestScore(null);
                   }}
-                  onPauseToggle={() => setSearchPaused((current) => !current)}
-                  onSaveParams={saveCurrentParams}
                   onSaveSnapshot={saveCurrentSnapshot}
-                  onLoadParams={loadSavedParamsJson}
-                  onSearch={randomSearch}
                 />
                 <ClassifierPanel
                   retrainResult={retrainResult}
