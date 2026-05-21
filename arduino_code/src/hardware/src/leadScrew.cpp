@@ -48,13 +48,25 @@ void LeadScrew::moveTo_mm(float mm) {
 }
 
 void LeadScrew::calibrate() {
-    // Move down until the bottom limit switch is triggered, then set that position to zero.
-    stepper_.setDirection(false); 
+    // If we're already on the switch, back off first so we always approach from above.
+    if (bottomLimit.pressed()) {
+        stepper_.setDirection(true);
+        long backoffSteps = lroundf(stepsPerMM * 2.0f);
+        for (long i = 0; i < backoffSteps && bottomLimit.pressed(); ++i) {
+            stepper_.step();
+        }
+    }
+
+    // Move down until the bottom limit switch is triggered, then back off slightly.
+    stepper_.setDirection(false);
     while (!bottomLimit.pressed()) {
         stepper_.step();
     }
     stepper_.setDirection(true);
-    moveBy_mm(1.0f); // back off a bit to avoid wearing out the switch
+    long releaseSteps = lroundf(stepsPerMM * 1.0f);
+    for (long i = 0; i < releaseSteps && bottomLimit.pressed(); ++i) {
+        stepper_.step();
+    }
     setZero();
 }
 
