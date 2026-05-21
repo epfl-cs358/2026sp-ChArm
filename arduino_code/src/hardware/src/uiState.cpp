@@ -11,6 +11,7 @@ UIState::UIState() {
     this->gameStatus = WAITING_PLAYER;
     this->modeBeforeError = MENU;
     this->selectedColor = WHITE;
+    this->gameOverReason = GAME_OVER_DRAW;
 }
 
 void UIState::setMode(UIMode mode) {
@@ -179,6 +180,15 @@ void UIState::clearError() {
     }
 }
 
+void UIState::setGameOver(GameOverReason reason) {
+    gameOverReason = reason;
+    setMode(GAME_OVER);
+}
+
+GameOverReason UIState::getGameOverReason() const {
+    return gameOverReason;
+}
+
 String UIState::getLine1() const {
     switch (currentMode) {
         case BOOT:
@@ -219,6 +229,15 @@ String UIState::getLine1() const {
 
         case ERROR:
             return "ERR: check board";
+
+        case GAME_OVER:
+            switch (gameOverReason) {
+                case GAME_OVER_WHITE_WIN: return "White Wins!";
+                case GAME_OVER_BLACK_WIN: return "Black Wins!";
+                case GAME_OVER_STALEMATE: return "Draw";
+                case GAME_OVER_DRAW:      return "Draw";
+            }
+            return "Game Over";
 
         default:
             return "?";
@@ -282,6 +301,15 @@ String UIState::getLine2() const {
 
         case ERROR:
             return "Check board";
+
+        case GAME_OVER:
+            switch (gameOverReason) {
+                case GAME_OVER_WHITE_WIN: return "Checkmate!";
+                case GAME_OVER_BLACK_WIN: return "Checkmate!";
+                case GAME_OVER_STALEMATE: return "Stalemate";
+                case GAME_OVER_DRAW:      return "Game Over";
+            }
+            return "Game Over";
 
         default:
             return "?";

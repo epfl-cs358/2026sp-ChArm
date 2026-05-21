@@ -1,45 +1,26 @@
 from __future__ import annotations
 
-import os
-
+import threading
 import serial
 import chess
 
-manual_serial = None
 
-
-def _get_serial():
-    global manual_serial
-    if manual_serial is None or not manual_serial.is_open:
-        port = os.getenv("CHARM_SERIAL_PORT", "/dev/ttyUSB0")
-        baud = int(os.getenv("CHARM_SERIAL_BAUD", "9600"))
-        manual_serial = serial.Serial(port, baud, timeout=2)
-    return manual_serial
-
-def execute_move(uci_move: str, board: chess.Board):
+def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: threading.Lock):
+    print(f"[ARM] execute_move called: {uci_move}", flush=True)
     move = chess.Move.from_uci(uci_move)
     from_square = chess.square_name(move.from_square)
     to_square = chess.square_name(move.to_square)
-    
+
     # Get the piece being moved
     piece = board.piece_at(move.from_square)
     piece_name = chess.piece_name(piece.piece_type).lower()
-    
+
     # Check for capture
     is_capture = board.is_capture(move)
     captured_piece = None
-    captured_square = None
     if is_capture:
-        if board.is_en_passant(move):
-            # Captured pawn is on the same file as to_square but on from_square's rank
-            ep_sq = chess.square(chess.square_file(move.to_square), chess.square_rank(move.from_square))
-            captured_piece_obj = board.piece_at(ep_sq)
-            captured_square = chess.square_name(ep_sq)
-        else:
-            captured_piece_obj = board.piece_at(move.to_square)
-            captured_square = to_square
-        if captured_piece_obj is not None:
-            captured_piece = chess.piece_name(captured_piece_obj.piece_type).lower()
+        captured_piece_obj = board.piece_at(move.to_square)
+        captured_piece = chess.piece_name(captured_piece_obj.piece_type).lower()
 
     # Check for castling
     is_castling = board.is_castling(move)
@@ -59,28 +40,46 @@ def execute_move(uci_move: str, board: chess.Board):
             rook_from = "a8"
             rook_to = "d8"
 
-    if is_capture and captured_piece and captured_square:
-        # Pick up captured piece from its actual square and put it in trash
-        send_command(f"pick {captured_piece} {captured_square}")
-        send_command(f"put {captured_piece} trash")
-
-    # For promotion the robot places the promoted piece, not the pawn
-    placed_piece = chess.piece_name(move.promotion).lower() if move.promotion else piece_name
+    if is_capture and captured_piece:
+        # Pick up captured piece and put it in trash
+        send_command(f"pick {captured_piece} {to_square}", ser, lock)
+        send_command(f"put {captured_piece} trash", ser, lock)
 
     # Move the main piece
-    send_command(f"pick {piece_name} {from_square}")
-    send_command(f"put {placed_piece} {to_square}")
-    
+    send_command(f"pick {piece_name} {from_square}", ser, lock)
+    send_command(f"put {piece_name} {to_square}", ser, lock)
+
     # If castling, also move the rook
     if is_castling and rook_from and rook_to:
-        send_command(f"pick rook {rook_from}")
-        send_command(f"put rook {rook_to}")
+        send_command(f"pick rook {rook_from}", ser, lock)
+        send_command(f"put rook {rook_to}", ser, lock)
 
-    send_command("home")
+    send_command("home", ser, lock)
 
 
-def send_command(command):
-    ser = _get_serial()
-    ser.write(f"{command}\n".encode())
-    response = ser.readline().decode().strip()
+_TERMINATION_SUFFIXES = ("done", "failed")
+_TERMINATION_PREFIXES = ("invalid", "usage", "bad ", "going home", "board not", "trash not")
+_COMMAND_TIMEOUT_S = 60.0   # max seconds to wait for the Mega to finish a command
+
+
+def send_command(command: str, ser: serial.Serial, lock: threading.Lock) -> str:
+    import time
+    with lock:
+        ser.write(f"{command}\n".encode())
+        ser.flush()
+        response = ""
+        deadline = time.monotonic() + _COMMAND_TIMEOUT_S
+        while time.monotonic() < deadline:
+            line = ser.readline().decode(errors="ignore").strip()
+            if not line:
+                # readline timed out (serial port timeout) — keep waiting
+                continue
+            response = line
+            lower = line.lower()
+            if any(lower.endswith(s) for s in _TERMINATION_SUFFIXES) or \
+               any(lower.startswith(p) for p in _TERMINATION_PREFIXES):
+                break
+        else:
+            print(f"[ARM] WARNING: '{command}' timed out after {_COMMAND_TIMEOUT_S}s, last response: {response!r}", flush=True)
+    print(f"[ARM] {command!r} -> {response!r}", flush=True)
     return response

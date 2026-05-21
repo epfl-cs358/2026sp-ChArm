@@ -8,10 +8,6 @@
 #include "hardware/src/config.h"
 #include "hardware/src/gripper.h"
 #include "hardware/src/limitSwitch.h"
-#include "hardware/src/buttonInput.h"
-#include "hardware/src/uiState.h"
-#include "hardware/src/lcdDisplay.h"
-#include "hardware/src/uiController.h"
 #include "hardware/src/enableDriver.h"
 
 StepperXYZ xStepper(X_STEP_IN1, X_DIR_IN1);
@@ -29,11 +25,6 @@ LeadScrew leadScrew(zStepper, STEPS_PER_MM, Z_MAX_MM, zLim);
 
 ScaraArm arm(joint1, joint2, leadScrew, gripper, LINK1_LENGTH, LINK2_LENGTH);
 
-UIState uiState;
-ButtonInput buttonInput(CLK_PIN, DT_PIN, SW_PIN);
-LCDDisplay lcd(RS_PIN, E_PIN, D4_PIN, D5_PIN, D6_PIN, D7_PIN);
-UIController uiController(buttonInput, uiState, lcd, Serial);
-
 int stepCount = 0;
 static String cmdBuffer = "";
 
@@ -43,7 +34,7 @@ static bool calibrationMode = false;
 static const float JOG_XY_MM     = 3.0f;
 static const float JOG_Z_MM      = 1.5f;
 static const float CAL_JOG_XY_MM = 1.0f;
-static const float CAL_JOG_Z_MM  = 7.5f;
+static const float CAL_JOG_Z_MM  = 0.5f;
 
 // ── Board calibration ────────────────────────────────────────────────────────
 // 3-corner vector decomposition: capture arm (x,y) at H1, A1, H8.
@@ -495,7 +486,7 @@ static void handleCommand(String cmd) {
       if (toTrash) {
         Serial.print("Put "); Serial.print(pieceName); Serial.print(" to trash -> XYZ(");
         Serial.print(tx); Serial.print(", "); Serial.print(ty); Serial.print(", "); Serial.print(TRASH_Z); Serial.println(")");
-        if (!arm.moveXYZ(tx, ty, TRASH_Z)) Serial.println("Put failed");
+        if (!arm.moveXYZ(tx, ty, PICKPLACE_HOVER_Z_MM)) Serial.println("Put failed");
         else { arm.openGripper(); Serial.println("Put done"); }
       } else {
         Serial.print("Put "); Serial.print(pieceName); Serial.print(" to "); Serial.print(sq);
@@ -615,12 +606,9 @@ static void handleCommand(String cmd) {
 // ── Setup & loop ─────────────────────────────────────────────────────────────
 void setup() {
   pinMode(ENABLE_PIN, OUTPUT);
-  //digitalWrite(ENABLE_PIN, LOW);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   arm.begin();
-  //Serial1.begin(115200);
-  //uiController.begin();
 
   if (loadCalFromEEPROM()) {
     Serial.println("Board calibration loaded from EEPROM.");
@@ -640,6 +628,9 @@ void setup() {
 
 void loop() {
   updateDrivers();
+
+  // The ESP32 UI box now talks to Python over WiFi. The Mega's USB Serial is
+  // reserved for arm commands from Python, so do not let UIController consume it.
 
   while (Serial.available()) {
     char c = Serial.read();
@@ -664,7 +655,4 @@ void loop() {
       cmdBuffer += c;
     }
   }
-
-  //uiController.loop();
-  //lcd.tick();
 }

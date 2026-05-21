@@ -21,6 +21,8 @@ public:
     // Send raw line to host
     void sendMessage(const String& msg);
 
+    bool isWaitingForBoard() const;
+
 private:
     ButtonInput& buttonInput;
     UIState& uiState;

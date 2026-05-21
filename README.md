@@ -95,7 +95,53 @@ for any rebuild:
 
 ---
 
-## 3. Software
+## 3. Running the Game
+
+### Prerequisites
+
+```bash
+pip install python-chess opencv-python numpy stockfish
+sudo apt install stockfish        # or: brew install stockfish
+```
+
+### Launch command
+
+```bash
+cd python_code
+
+python play_game.py \
+  --esp32-host 172.21.70.102 \
+  --arm-port /dev/ttyUSB1 \
+  --engine-path /usr/games/stockfish
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--esp32-host` | — | IP of the ESP32 UI box (TCP port 8765) |
+| `--arm-port` | — | Serial port of the Arduino Mega (`/dev/ttyUSB0` on Linux) |
+| `--engine-path` | `stockfish` | Path to the Stockfish binary |
+| `--player-color` | `white` | `white` or `black` |
+| `--think-time` | `0.1` | Seconds Stockfish is allowed to think |
+
+### Network addresses (lab setup)
+
+| Device | Address |
+|---|---|
+| ESP32 UI box (TCP) | `172.21.66.20:8765` |
+| ESP32-CAM (HTTP) | `172.21.73.228` |
+
+### Startup sequence
+
+1. Flash the Arduino Mega firmware (`arduino_code/`) via PlatformIO.
+2. Power on the ESP32 UI box and the ESP32-CAM — wait for both to connect to the network.
+3. Run the command above — the LCD will show the main menu.
+4. Use the rotary encoder to set difficulty, then press **Start Game**.
+5. Place pieces in the standard starting position and press **OK** to validate.
+6. Play. Press **OK** after each of your moves.
+
+---
+
+## 4. Software Architecture
 
 ### 3.1 Repository layout
 

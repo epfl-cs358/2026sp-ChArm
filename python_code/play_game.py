@@ -2,17 +2,15 @@
 play_game.py — full game entry point
 
 Wires together:
-  - ArduinoUIControllerLink  (UI serial port: buttons + LCD)
-  - arduino_bridge.execute_move  (arm serial port, hardcoded in arduino_bridge.py)
+  - ArduinoUIControllerLink  (TCP socket to ESP32 UI box: buttons + LCD)
+  - arduino_bridge.execute_move  (USB serial to Arduino Mega: arm commands)
   - GameSession              (chess state + vision)
   - GameController           (coordinates everything)
 
 Usage:
-    python play_game.py --ui-port /dev/cu.usbmodem1401
-    python play_game.py --ui-port /dev/cu.usbmodem1401 --player-color black
-    python play_game.py --ui-port /dev/cu.usbmodem1401 --difficulty 2
-
-Arduino side: flash main.cpp with Serial1 (UIController) enabled at 115200.
+    python play_game.py --esp32-host 192.168.1.42
+    python play_game.py --esp32-host 192.168.1.42 --player-color black
+    python play_game.py --esp32-host 192.168.1.42 --arm-port /dev/cu.usbserial-120
 
 Ctrl-C to stop.
 """
@@ -21,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,6 +28,7 @@ SRC_PATH = ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
 import cv2
+import serial
 
 from charm.arduino.uiController_bridge import ArduinoUIControllerLink
 from charm.game.game_controller import GameController, GameControllerConfig
@@ -48,6 +48,13 @@ from charm.vision.transferphoto import fetch_raw_image
 
 CALIBRATED_IMAGE_PATH = ROOT / "latest_calibrated.jpg"
 WARP_SIZE = 800
+DEFAULT_MEGA_PORTS = (
+    "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0",
+    "/dev/ttyUSB2",
+    "/dev/ttyUSB1",
+    "/dev/ttyUSB0",
+    "/dev/cu.usbserial-120",
+)
 
 
 def make_board_image_provider(
@@ -72,24 +79,36 @@ def make_board_image_provider(
     return capture_and_calibrate
 
 
+def find_default_arm_port() -> str:
+    for port in DEFAULT_MEGA_PORTS:
+        if Path(port).exists():
+            return port
+    return DEFAULT_MEGA_PORTS[0]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ChArm chess game")
     parser.add_argument(
-        "--ui-port",
-        default="/dev/cu.usbmodem1401",
-        help="Serial port for the Arduino UIController (LCD + buttons).",
+        "--esp32-host",
+        default="172.21.71.52",
+        help="IP address of the ESP32 UI box.",
     )
     parser.add_argument(
-        "--ui-baud",
+        "--esp32-port",
         type=int,
-        default=115200,
-        help="Baud rate for the UI serial port.",
+        default=8765,
+        help="TCP port on the ESP32 UI box.",
+    )
+    parser.add_argument(
+        "--arm-port",
+        default=None,
+        help="USB serial port for the Arduino Mega (arm commands).",
     )
     parser.add_argument(
         "--player-color",
         choices=["white", "black"],
         default="white",
-        help="Fallback color if the Arduino color screen is skipped (default: white). "
+        help="Fallback color if the ESP32 color screen is skipped (default: white). "
              "The on-device color selection overrides this at game start.",
     )
     parser.add_argument(
@@ -131,26 +150,32 @@ def main() -> None:
 
     if not board_cal_path.exists():
         print(f"ERROR: board calibration not found: {board_cal_path}")
-        print("Open the webapp Lab page and run ArUco or Manual calibration first.")
+        print("Run calibrate_board_corners.py first.")
         sys.exit(1)
 
     if not inner_cal_path.exists():
         print(f"ERROR: inner warp calibration not found: {inner_cal_path}")
-        print("Open the webapp Lab page and run Manual calibration first.")
+        print("Run calibrate_inner_warp_corners.py first.")
         sys.exit(1)
 
-    print(f"Connecting to Arduino UI on {args.ui_port} @ {args.ui_baud} baud...")
+    arm_port = args.arm_port or find_default_arm_port()
+    print(f"Connecting to Arduino Mega on {arm_port} @ 115200 baud...")
+    arm_ser = serial.Serial(arm_port, 115200, timeout=2)
+    arm_lock = threading.Lock()
 
+    print(f"Connecting to ESP32 UI box at {args.esp32_host}:{args.esp32_port}...")
     ui_link = ArduinoUIControllerLink(
-        port=args.ui_port,
-        baud=args.ui_baud,
-        on_line=lambda line: print(f"[Arduino] {line}", flush=True),
+        host=args.esp32_host,
+        port=args.esp32_port,
+        on_line=lambda line: print(f"[ESP32] {line}", flush=True),
     )
 
     session = GameSession()
 
     config = GameControllerConfig(
         board_image_provider=make_board_image_provider(board_cal_path, inner_cal_path),
+        arm_ser=arm_ser,
+        arm_lock=arm_lock,
         player_color=args.player_color,
         engine_path=args.engine_path,
         think_time=args.think_time,
@@ -165,7 +190,7 @@ def main() -> None:
 
     difficulty_label = {0: "Easy", 1: "Medium", 2: "Hard"}
     print(f"Game ready. Player: {args.player_color}, difficulty: {difficulty_label[args.difficulty]}")
-    print("Use the knob + button on the Arduino to start a game.")
+    print("Use the buttons on the ESP32 box to start a game.")
     print("Ctrl-C to quit.\n")
 
     try:
@@ -175,6 +200,7 @@ def main() -> None:
         print("\nStopping...")
     finally:
         controller.stop()
+        arm_ser.close()
         print("Done.")
 
 

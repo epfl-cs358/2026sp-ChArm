@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-const unsigned int DEFAULT_STEP_DELAY_US = 400;
+const unsigned int DEFAULT_STEP_DELAY_US = 300;
 
 // Motor
 const int MICROSTEPS = 16;
@@ -49,26 +49,26 @@ const float PICKPLACE_HOVER_Z_MM = 90.0f;
 
 // Pick Z (lower to grip) per piece type
 const float PICK_Z[6] = {
-  4.0f,  // PAWN
-  0.0f,  // KNIGHT
-  8.0f,  // BISHOP
-  7.0f,  // ROOK
-  11.0f,  // QUEEN
-  11.0f   // KING
+  7.0f,  // PAWN
+  3.0f,  // KNIGHT
+  11.0f,  // BISHOP
+  10.0f,  // ROOK
+  14.0f,  // QUEEN
+  14.0f   // KING
 };
 
 // Place Z (lower to set down) per piece type
 const float PLACE_Z[6] = {
-  14.0f,  // PAWN
-  10.0f,  // KNIGHT
-  18.0f,  // BISHOP
-  17.0f,  // ROOK
-  21.0f,  // QUEEN
-  21.0f   // KING
+  17.0f,  // PAWN
+  13.0f,  // KNIGHT
+  21.0f,  // BISHOP
+  20.0f,  // ROOK
+  24.0f,  // QUEEN
+  24.0f   // KING
 };
 
 // Trash position Z (hardcoded, not calibrated)
-const float TRASH_Z = 60.0f;
+const float TRASH_Z = 90.0f;
 
 #endif
 

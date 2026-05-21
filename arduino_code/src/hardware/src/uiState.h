@@ -13,7 +13,15 @@ enum UIMode {
     CALIBRATION,
     GAME,
     ERROR,
-    COLOR_SELECT  // 8 — added at end so ERROR stays 7
+    COLOR_SELECT,  // 8 — added at end so ERROR stays 7
+    GAME_OVER      // 9
+};
+
+enum GameOverReason {
+    GAME_OVER_WHITE_WIN,
+    GAME_OVER_BLACK_WIN,
+    GAME_OVER_STALEMATE,
+    GAME_OVER_DRAW
 };
 
 enum MenuItem {
@@ -104,6 +112,9 @@ public:
 
     void clearError();
 
+    void setGameOver(GameOverReason reason);
+    GameOverReason getGameOverReason() const;
+
     // Display methods
     String getLine1() const;
     String getLine2() const;
@@ -119,6 +130,7 @@ private:
     GameStatus gameStatus;
     UIMode modeBeforeError;
     PlayerTurn selectedColor;
+    GameOverReason gameOverReason;
     
     static const int MENU_COUNT = 4;
     static const int DIFFICULTY_COUNT = 3;
