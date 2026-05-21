@@ -293,6 +293,18 @@ export const api = {
       method: "DELETE",
     }).then((r) => r.json()),
 
+  rescanLabelDataset: (name: string) =>
+    post<{ metadata: LabelDatasetMeta }>(
+      `/api/labeling/datasets/${encodeURIComponent(name)}/rescan`,
+      {},
+    ),
+
+  rescanAllLabelDatasets: () =>
+    post<{ rescanned: LabelDatasetMeta[] }>(
+      "/api/labeling/datasets/rescan-all",
+      {},
+    ),
+
   updateLabelSettings: (name: string, settings: LabelSettings) =>
     put<LabelDatasetResponse>(
       `/api/labeling/datasets/${encodeURIComponent(name)}/settings`,
@@ -438,6 +450,13 @@ export const api = {
 
   cnnActiveModel: () => get<CnnActiveModel>("/api/cnn/active-model"),
 
+  // CV router: which pipeline runs first, and how many retries each.
+  getCvConfig: () => get<CvRouterConfig>("/api/cv-config"),
+  setCvConfig: (patch: Partial<CvRouterConfig>) =>
+    post<CvRouterConfig>("/api/cv-config", patch),
+  validatedDatasetStats: () =>
+    get<ValidatedDatasetStats>("/api/validated-dataset/stats"),
+
   cnnScan: (payload: { capture?: boolean; compare_classical?: boolean }) =>
     post<CnnScanResult>("/api/cnn/scan", payload),
 
@@ -535,6 +554,37 @@ export interface CnnActiveModel {
   val_acc: number | null;
   dataset: string | null;
   loaded: boolean;
+}
+
+export type CvPrimary = "vision" | "cnn";
+
+export interface CvRouterConfig {
+  primary: CvPrimary;
+  attempts_each: number;
+  auto_save_validated: boolean;
+  dataset_name: string;
+  cnn_active: boolean;
+}
+
+export interface ValidatedDatasetCapture {
+  ts: number;
+  iso: string;
+  capture_id: string;
+  mode_used: string;
+  session_id: string | null;
+  move_uci: string | null;
+  counts: { empty: number; white: number; black: number };
+}
+
+export interface ValidatedDatasetStats {
+  dataset: string;
+  exists: boolean;
+  captures: number;
+  last: ValidatedDatasetCapture[];
+  bulk_empty: number;
+  bulk_white: number;
+  bulk_black: number;
+  path?: string;
 }
 
 export interface CnnCellPrediction {

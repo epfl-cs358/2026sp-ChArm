@@ -172,6 +172,23 @@ export default function LabelingWizardPage() {
     }
   }, []);
 
+  const [rescanning, setRescanning] = useState(false);
+  const handleRescanAll = useCallback(async () => {
+    setRescanning(true);
+    try {
+      const res = await api.rescanAllLabelDatasets();
+      await refreshDatasets();
+      const count = res.rescanned.length;
+      setError(count
+        ? `Rescanned ${count} folder${count === 1 ? "" : "s"}.`
+        : "No dataset folders found.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRescanning(false);
+    }
+  }, [refreshDatasets]);
+
   useEffect(() => {
     refreshDatasets();
   }, [refreshDatasets]);
@@ -862,7 +879,7 @@ export default function LabelingWizardPage() {
             <CardTitle className="font-jetbrains">Step 1 / 12 — Dataset configuration</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-3 items-center flex-wrap">
               <label className="flex items-center gap-2 font-jetbrains text-sm">
                 <input
                   type="radio"
@@ -885,6 +902,16 @@ export default function LabelingWizardPage() {
                 />
                 Existing dataset
               </label>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRescanAll}
+                disabled={rescanning}
+                className="ml-auto"
+                title="Rebuild metadata.json for every folder under labeled_datasets/ (picks up hand-dropped or merged datasets like combo_dataset)."
+              >
+                {rescanning ? "Rescanning…" : "Rescan folders"}
+              </Button>
             </div>
 
             {mode === "new" ? (

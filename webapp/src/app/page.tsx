@@ -10,6 +10,7 @@ import {
   Camera,
   CheckCircle2,
   Cpu,
+  Crosshair,
   Eye,
   Gauge,
   Grid3X3,
@@ -21,7 +22,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import { api, CnnActiveModel, CnnModelMeta } from "@/lib/api";
+import { api, CnnActiveModel, CnnModelMeta, CvRouterConfig } from "@/lib/api";
 import { imageSrc } from "@/lib/image";
 import {
   CalibrationData,
@@ -33,6 +34,7 @@ import {
 } from "@/lib/types";
 import ChessBoard from "@/components/ChessBoard";
 import DebugImages from "@/components/DebugImages";
+import ManualCalibration from "@/components/ManualCalibration";
 import { BASE as ARM_BASE, type ArmAngles, type ArmDebugTarget, type ArmMove } from "@/components/RobotArmOverlay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -72,9 +74,15 @@ function skillTier(skill: number): string {
 
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
 
-const DEBUG_PANELS = [
+const DEBUG_PANELS_CNN = [
   { key: "refined_warp", label: "Refined Warp" },
-  { key: "cnn_overlay", label: "CNN Scan" },
+  { key: "cnn_overlay", label: "CNN Detection" },
+] as const;
+
+const DEBUG_PANELS_VISION = [
+  { key: "refined_warp", label: "Refined Warp" },
+  { key: "occupancy_debug", label: "Occupancy" },
+  { key: "piece_color_debug", label: "Piece Colors" },
 ] as const;
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
@@ -350,23 +358,31 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState<"capture" | null>(null);
   const [lastCapturePath, setLastCapturePath] = useState<string | null>(null);
+  const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
-  const [robotPort, setRobotPort] = useState<string>(() => {
-    if (typeof window === "undefined") return DEFAULT_SERIAL_PORT;
-    return window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) || DEFAULT_SERIAL_PORT;
-  });
+  // Render with deterministic defaults on the server; hydrate from
+  // localStorage in an effect after mount so SSR and the first client
+  // render agree (avoids React hydration mismatches).
+  const [robotPort, setRobotPort] = useState<string>(DEFAULT_SERIAL_PORT);
   const [calibration, setCalibration] = useState<CalibrationData | null>(null);
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
-  const [skillLevel, setSkillLevel] = useState<number>(() => {
-    if (typeof window === "undefined") return DEFAULT_SKILL_LEVEL;
-    const stored = window.localStorage.getItem(SKILL_LEVEL_STORAGE_KEY);
-    const parsed = stored ? parseInt(stored, 10) : NaN;
-    if (!Number.isFinite(parsed)) return DEFAULT_SKILL_LEVEL;
-    return Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, parsed));
-  });
+  const [skillLevel, setSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
   const [showSkillModal, setShowSkillModal] = useState(false);
-  const [draftSkillLevel, setDraftSkillLevel] = useState<number>(skillLevel);
+  const [draftSkillLevel, setDraftSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
+
+  useEffect(() => {
+    const storedPort = window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY);
+    if (storedPort) setRobotPort(storedPort);
+
+    const storedSkill = window.localStorage.getItem(SKILL_LEVEL_STORAGE_KEY);
+    const parsed = storedSkill ? parseInt(storedSkill, 10) : NaN;
+    if (Number.isFinite(parsed)) {
+      const clamped = Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, parsed));
+      setSkillLevel(clamped);
+      setDraftSkillLevel(clamped);
+    }
+  }, []);
   const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
 
   // CNN model state
@@ -374,6 +390,31 @@ export default function Dashboard() {
   const [activeCnnModel, setActiveCnnModel] = useState<CnnActiveModel | null>(null);
   const [showCnnModelModal, setShowCnnModelModal] = useState(false);
   const [cnnModelBusy, setCnnModelBusy] = useState(false);
+
+  // CV router state (primary/fallback + validated-capture toggle)
+  const [cvConfig, setCvConfig] = useState<CvRouterConfig | null>(null);
+  const [cvConfigBusy, setCvConfigBusy] = useState(false);
+
+  const refreshCvConfig = useCallback(async () => {
+    try {
+      const cfg = await api.getCvConfig();
+      setCvConfig(cfg);
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
+  const patchCvConfig = useCallback(async (patch: Partial<CvRouterConfig>) => {
+    setCvConfigBusy(true);
+    try {
+      const updated = await api.setCvConfig(patch);
+      setCvConfig(updated);
+    } catch {
+      // ignore — UI keeps last known value
+    } finally {
+      setCvConfigBusy(false);
+    }
+  }, []);
 
   const armMoveId = useRef(0);
 
@@ -414,8 +455,9 @@ export default function Dashboard() {
       })
       .catch(() => undefined);
     refreshCnnState();
+    refreshCvConfig();
     return () => { cancelled = true; };
-  }, [refreshCnnState]);
+  }, [refreshCnnState, refreshCvConfig]);
 
   const activateCnnModel = useCallback(async (run_id: string) => {
     setCnnModelBusy(true);
@@ -651,6 +693,15 @@ export default function Dashboard() {
             {armCalibrated ? "Arm calibrated" : "Arm calibration required"}
           </Button>
           <Button
+            variant="outline"
+            onClick={() => setShowManualCalibrationModal(true)}
+            className="font-jetbrains"
+            title="Manually calibrate the board warp / inner grid used by the CNN scan."
+          >
+            <Crosshair className="size-4" />
+            Manual calibration
+          </Button>
+          <Button
             onClick={processHumanTurn}
             disabled={busy || !armCalibrated}
             className="font-jetbrains"
@@ -775,6 +826,71 @@ export default function Dashboard() {
         </Card>
 
         <div className="flex flex-col gap-5">
+          {/* CV Mode card */}
+          <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+            <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
+              <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>CV Mode</h2>
+              <Link href="/lab/vision-settings" className="font-jetbrains text-xs underline" style={{ color: "var(--charm-muted)" }}>
+                advanced
+              </Link>
+            </CardHeader>
+            <CardContent className="px-4 pb-4 space-y-3">
+              <p className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                Primary CV runs first; the other is the fallback. Each gets {cvConfig?.attempts_each ?? 5} fresh-frame attempts.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {(["vision", "cnn"] as const).map((mode) => {
+                  const active = cvConfig?.primary === mode;
+                  const cnnUnavailable = mode === "cnn" && cvConfig?.cnn_active === false;
+                  return (
+                    <button
+                      key={mode}
+                      disabled={cvConfigBusy || cnnUnavailable}
+                      onClick={() => { void patchCvConfig({ primary: mode }); }}
+                      className="rounded border px-3 py-2 font-jetbrains text-xs transition-colors"
+                      style={{
+                        borderColor: active ? "oklch(from var(--charm-cyan) l c h / 0.6)" : "var(--charm-border)",
+                        color: active ? "var(--charm-cyan)" : cnnUnavailable ? "var(--charm-muted)" : "var(--charm-text)",
+                        background: active ? "oklch(from var(--charm-cyan) l c h / 0.08)" : "transparent",
+                        opacity: cnnUnavailable ? 0.5 : 1,
+                        cursor: cnnUnavailable ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      <div className="font-semibold uppercase tracking-wider">{mode === "vision" ? "Vision" : "CNN"}</div>
+                      <div className="mt-0.5 text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                        {mode === "vision" ? "classical pipeline" : cnnUnavailable ? "no model active" : "neural net"}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>
+                <input
+                  type="checkbox"
+                  checked={cvConfig?.auto_save_validated ?? true}
+                  disabled={cvConfigBusy}
+                  onChange={(e) => { void patchCvConfig({ auto_save_validated: e.target.checked }); }}
+                />
+                Save validated frames to <code style={{ color: "var(--charm-cyan)" }}>{cvConfig?.dataset_name ?? "validated_live"}</code>
+              </label>
+              {result?.cv_router && (
+                <div className="rounded-md border border-border px-3 py-2 font-jetbrains text-[11px]">
+                  <p style={{ color: "var(--charm-muted)" }}>Last scan</p>
+                  <p className="mt-1" style={{ color: "var(--charm-text)" }}>
+                    Validated by <span style={{ color: "var(--charm-cyan)" }}>{result.cv_router.mode_used ?? "—"}</span>
+                    {" · "}
+                    {result.cv_router.by_mode.vision}× vision, {result.cv_router.by_mode.cnn}× CNN
+                  </p>
+                  {result.validated_capture?.saved && (
+                    <p className="mt-0.5" style={{ color: "var(--charm-muted)" }}>
+                      Saved 64 cells → {result.validated_capture.dataset}
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* CNN Vision card */}
           <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
             <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
@@ -812,7 +928,7 @@ export default function Dashboard() {
                 <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>{lastCapturePath ?? result?.image_path ?? "waiting"}</p>
               </div>
               <DebugImages
-                panels={DEBUG_PANELS.map(({ key, label }) => ({
+                panels={(result?.cv_mode === "vision" ? DEBUG_PANELS_VISION : DEBUG_PANELS_CNN).map(({ key, label }) => ({
                   key,
                   label,
                   b64: result?.[key as keyof PipelineResult] as string | undefined,
@@ -820,11 +936,32 @@ export default function Dashboard() {
                 gridClassName="grid grid-cols-2 gap-3"
                 imageMaxHeight={210}
               />
-              {result?.color_labels && (
-                <div className="overflow-auto">
-                  <ChessBoard colorLabels={result.color_labels} occupancyScores={result.occupancy_scores} brightnessScores={result.brightness_scores} highlightUnknown />
-                </div>
-              )}
+              {(() => {
+                // Vision pipeline produces color_labels directly. CNN doesn't,
+                // so derive a label grid from the bitmaps so the visual board
+                // shows in both modes.
+                let labels = result?.color_labels;
+                if (!labels && result?.white_bitmap && result?.black_bitmap) {
+                  labels = result.white_bitmap.map((row, r) =>
+                    row.map((wb, c) => {
+                      if (wb) return "white" as const;
+                      if (result.black_bitmap[r][c]) return "black" as const;
+                      return "empty" as const;
+                    }),
+                  );
+                }
+                if (!labels) return null;
+                return (
+                  <div className="overflow-auto">
+                    <ChessBoard
+                      colorLabels={labels}
+                      occupancyScores={result?.occupancy_scores}
+                      brightnessScores={result?.brightness_scores}
+                      highlightUnknown
+                    />
+                  </div>
+                );
+              })()}
             </CardContent>
           </Card>
 
@@ -974,6 +1111,34 @@ export default function Dashboard() {
           Stockfish skill level set to <span style={{ color: "var(--charm-cyan)" }}>{skillApplyToast.level}/20</span>
           <span style={{ color: "var(--charm-muted)" }}>(~{estimateEloForSkill(skillApplyToast.level)} Elo)</span>
           <span style={{ color: "var(--charm-muted)" }}>— applies on next robot move.</span>
+        </div>
+      )}
+
+      {showManualCalibrationModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.7)" }}
+          onClick={() => setShowManualCalibrationModal(false)}
+        >
+          <div
+            className="w-full max-w-7xl max-h-[95vh] overflow-y-auto rounded-md border shadow-2xl bg-black"
+            style={{ borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-2" style={{ borderColor: "var(--charm-border)" }}>
+              <span className="font-jetbrains text-sm font-semibold text-white">Manual Calibration</span>
+              <button
+                onClick={() => setShowManualCalibrationModal(false)}
+                className="font-jetbrains text-xs"
+                style={{ color: "var(--charm-muted)" }}
+              >
+                ✕ close
+              </button>
+            </div>
+            <div className="bg-background">
+              <ManualCalibration imagePath={lastCapturePath} />
+            </div>
+          </div>
         </div>
       )}
 

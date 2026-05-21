@@ -17,13 +17,6 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import ArucoCalibration from "@/components/ArucoCalibration";
 import ManualCalibration from "@/components/ManualCalibration";
 import CnnScanPanel from "@/components/CnnScanPanel";
@@ -31,45 +24,39 @@ import CnnScanPanel from "@/components/CnnScanPanel";
 const STEPS = [
   {
     id: 1,
-    label: "Preflight check",
-    blurb:
-      "Make sure the camera is reachable and the chessboard has been calibrated. Everything else needs these in place.",
-  },
-  {
-    id: 2,
     label: "Pick source captures",
     blurb:
       "Pick the labeling dataset that already has photos of the empty board and one piece on each square. We'll reuse them to teach the model.",
   },
   {
-    id: 3,
+    id: 2,
     label: "Build CNN dataset",
     blurb:
-      "We cut each photo into 64 little squares and label every one. The result is the training set the model will learn from.",
+      "We cut each photo into 64 little squares and label every one. The result is the training set the model will learn from. No camera needed.",
+  },
+  {
+    id: 3,
+    label: "Train model",
+    blurb:
+      "We're teaching the computer to recognize whether each square is empty, has a white piece, or a black piece. No camera needed.",
   },
   {
     id: 4,
-    label: "Train model",
-    blurb:
-      "We're teaching the computer to recognize whether each square is empty, has a white piece, or a black piece.",
-  },
-  {
-    id: 5,
     label: "Activate model",
     blurb:
       "Pick which trained model the live system should use. You can train more later and switch back any time.",
   },
   {
-    id: 6,
+    id: 5,
     label: "Live test & debug",
     blurb:
-      "Try the model on a fresh capture and inspect every square. If the model gets one wrong, mark it — that gets folded into the next training run.",
+      "Try the model on a fresh capture and inspect every square. This is the step that needs the camera and a board calibration — we'll set it up here if it's missing.",
   },
 ] as const;
 
 type StepId = (typeof STEPS)[number]["id"];
 
-const STORAGE_KEY = "charm.cnn.wizard.v1";
+const STORAGE_KEY = "charm.cnn.wizard.v2";
 
 interface WizardState {
   step: StepId;
@@ -200,95 +187,7 @@ function Breadcrumb({
 
 // ---------- Step components ----------
 
-function Step1Preflight({
-  status,
-  refresh,
-  onContinue,
-}: {
-  status: CalibrationStatus | null;
-  refresh: () => void;
-  onContinue: () => void;
-}) {
-  const [calMode, setCalMode] = useState<"manual" | "aruco">("manual");
-  return (
-    <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-      <CardContent className="p-5 flex flex-col gap-4">
-        <div className="flex flex-wrap gap-4">
-          <Badge
-            ok={status?.board_calibration_present ?? "loading"}
-            label={
-              status?.board_calibration_present
-                ? `board calibration saved${
-                    status.board_calibration_age_seconds != null
-                      ? ` (${Math.round(status.board_calibration_age_seconds / 60)} min ago)`
-                      : ""
-                  }`
-                : "board calibration missing"
-            }
-          />
-          <Badge
-            ok={status?.inner_warp_present ?? "loading"}
-            label={
-              status?.inner_warp_present
-                ? "inner-warp calibration saved"
-                : "inner-warp calibration missing"
-            }
-          />
-          <Badge
-            ok={status?.camera_reachable ?? "loading"}
-            label={status?.camera_reachable ? "camera reachable" : "camera offline"}
-          />
-        </div>
-
-        <div className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-          If a badge is amber, fix it below. Pick a calibration method — manual
-          point-picking or ArUco auto-detect.
-        </div>
-
-        <div className="flex gap-3 items-center font-jetbrains text-xs">
-          <span style={{ color: "var(--charm-muted)" }}>Calibration:</span>
-          <label className="flex items-center gap-1.5">
-            <input
-              type="radio"
-              checked={calMode === "manual"}
-              onChange={() => setCalMode("manual")}
-            />
-            Manual
-          </label>
-          <label className="flex items-center gap-1.5">
-            <input
-              type="radio"
-              checked={calMode === "aruco"}
-              onChange={() => setCalMode("aruco")}
-            />
-            ArUco markers
-          </label>
-        </div>
-
-        {calMode === "manual" ? <ManualCalibration /> : <ArucoCalibration embedded />}
-
-        <div className="flex gap-2 pt-2">
-          <Button size="sm" variant="outline" onClick={refresh}>
-            re-check
-          </Button>
-          <Button
-            size="sm"
-            disabled={
-              !status?.board_calibration_present ||
-              !status?.inner_warp_present ||
-              !status?.camera_reachable
-            }
-            onClick={onContinue}
-          >
-            continue
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function Step2PickSource({
+function Step1PickSource({
   sources,
   refresh,
   picked,
@@ -378,7 +277,7 @@ function Step2PickSource({
   );
 }
 
-function Step3Build({
+function Step2Build({
   source,
   outputName,
   buildId,
@@ -545,7 +444,7 @@ function LiveChart({ history }: { history: { epoch: number; train_acc: number; v
   );
 }
 
-function Step4Train({
+function Step3Train({
   dataset,
   trainJobId,
   trainStatus,
@@ -713,7 +612,7 @@ function Step4Train({
   );
 }
 
-function Step5Activate({
+function Step4Activate({
   models,
   active,
   refresh,
@@ -741,7 +640,7 @@ function Step5Activate({
         <div className="flex flex-col gap-2">
           {models.length === 0 && (
             <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-              No trained models yet. Go back to step 4.
+              No trained models yet. Go back to step 3.
             </span>
           )}
           {models.map((m) => {
@@ -778,6 +677,125 @@ function Step5Activate({
   );
 }
 
+function Step5Test({
+  calStatus,
+  refreshCal,
+  active,
+  models,
+  refreshModels,
+  onActivate,
+}: {
+  calStatus: CalibrationStatus | null;
+  refreshCal: () => void;
+  active: CnnActiveModel | null;
+  models: CnnModelMeta[];
+  refreshModels: () => void;
+  onActivate: (run_id: string) => void;
+}) {
+  const [calMode, setCalMode] = useState<"manual" | "aruco">("manual");
+  const calOk = !!(
+    calStatus?.board_calibration_present &&
+    calStatus?.inner_warp_present &&
+    calStatus?.camera_reachable
+  );
+  const hasActive = !!active?.run_id;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+        <CardContent className="p-5 flex flex-col gap-3">
+          <div className="flex flex-wrap gap-4">
+            <Badge
+              ok={calStatus?.board_calibration_present ?? "loading"}
+              label={
+                calStatus?.board_calibration_present
+                  ? `board calibration saved${
+                      calStatus.board_calibration_age_seconds != null
+                        ? ` (${Math.round(calStatus.board_calibration_age_seconds / 60)} min ago)`
+                        : ""
+                    }`
+                  : "board calibration missing"
+              }
+            />
+            <Badge
+              ok={calStatus?.inner_warp_present ?? "loading"}
+              label={
+                calStatus?.inner_warp_present
+                  ? "inner-warp calibration saved"
+                  : "inner-warp calibration missing"
+              }
+            />
+            <Badge
+              ok={calStatus?.camera_reachable ?? "loading"}
+              label={calStatus?.camera_reachable ? "camera reachable" : "camera offline"}
+            />
+            <Badge
+              ok={hasActive}
+              label={hasActive ? `active model: ${active!.run_id}` : "no active model"}
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={refreshCal}>
+              re-check
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {!hasActive && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-5 flex flex-col gap-3">
+            <div className="text-xs font-jetbrains" style={{ color: "var(--charm-amber)" }}>
+              Pick a model to activate before testing.
+            </div>
+            <Step4Activate
+              models={models}
+              active={active}
+              refresh={refreshModels}
+              onActivate={onActivate}
+              onContinue={() => {
+                /* no-op, we're already on the test step */
+              }}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {hasActive && !calOk && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-5 flex flex-col gap-3">
+            <div className="text-xs font-jetbrains" style={{ color: "var(--charm-amber)" }}>
+              Live testing needs a board calibration and a reachable camera. Set them up below.
+            </div>
+            <div className="flex gap-3 items-center font-jetbrains text-xs">
+              <span style={{ color: "var(--charm-muted)" }}>Calibration:</span>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={calMode === "manual"}
+                  onChange={() => setCalMode("manual")}
+                />
+                Manual
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={calMode === "aruco"}
+                  onChange={() => setCalMode("aruco")}
+                />
+                ArUco markers
+              </label>
+            </div>
+            {calMode === "manual" ? <ManualCalibration /> : <ArucoCalibration embedded />}
+          </CardContent>
+        </Card>
+      )}
+
+      {hasActive && calOk && <CnnScanPanel />}
+    </div>
+  );
+}
+
 // ---------- Page ----------
 
 export default function CnnWizardPage() {
@@ -799,7 +817,7 @@ export default function CnnWizardPage() {
     saveState({ step, buildId, builtOutput, trainJobId, trainRunId, pickedSource, outputName });
   }, [step, buildId, builtOutput, trainJobId, trainRunId, pickedSource, outputName]);
 
-  // ---- step 1 ----
+  // ---- calibration (only needed for step 5) ----
   const [calStatus, setCalStatus] = useState<CalibrationStatus | null>(null);
   const refreshStatus = useCallback(async () => {
     try {
@@ -809,12 +827,13 @@ export default function CnnWizardPage() {
     }
   }, []);
   useEffect(() => {
+    if (step !== 5) return;
     refreshStatus();
     const t = setInterval(refreshStatus, 5000);
     return () => clearInterval(t);
-  }, [refreshStatus]);
+  }, [step, refreshStatus]);
 
-  // ---- step 2 ----
+  // ---- step 1 ----
   const [sources, setSources] = useState<CnnSourceDatasetMeta[]>([]);
   const refreshSources = useCallback(async () => {
     try {
@@ -825,10 +844,10 @@ export default function CnnWizardPage() {
     }
   }, []);
   useEffect(() => {
-    if (step === 2) refreshSources();
+    if (step === 1) refreshSources();
   }, [step, refreshSources]);
 
-  // ---- step 3 ----
+  // ---- step 2 ----
   const [buildStatus, setBuildStatus] = useState<CnnBuildStatus | null>(null);
   const [preview, setPreview] = useState<Record<string, string[]> | null>(null);
   const buildPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -898,7 +917,7 @@ export default function CnnWizardPage() {
     }
   }, [builtOutput]);
 
-  // ---- step 4 ----
+  // ---- step 3 ----
   const [trainStatus, setTrainStatus] = useState<CnnTrainStatus | null>(null);
   const [artifacts, setArtifacts] = useState<CnnTrainArtifacts | null>(null);
   const trainPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -971,7 +990,7 @@ export default function CnnWizardPage() {
     }
   }, [trainRunId]);
 
-  // ---- step 5 ----
+  // ---- step 4 / 5 (active model list) ----
   const [models, setModels] = useState<CnnModelMeta[]>([]);
   const [active, setActive] = useState<CnnActiveModel | null>(null);
   const refreshModels = useCallback(async () => {
@@ -988,7 +1007,7 @@ export default function CnnWizardPage() {
     }
   }, []);
   useEffect(() => {
-    if (step === 5 || step === 6) refreshModels();
+    if (step === 4 || step === 5) refreshModels();
   }, [step, refreshModels]);
 
   const activateModel = useCallback(async (run_id: string) => {
@@ -1001,23 +1020,12 @@ export default function CnnWizardPage() {
   }, [refreshModels]);
 
   // ---- gating ----
-  const calOk = !!(calStatus?.board_calibration_present && calStatus?.inner_warp_present && calStatus?.camera_reachable);
-  const sourceOk = !!pickedSource && !!outputName.trim();
-  const buildOk = !!buildStatus?.finished && !buildStatus?.error;
-  const trainOk = !!trainStatus?.finished && !trainStatus?.error;
-  const activateOk = !!active?.run_id;
-
+  // Training steps (1-4) are unlocked by data, not by calibration.
+  // Step 5 (Live test) is always reachable so users can try the model and
+  // calibrate inline if needed.
   const canGoTo = useCallback(
-    (s: StepId): boolean => {
-      if (s <= 1) return true;
-      if (s === 2) return calOk;
-      if (s === 3) return calOk && sourceOk;
-      if (s === 4) return calOk && sourceOk && buildOk;
-      if (s === 5) return calOk && sourceOk && buildOk && trainOk;
-      if (s === 6) return calOk && sourceOk && buildOk && trainOk && activateOk;
-      return false;
-    },
-    [calOk, sourceOk, buildOk, trainOk, activateOk],
+    (_s: StepId): boolean => true,
+    [],
   );
 
   const blurb = useMemo(() => STEPS.find((s) => s.id === step)?.blurb ?? "", [step]);
@@ -1029,7 +1037,8 @@ export default function CnnWizardPage() {
           CNN training & deployment wizard
         </h1>
         <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-          Walks you through training a per-cell piece classifier and using it live. Resumes after a tab close.
+          Training (steps 1–4) doesn&apos;t need the camera. Calibration only comes
+          up when you reach Live test. Jump to any step anytime.
         </p>
       </div>
 
@@ -1037,21 +1046,18 @@ export default function CnnWizardPage() {
       <StepHeader step={step} blurb={blurb} />
 
       {step === 1 && (
-        <Step1Preflight status={calStatus} refresh={refreshStatus} onContinue={() => setStep(2)} />
-      )}
-      {step === 2 && (
-        <Step2PickSource
+        <Step1PickSource
           sources={sources}
           refresh={refreshSources}
           picked={pickedSource}
           setPicked={setPickedSource}
           outputName={outputName}
           setOutputName={setOutputName}
-          onContinue={() => setStep(3)}
+          onContinue={() => setStep(2)}
         />
       )}
-      {step === 3 && (
-        <Step3Build
+      {step === 2 && (
+        <Step2Build
           source={pickedSource}
           outputName={outputName}
           buildId={buildId}
@@ -1059,45 +1065,38 @@ export default function CnnWizardPage() {
           buildStatus={buildStatus}
           preview={preview}
           loadPreview={loadPreview}
-          onContinue={() => setStep(4)}
+          onContinue={() => setStep(3)}
         />
       )}
-      {step === 4 && (
-        <Step4Train
+      {step === 3 && (
+        <Step3Train
           dataset={builtOutput}
           trainJobId={trainJobId}
           trainStatus={trainStatus}
           startTrain={startTrain}
           artifacts={artifacts}
           loadArtifacts={loadArtifacts}
-          onContinue={() => setStep(5)}
+          onContinue={() => setStep(4)}
         />
       )}
-      {step === 5 && (
-        <Step5Activate
+      {step === 4 && (
+        <Step4Activate
           models={models}
           active={active}
           refresh={refreshModels}
           onActivate={activateModel}
-          onContinue={() => setStep(6)}
+          onContinue={() => setStep(5)}
         />
       )}
-      {step === 6 && (
-        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-          <CardContent className="p-5">
-            {!active?.run_id ? (
-              <div className="text-xs font-jetbrains" style={{ color: "var(--charm-amber)" }}>
-                No active model — go back to step 5 to activate one.
-              </div>
-            ) : !calOk ? (
-              <div className="text-xs font-jetbrains" style={{ color: "var(--charm-amber)" }}>
-                Calibration missing — go back to step 1 to fix it.
-              </div>
-            ) : (
-              <CnnScanPanel />
-            )}
-          </CardContent>
-        </Card>
+      {step === 5 && (
+        <Step5Test
+          calStatus={calStatus}
+          refreshCal={refreshStatus}
+          active={active}
+          models={models}
+          refreshModels={refreshModels}
+          onActivate={activateModel}
+        />
       )}
     </div>
   );

@@ -77,6 +77,26 @@ export interface PipelineResult {
     observed_black_bitmap: number[][];
     color_labels: ColorLabel[][];
   };
+  cv_mode?: "vision" | "cnn";
+  cv_router?: {
+    mode_used: "vision" | "cnn" | null;
+    by_mode: { vision: number; cnn: number };
+    total: number;
+    attempts: Array<{
+      mode: "vision" | "cnn";
+      index: number;
+      success: boolean;
+      error: string | null;
+      elapsed_ms: number;
+    }>;
+    final_error: string | null;
+  };
+  validated_capture?: {
+    saved: boolean;
+    dataset: string;
+    counts?: { empty: number; white: number; black: number };
+    error?: string | null;
+  } | null;
 }
 
 export interface PipelineSnapshotSaveResult {
