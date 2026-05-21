@@ -16,6 +16,21 @@ class OccupancyResult:
     score: float
 
 
+def remove_slow_lighting(gray: np.ndarray) -> np.ndarray:
+    """
+    Remove broad lighting/shadow gradients while keeping local piece texture.
+
+    Shadows usually change slowly across a cell.  A chess piece creates smaller
+    local edges and contrast, so subtracting a heavily blurred background makes
+    occupancy scoring less sensitive to uneven light.
+    """
+    h, w = gray.shape[:2]
+    kernel_size = max(15, (min(h, w) // 2) | 1)
+    background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
+    corrected = cv2.addWeighted(gray, 1.0, background, -1.0, 128.0)
+    return corrected
+
+
 def compute_occupancy_score(cell_image: np.ndarray) -> float:
     h, w = cell_image.shape[:2]
 
@@ -27,12 +42,13 @@ def compute_occupancy_score(cell_image: np.ndarray) -> float:
     roi = cell_image[y1:y2, x1:x2]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    corrected = remove_slow_lighting(gray)
 
     clahe = cv2.createCLAHE(
         clipLimit=4.0,
         tileGridSize=(3, 3),
     )
-    enhanced = clahe.apply(gray)
+    enhanced = clahe.apply(corrected)
 
     # After CLAHE, pieces usually create stronger local contrast than empty squares.
     std_score = float(np.std(enhanced))
