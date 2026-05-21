@@ -12,7 +12,6 @@ import {
   Cpu,
   Eye,
   Gauge,
-  Sliders,
   Grid3X3,
   Loader2,
   Settings,
@@ -20,8 +19,9 @@ import {
   Swords,
   UserRound,
   XCircle,
+  Zap,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, CnnActiveModel, CnnModelMeta } from "@/lib/api";
 import { imageSrc } from "@/lib/image";
 import {
   CalibrationData,
@@ -33,9 +33,6 @@ import {
 } from "@/lib/types";
 import ChessBoard from "@/components/ChessBoard";
 import DebugImages from "@/components/DebugImages";
-import ParamControls from "@/components/ParamControls";
-import ManualCalibration from "@/components/ManualCalibration";
-import { TuneCvModal } from "@/components/TuneCvModal";
 import { BASE as ARM_BASE, type ArmAngles, type ArmDebugTarget, type ArmMove } from "@/components/RobotArmOverlay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -49,16 +46,9 @@ const DEFAULT_SKILL_LEVEL = 12;
 const MIN_SKILL_LEVEL = 1;
 const MAX_SKILL_LEVEL = 20;
 
-// Rough ELO estimates per Stockfish "Skill Level" setting. Anchored to widely
-// cited community measurements: skill 0 ≈ 1100, 5 ≈ 1500, 10 ≈ 1800, 15 ≈ 2300,
-// 20 ≈ 2850 (full strength). Linear interpolation between anchors.
 function estimateEloForSkill(skill: number): number {
   const anchors: Array<[number, number]> = [
-    [0, 1100],
-    [5, 1500],
-    [10, 1800],
-    [15, 2300],
-    [20, 2850],
+    [0, 1100], [5, 1500], [10, 1800], [15, 2300], [20, 2850],
   ];
   const s = Math.max(0, Math.min(20, skill));
   for (let i = 0; i < anchors.length - 1; i++) {
@@ -83,14 +73,8 @@ function skillTier(skill: number): string {
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
 
 const DEBUG_PANELS = [
-  { key: "original", label: "Raw" },
-  { key: "board_edges_debug", label: "Board Edges" },
-  { key: "first_warp", label: "Board Warp" },
   { key: "refined_warp", label: "Refined Warp" },
-  { key: "preprocessed", label: "Preprocessed" },
-  { key: "grid_debug", label: "Grid" },
-  { key: "occupancy_debug", label: "Occupancy" },
-  { key: "piece_color_debug", label: "Piece Colors" },
+  { key: "cnn_overlay", label: "CNN Scan" },
 ] as const;
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
@@ -120,32 +104,19 @@ const COORDINATE_COLORS = {
   dark: "var(--charm-board-dark)",
 } as const;
 const PIECE_IMAGE_PATHS: Record<string, string> = {
-  wp: "/chesscom-pieces/wp.png",
-  wn: "/chesscom-pieces/wn.png",
-  wb: "/chesscom-pieces/wb.png",
-  wr: "/chesscom-pieces/wr.png",
-  wq: "/chesscom-pieces/wq.png",
-  wk: "/chesscom-pieces/wk.png",
-  bp: "/chesscom-pieces/bp.png",
-  bn: "/chesscom-pieces/bn.png",
-  bb: "/chesscom-pieces/bb.png",
-  br: "/chesscom-pieces/br.png",
-  bq: "/chesscom-pieces/bq.png",
-  bk: "/chesscom-pieces/bk.png",
+  wp: "/chesscom-pieces/wp.png", wn: "/chesscom-pieces/wn.png",
+  wb: "/chesscom-pieces/wb.png", wr: "/chesscom-pieces/wr.png",
+  wq: "/chesscom-pieces/wq.png", wk: "/chesscom-pieces/wk.png",
+  bp: "/chesscom-pieces/bp.png", bn: "/chesscom-pieces/bn.png",
+  bb: "/chesscom-pieces/bb.png", br: "/chesscom-pieces/br.png",
+  bq: "/chesscom-pieces/bq.png", bk: "/chesscom-pieces/bk.png",
 };
 const DEFAULT_SERIAL_PORT = "/dev/ttyUSB0";
 const ROBOT_PORT_STORAGE_KEY = "charm.robot.port";
 
 type TurnState =
-  | "arm_calibrate"
-  | "arm_calibrating"
-  | "human_turn"
-  | "capturing"
-  | "processing"
-  | "human_move_found"
-  | "robot_thinking"
-  | "robot_moving"
-  | "error";
+  | "arm_calibrate" | "arm_calibrating" | "human_turn" | "capturing"
+  | "processing" | "human_move_found" | "robot_thinking" | "robot_moving" | "error";
 
 const FLOW = [
   { key: "arm_calibrate", label: "Arm calibrate", icon: ShieldCheck },
@@ -158,13 +129,7 @@ const FLOW = [
 ] as const;
 
 function uciToArmMove(uci: string, san: string, id: number): ArmMove {
-  return {
-    id,
-    from: uci.slice(0, 2),
-    to: uci.slice(2, 4),
-    label: `robot ${san}`,
-    piece: "♟",
-  };
+  return { id, from: uci.slice(0, 2), to: uci.slice(2, 4), label: `robot ${san}`, piece: "♟" };
 }
 
 function robotPositionToBoardTarget(
@@ -173,46 +138,28 @@ function robotPositionToBoardTarget(
 ): ArmDebugTarget | null {
   const robotCalibration = status?.robot_calibration;
   if (!robotCalibration?.exists) return null;
-
   const { a1, file_vector, rank_vector } = robotCalibration.calibration;
   const dx = position.x - a1.x;
   const dy = position.y - a1.y;
   const det = file_vector.x * rank_vector.y - file_vector.y * rank_vector.x;
   if (Math.abs(det) < 0.001) return null;
-
-  const fileIndex = (dx * rank_vector.y - dy * rank_vector.x) / det;
-  const rankIndex = (file_vector.x * dy - file_vector.y * dx) / det;
-
   return {
-    x: fileIndex + 0.5,
-    y: 7.5 - rankIndex,
+    x: (dx * rank_vector.y - dy * rank_vector.x) / det + 0.5,
+    y: 7.5 - (file_vector.x * dy - file_vector.y * dx) / det,
   };
 }
 
 function ChessComCoordinates({ svgBoardUnits = false }: { svgBoardUnits?: boolean }) {
   const labels = [...COORDINATE_RANKS, ...COORDINATE_FILES];
   const content = labels.map((coord) => (
-    <text
-      key={coord.label}
-      x={coord.x}
-      y={coord.y}
-      fontSize="2.8"
-      fontWeight="700"
-      fontFamily="Arial, Helvetica, sans-serif"
-      fill={COORDINATE_COLORS[coord.tone]}
-    >
+    <text key={coord.label} x={coord.x} y={coord.y} fontSize="2.8" fontWeight="700"
+      fontFamily="Arial, Helvetica, sans-serif" fill={COORDINATE_COLORS[coord.tone]}>
       {coord.label}
     </text>
   ));
-
   if (svgBoardUnits) {
-    return (
-      <g transform="scale(0.08)" pointerEvents="none" aria-hidden="true">
-        {content}
-      </g>
-    );
+    return <g transform="scale(0.08)" pointerEvents="none" aria-hidden="true">{content}</g>;
   }
-
   return (
     <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0" aria-hidden="true">
       {content}
@@ -220,18 +167,9 @@ function ChessComCoordinates({ svgBoardUnits = false }: { svgBoardUnits?: boolea
   );
 }
 
-function BoardPiecesSvg({
-  game,
-  visible,
-  opacity,
-}: {
-  game: Chess;
-  visible: boolean;
-  opacity: number;
-}) {
+function BoardPiecesSvg({ game, visible, opacity }: { game: Chess; visible: boolean; opacity: number }) {
   const board = useMemo(() => game.board(), [game]);
   if (!visible) return null;
-
   return (
     <g opacity={opacity}>
       {board.map((row, rowIndex) =>
@@ -241,12 +179,8 @@ function BoardPiecesSvg({
           return (
             <image
               key={`${FILES[colIndex]}${RANKS[rowIndex]}-${piece.color}${piece.type}`}
-              href={pieceImage}
-              x={colIndex + 0.03}
-              y={rowIndex - 0.02}
-              width={0.94}
-              height={0.94}
-              preserveAspectRatio="xMidYMid meet"
+              href={pieceImage} x={colIndex + 0.03} y={rowIndex - 0.02}
+              width={0.94} height={0.94} preserveAspectRatio="xMidYMid meet"
             />
           );
         }),
@@ -257,7 +191,6 @@ function BoardPiecesSvg({
 
 function LogicalBoard({ game, lastMove }: { game: Chess; lastMove: string | null }) {
   const board = useMemo(() => game.board(), [game]);
-
   return (
     <div className="mx-auto w-full max-w-[300px]">
       <div className="relative grid aspect-square grid-cols-8 grid-rows-8 overflow-hidden rounded-md border border-border">
@@ -268,25 +201,14 @@ function LogicalBoard({ game, lastMove }: { game: Chess; lastMove: string | null
             const highlighted = lastMove?.slice(0, 2) === square || lastMove?.slice(2, 4) === square;
             const pieceImage = piece ? PIECE_IMAGE_PATHS[`${piece.color}${piece.type}`] : null;
             return (
-              <div
-                key={square}
-                className="relative flex min-h-0 min-w-0 items-center justify-center"
+              <div key={square} className="relative flex min-h-0 min-w-0 items-center justify-center"
                 style={{
-                  background: highlighted
-                    ? "oklch(0.78 0.14 210 / 0.55)"
-                    : light
-                    ? "var(--charm-board-light)"
-                    : "var(--charm-board-dark)",
-                }}
-              >
+                  background: highlighted ? "oklch(0.78 0.14 210 / 0.55)"
+                    : light ? "var(--charm-board-light)" : "var(--charm-board-dark)",
+                }}>
                 {pieceImage && (
-                  <span
-                    aria-hidden="true"
-                    className="block h-[92%] w-[92%] bg-contain bg-center bg-no-repeat"
-                    style={{
-                      backgroundImage: `url(${pieceImage})`,
-                    }}
-                  />
+                  <span aria-hidden="true" className="block h-[92%] w-[92%] bg-contain bg-center bg-no-repeat"
+                    style={{ backgroundImage: `url(${pieceImage})` }} />
                 )}
               </div>
             );
@@ -308,17 +230,18 @@ function FlowRail({ state, armCalibrated }: { state: TurnState; armCalibrated: b
         const active = index === activeIndex;
         const done = state !== "error" && (index < activeIndex || (step.key === "arm_calibrate" && armCalibrated));
         return (
-          <div
-            key={step.key}
-            className="rounded-md border px-3 py-2"
+          <div key={step.key} className="rounded-md border px-3 py-2"
             style={{
               borderColor: active ? "oklch(from var(--charm-cyan) l c h / 0.45)" : "var(--charm-border)",
               background: active ? "oklch(from var(--charm-cyan) l c h / 0.1)" : "var(--charm-card)",
-            }}
-          >
+            }}>
             <div className="flex items-center gap-2">
-              {done ? <CheckCircle2 className="size-4" style={{ color: "var(--charm-cyan)" }} /> : <Icon className="size-4" style={{ color: active ? "var(--charm-cyan)" : "var(--charm-muted)" }} />}
-              <span className="font-jetbrains text-xs" style={{ color: active ? "var(--charm-text)" : "var(--charm-muted)" }}>{step.label}</span>
+              {done
+                ? <CheckCircle2 className="size-4" style={{ color: "var(--charm-cyan)" }} />
+                : <Icon className="size-4" style={{ color: active ? "var(--charm-cyan)" : "var(--charm-muted)" }} />}
+              <span className="font-jetbrains text-xs" style={{ color: active ? "var(--charm-text)" : "var(--charm-muted)" }}>
+                {step.label}
+              </span>
             </div>
           </div>
         );
@@ -329,33 +252,35 @@ function FlowRail({ state, armCalibrated }: { state: TurnState; armCalibrated: b
 
 function ImagePanel({ title, image, active }: { title: string; image?: string; active?: boolean }) {
   return (
-    <div
-      className="overflow-hidden rounded-md border"
+    <div className="overflow-hidden rounded-md border"
       style={{
         borderColor: active ? "oklch(from var(--charm-cyan) l c h / 0.45)" : "var(--charm-border)",
         background: "var(--background)",
-      }}
-    >
+      }}>
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <span className="font-jetbrains text-xs" style={{ color: active ? "var(--charm-cyan)" : "var(--charm-muted)" }}>{title}</span>
         {active && <span className="h-1.5 w-1.5 rounded-full status-loading" />}
       </div>
-      {image ? (
-        <img src={imageSrc(image)} alt={title} className="h-32 w-full object-contain" />
-      ) : (
-        <div className="flex h-32 items-center justify-center font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>waiting</div>
-      )}
+      {image
+        ? <img src={imageSrc(image)} alt={title} className="h-32 w-full object-contain" />
+        : <div className="flex h-32 items-center justify-center font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>waiting</div>}
     </div>
   );
 }
 
-function HeaderSystemStatus({ robotStatus, calibration }: { robotStatus: RobotStatus | null; calibration: CalibrationData | null }) {
+function HeaderSystemStatus({ robotStatus, calibration, activeModel }: {
+  robotStatus: RobotStatus | null;
+  calibration: CalibrationData | null;
+  activeModel: CnnActiveModel | null;
+}) {
   const visionReady = Boolean(calibration?.board && calibration?.inner);
   const robotReady = Boolean(robotStatus?.robot_calibration.exists);
+  const modelReady = Boolean(activeModel?.run_id);
 
   return (
     <div className="flex flex-wrap items-stretch gap-2">
-      <Link href="/lab" className="min-w-[170px] rounded-md border px-3 py-2" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+      <Link href="/lab" className="min-w-[170px] rounded-md border px-3 py-2"
+        style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
         <div className="flex items-center gap-2">
           <Grid3X3 className="size-4" style={{ color: visionReady ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }} />
           <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Vision calibration</p>
@@ -365,7 +290,8 @@ function HeaderSystemStatus({ robotStatus, calibration }: { robotStatus: RobotSt
         </p>
       </Link>
 
-      <Link href="/robot" className="min-w-[170px] rounded-md border px-3 py-2" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+      <Link href="/robot" className="min-w-[170px] rounded-md border px-3 py-2"
+        style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
         <div className="flex items-center gap-2">
           <Settings className="size-4" style={{ color: robotReady ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }} />
           <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Robot calibration</p>
@@ -375,12 +301,26 @@ function HeaderSystemStatus({ robotStatus, calibration }: { robotStatus: RobotSt
         </p>
       </Link>
 
+      <Link href="/lab/cnn" className="min-w-[200px] rounded-md border px-3 py-2"
+        style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+        <div className="flex items-center gap-2">
+          <Zap className="size-4" style={{ color: modelReady ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }} />
+          <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>CNN model</p>
+        </div>
+        <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: modelReady ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }}>
+          {modelReady
+            ? `${activeModel!.run_id}${activeModel!.val_acc != null ? ` · ${(activeModel!.val_acc * 100).toFixed(1)}%` : ""}`
+            : "no model active"}
+        </p>
+      </Link>
+
       <div className="min-w-[190px] rounded-md border px-3 py-2" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
         <div className="flex items-center gap-2">
           <Gauge className="size-4" style={{ color: robotStatus?.serial_connected ? "var(--charm-cyan)" : "var(--charm-muted)" }} />
           <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Serial</p>
         </div>
-        <p className="mt-1 max-w-[180px] truncate font-jetbrains text-xs" style={{ color: robotStatus?.serial_connected ? "var(--charm-cyan)" : "var(--charm-muted)" }}>
+        <p className="mt-1 max-w-[180px] truncate font-jetbrains text-xs"
+          style={{ color: robotStatus?.serial_connected ? "var(--charm-cyan)" : "var(--charm-muted)" }}>
           {robotStatus?.serial_connected ? robotStatus.active_port : robotStatus?.detected_port ?? "idle"}
         </p>
       </div>
@@ -408,7 +348,7 @@ export default function Dashboard() {
   const [lastMove, setLastMove] = useState<string | null>(null);
   const [moveLog, setMoveLog] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [testBusy, setTestBusy] = useState<"capture" | "pipeline" | null>(null);
+  const [testBusy, setTestBusy] = useState<"capture" | null>(null);
   const [lastCapturePath, setLastCapturePath] = useState<string | null>(null);
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
@@ -417,15 +357,6 @@ export default function Dashboard() {
     return window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) || DEFAULT_SERIAL_PORT;
   });
   const [calibration, setCalibration] = useState<CalibrationData | null>(null);
-  const [params, setParams] = useState<typeof DEFAULT_PARAMS>(() => ({ ...DEFAULT_PARAMS }));
-  const [showParamsModal, setShowParamsModal] = useState(false);
-  const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
-  const [showTuneCvModal, setShowTuneCvModal] = useState(false);
-  const [emptyRefExists, setEmptyRefExists] = useState(false);
-  const [emptyRefBusy, setEmptyRefBusy] = useState<"capture" | "clear" | null>(null);
-  const [emptyRefImage, setEmptyRefImage] = useState<string | null>(null);
-  const [emptyRefSavedAt, setEmptyRefSavedAt] = useState<number | null>(null);
-  const [showEmptyRefModal, setShowEmptyRefModal] = useState(false);
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
   const [skillLevel, setSkillLevel] = useState<number>(() => {
     if (typeof window === "undefined") return DEFAULT_SKILL_LEVEL;
@@ -437,6 +368,13 @@ export default function Dashboard() {
   const [showSkillModal, setShowSkillModal] = useState(false);
   const [draftSkillLevel, setDraftSkillLevel] = useState<number>(skillLevel);
   const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
+
+  // CNN model state
+  const [cnnModels, setCnnModels] = useState<CnnModelMeta[]>([]);
+  const [activeCnnModel, setActiveCnnModel] = useState<CnnActiveModel | null>(null);
+  const [showCnnModelModal, setShowCnnModelModal] = useState(false);
+  const [cnnModelBusy, setCnnModelBusy] = useState(false);
+
   const armMoveId = useRef(0);
 
   useEffect(() => {
@@ -451,13 +389,20 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [skillApplyToast]);
 
+  const refreshCnnState = useCallback(async () => {
+    try {
+      const [modelsResp, active] = await Promise.all([api.cnnListModels(), api.cnnActiveModel()]);
+      setCnnModels(modelsResp.models);
+      setActiveCnnModel(active);
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getRobotStatus(), api.getCalibration(), api.getSavedParams(), api.getCvTuning(), api.getEmptyReference()])
-      .then(([robot, vision, saved, tuningResp, emptyRef]) => {
-        setEmptyRefExists(emptyRef.exists);
-        setEmptyRefImage(emptyRef.image);
-        setEmptyRefSavedAt(emptyRef.saved_at ?? null);
+    Promise.all([api.getRobotStatus(), api.getCalibration()])
+      .then(([robot, vision]) => {
         if (cancelled) return;
         setRobotStatus(robot);
         setRobotPort((current) => {
@@ -466,28 +411,24 @@ export default function Dashboard() {
         });
         setCalibration(vision);
         setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
-        const base = saved.exists && saved.data?.params ? { ...DEFAULT_PARAMS, ...saved.data.params } : { ...DEFAULT_PARAMS };
-        if (tuningResp.exists && tuningResp.tuning) {
-          base.occupancy_threshold = tuningResp.tuning.occupancy_threshold;
-          base.white_threshold = tuningResp.tuning.white_threshold;
-          base.black_threshold = tuningResp.tuning.black_threshold;
-          if (tuningResp.tuning.occupancy_delta_threshold !== undefined) {
-            base.occupancy_delta_threshold = tuningResp.tuning.occupancy_delta_threshold;
-          }
-          if (tuningResp.tuning.white_delta_threshold !== undefined) {
-            base.white_delta_threshold = tuningResp.tuning.white_delta_threshold;
-          }
-          if (tuningResp.tuning.black_delta_threshold !== undefined) {
-            base.black_delta_threshold = tuningResp.tuning.black_delta_threshold;
-          }
-        }
-        setParams(base);
       })
       .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    refreshCnnState();
+    return () => { cancelled = true; };
+  }, [refreshCnnState]);
+
+  const activateCnnModel = useCallback(async (run_id: string) => {
+    setCnnModelBusy(true);
+    try {
+      await api.cnnActivateModel(run_id);
+      await refreshCnnState();
+      setShowCnnModelModal(false);
+    } catch {
+      // show stays open
+    } finally {
+      setCnnModelBusy(false);
+    }
+  }, [refreshCnnState]);
 
   const runStartupCalibrate = useCallback(async () => {
     if (turnState === "arm_calibrating") return;
@@ -503,12 +444,10 @@ export default function Dashboard() {
         ...current,
         response.responses.length > 0 ? `Calibrate: ${response.responses.at(-1)}` : "Calibrate: command sent",
       ]);
-      setArmIdleTarget(
-        robotPositionToBoardTarget(
-          response.position ?? robotStatus?.robot_calibration.calibration.home ?? { x: 0, y: 0 },
-          robotStatus
-        )
-      );
+      setArmIdleTarget(robotPositionToBoardTarget(
+        response.position ?? robotStatus?.robot_calibration.calibration.home ?? { x: 0, y: 0 },
+        robotStatus
+      ));
       setArmCalibrated(true);
       setGameSessionStarted(false);
       setTurnState("human_turn");
@@ -519,9 +458,7 @@ export default function Dashboard() {
   }, [robotPort, robotStatus, turnState]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const finishRobotMove = useCallback((_finishedMove: ArmMove) => {
-    // Animation ended — game state update happens when the Arduino command returns.
-  }, []);
+  const finishRobotMove = useCallback((_finishedMove: ArmMove) => {}, []);
 
   const busy = turnState === "arm_calibrating" || turnState === "capturing" || turnState === "processing" || turnState === "robot_thinking" || turnState === "robot_moving";
 
@@ -531,7 +468,7 @@ export default function Dashboard() {
       setTurnState("arm_calibrate");
       return;
     }
-    if (turnState === "arm_calibrating" || turnState === "capturing" || turnState === "processing" || turnState === "robot_thinking" || turnState === "robot_moving") return;
+    if (busy) return;
     setError(null);
     setOverlayOpen(true);
     setTurnState("capturing");
@@ -542,7 +479,7 @@ export default function Dashboard() {
           player_color: "white",
           difficulty,
           skill_level: skillLevel,
-          params,
+          params: DEFAULT_PARAMS,
           capture: true,
           max_mismatches: 0,
           port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
@@ -553,23 +490,11 @@ export default function Dashboard() {
           setLastCapturePath(session.pipeline.image_path ?? null);
           if (session.status !== "ok" && session.pipeline.board_validation_debug) {
             const debug = session.pipeline.board_validation_debug;
-            console.log(
-              "%c=== BOARD VALIDATION FAILED ===",
-              "color: red; font-size: 14px; font-weight: bold"
-            );
-            console.log(
-              "%cExpected FEN: %c" + debug.expected_fen,
-              "color: blue; font-weight: bold",
-              "color: green"
-            );
-            console.log(
-              "%cTotal mismatches: %c" + debug.mismatch_count,
-              "color: red; font-weight: bold",
-              "color: orange"
-            );
-            console.log("%cObserved White bitmap:", "color: blue; font-weight: bold", debug.observed_white_bitmap);
-            console.log("%cObserved Black bitmap:", "color: red; font-weight: bold", debug.observed_black_bitmap);
-            console.log("%cColor labels:", "color: purple; font-weight: bold", debug.color_labels);
+            console.log("%c=== BOARD VALIDATION FAILED ===", "color: red; font-size: 14px; font-weight: bold");
+            console.log("%cExpected FEN:", "color: blue; font-weight: bold", debug.expected_fen);
+            console.log("%cMismatches:", "color: red", debug.mismatch_count);
+            console.log("%cWhite:", "color: blue", debug.observed_white_bitmap);
+            console.log("%cBlack:", "color: red", debug.observed_black_bitmap);
           }
         }
         if (session.status !== "ok") {
@@ -593,7 +518,7 @@ export default function Dashboard() {
       }
 
       const response = await api.processGameSessionTurn({
-        params,
+        params: DEFAULT_PARAMS,
         capture: true,
         max_mismatches: 0,
         difficulty,
@@ -611,10 +536,8 @@ export default function Dashboard() {
       if (response.status !== "ok" && response.status !== "game_over") {
         const humanMove = response.human_move;
         const errorPrefix: Record<string, string> = {
-          unchanged: "[BOARD UNCHANGED]",
-          illegal_move: "[ILLEGAL MOVE]",
-          in_check: "[IN CHECK]",
-          ambiguous: "[AMBIGUOUS]",
+          unchanged: "[BOARD UNCHANGED]", illegal_move: "[ILLEGAL MOVE]",
+          in_check: "[IN CHECK]", ambiguous: "[AMBIGUOUS]",
         };
         const prefix = humanMove?.error_code ? errorPrefix[humanMove.error_code] ?? "" : "";
         const baseMsg = humanMove?.message ?? response.robot_move?.message ?? `Game session failed: ${response.status}`;
@@ -649,41 +572,7 @@ export default function Dashboard() {
       setError(e instanceof Error ? e.message : "Failed to process turn");
       setTurnState("error");
     }
-  }, [armCalibrated, difficulty, gameSessionStarted, params, robotPort, robotStatus, turnState]);
-
-  const captureEmptyReference = useCallback(async () => {
-    if (emptyRefBusy) return;
-    setError(null);
-    setEmptyRefBusy("capture");
-    try {
-      const response = await api.captureEmptyReference({ params, capture: true });
-      setEmptyRefExists(true);
-      setEmptyRefImage(response.image);
-      setEmptyRefSavedAt(response.saved_at ?? Date.now() / 1000);
-      setMoveLog((current) => [...current, "Empty board reference captured (fresh photo, current calibration)"]);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Capture empty reference failed");
-    } finally {
-      setEmptyRefBusy(null);
-    }
-  }, [emptyRefBusy, params]);
-
-  const clearEmptyReference = useCallback(async () => {
-    if (emptyRefBusy) return;
-    setError(null);
-    setEmptyRefBusy("clear");
-    try {
-      await api.clearEmptyReference();
-      setEmptyRefExists(false);
-      setEmptyRefImage(null);
-      setEmptyRefSavedAt(null);
-      setMoveLog((current) => [...current, "Empty board reference cleared"]);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Clear empty reference failed");
-    } finally {
-      setEmptyRefBusy(null);
-    }
-  }, [emptyRefBusy]);
+  }, [armCalibrated, difficulty, gameSessionStarted, robotPort, robotStatus, turnState, busy, skillLevel]);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -703,28 +592,6 @@ export default function Dashboard() {
     }
   }, [armCalibrated, busy, testBusy]);
 
-  const testVisionPipeline = useCallback(async () => {
-    if (busy || testBusy) return;
-    setError(null);
-    setOverlayOpen(true);
-    setTestBusy("pipeline");
-    setTurnState("capturing");
-    try {
-      const capture = await api.captureFromCamera();
-      setLastCapturePath(capture.path);
-      setTurnState("processing");
-      const pipeline = await api.runPipeline({ ...params, image_path: capture.path });
-      setResult(pipeline);
-      setMoveLog((current) => [...current, `Pipeline: ${pipeline.stats.occupied} pieces, ${pipeline.total_ms.toFixed(0)} ms`]);
-      setTurnState(armCalibrated ? "human_turn" : "arm_calibrate");
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Pipeline test failed");
-      setTurnState("error");
-    } finally {
-      setTestBusy(null);
-    }
-  }, [armCalibrated, busy, params, testBusy]);
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.code !== "Space") return;
@@ -737,49 +604,35 @@ export default function Dashboard() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [processHumanTurn]);
 
-  const statusLabel = turnState === "arm_calibrate"
-    ? "Arm calibration required"
-    : turnState === "arm_calibrating"
-    ? "Calibrating arm"
-    : turnState === "human_turn"
-    ? "Your turn"
-    : turnState === "capturing"
-    ? "Taking photo"
-    : turnState === "processing"
-    ? "Running vision"
-    : turnState === "human_move_found"
-    ? "Human move recognized"
-    : turnState === "robot_thinking"
-    ? "Robot is thinking"
-    : turnState === "robot_moving"
-    ? "Robot is moving"
+  const statusLabel = turnState === "arm_calibrate" ? "Arm calibration required"
+    : turnState === "arm_calibrating" ? "Calibrating arm"
+    : turnState === "human_turn" ? "Your turn"
+    : turnState === "capturing" ? "Taking photo"
+    : turnState === "processing" ? "Running vision"
+    : turnState === "human_move_found" ? "Human move recognized"
+    : turnState === "robot_thinking" ? "Robot is thinking"
+    : turnState === "robot_moving" ? "Robot is moving"
     : "Needs attention";
 
   return (
     <div className="p-5 max-w-7xl mx-auto space-y-5">
-      <div className="flex items-start justify-between gap-4 rounded-md border p-4" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 rounded-md border p-4"
+        style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
         <div className="min-w-[260px] flex-1">
           <h1 className="text-2xl font-jetbrains font-semibold" style={{ color: "var(--charm-text)" }}>ChArm Game Dashboard</h1>
-          <p className="text-sm mt-1" style={{ color: "var(--charm-muted)" }}>Camera is always active. Player move, capture, vision, then robot move.</p>
+          <p className="text-sm mt-1" style={{ color: "var(--charm-muted)" }}>CNN vision · SCARA arm · Stockfish engine</p>
           <div className="mt-4">
-            <HeaderSystemStatus robotStatus={robotStatus} calibration={calibration} />
+            <HeaderSystemStatus robotStatus={robotStatus} calibration={calibration} activeModel={activeCnnModel} />
           </div>
         </div>
         <div className="flex min-w-[260px] items-center justify-end gap-2 flex-wrap">
           <button
             type="button"
-            onClick={() => {
-              setDraftSkillLevel(skillLevel);
-              setShowSkillModal(true);
-            }}
-            title={`Stockfish skill ${skillLevel}/20 (~${estimateEloForSkill(skillLevel)} Elo). Click to change. Takes effect on the next robot move.`}
+            onClick={() => { setDraftSkillLevel(skillLevel); setShowSkillModal(true); }}
+            title={`Stockfish skill ${skillLevel}/20 (~${estimateEloForSkill(skillLevel)} Elo). Click to change.`}
             className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors hover:bg-[oklch(from_var(--charm-cyan)_l_c_h_/_0.14)]"
-            style={{
-              borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
-              background: "oklch(from var(--charm-cyan) l c h / 0.08)",
-              color: "var(--charm-cyan)",
-            }}
-          >
+            style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "oklch(from var(--charm-cyan) l c h / 0.08)", color: "var(--charm-cyan)" }}>
             <Swords className="size-4" />
             <span style={{ color: "var(--charm-muted)" }}>Stockfish</span>
             <span className="font-semibold" style={{ color: "var(--charm-cyan)" }}>Lv {skillLevel}/20</span>
@@ -793,8 +646,7 @@ export default function Dashboard() {
             onClick={runStartupCalibrate}
             disabled={turnState === "arm_calibrating" || armCalibrated}
             className="font-jetbrains"
-            style={{ background: armCalibrated ? "transparent" : "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}
-          >
+            style={{ background: armCalibrated ? "transparent" : "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {turnState === "arm_calibrating" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
             {armCalibrated ? "Arm calibrated" : "Arm calibration required"}
           </Button>
@@ -802,8 +654,7 @@ export default function Dashboard() {
             onClick={processHumanTurn}
             disabled={busy || !armCalibrated}
             className="font-jetbrains"
-            style={{ background: "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}
-          >
+            style={{ background: "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
             {gameSessionStarted ? "Player done" : "Start game"}
           </Button>
@@ -813,23 +664,22 @@ export default function Dashboard() {
       <FlowRail state={turnState} armCalibrated={armCalibrated} />
 
       {error && (
-        <div className="rounded-md border px-4 py-3 text-sm font-jetbrains flex items-center gap-2" style={{ background: "oklch(0.65 0.22 25 / 0.1)", borderColor: "oklch(0.65 0.22 25 / 0.3)", color: "oklch(0.65 0.22 25)" }}>
+        <div className="rounded-md border px-4 py-3 text-sm font-jetbrains flex items-center gap-2"
+          style={{ background: "oklch(0.65 0.22 25 / 0.1)", borderColor: "oklch(0.65 0.22 25 / 0.3)", color: "oklch(0.65 0.22 25)" }}>
           <XCircle className="size-4" />{error}
         </div>
       )}
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(330px,0.65fr)]">
+        {/* SCARA Arm card — unchanged */}
         <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
           <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
             <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>SCARA Arm</h2>
             <div className="flex gap-1">
               {(["Board", "Arm"] as const).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setArmView(v)}
+                <button key={v} onClick={() => setArmView(v)}
                   className="font-jetbrains text-xs px-2 py-1 rounded border"
-                  style={{ borderColor: "var(--charm-border)", color: armView === v ? "var(--charm-cyan)" : "var(--charm-muted)", background: armView === v ? "oklch(from var(--charm-cyan) l c h / 0.08)" : "transparent" }}
-                >
+                  style={{ borderColor: "var(--charm-border)", color: armView === v ? "var(--charm-cyan)" : "var(--charm-muted)", background: armView === v ? "oklch(from var(--charm-cyan) l c h / 0.08)" : "transparent" }}>
                   {v}
                 </button>
               ))}
@@ -837,101 +687,71 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="px-4 pb-4 space-y-4">
             <svg
-              viewBox={armView === "Board"
-                ? `${-10/37.5} ${-10/37.5} ${8 + 2*(10/37.5)} ${8 + 2*(10/37.5)}`
-                : "-1 -4 13 13"}
+              viewBox={armView === "Board" ? `${-10/37.5} ${-10/37.5} ${8 + 2*(10/37.5)} ${8 + 2*(10/37.5)}` : "-1 -4 13 13"}
               className="w-full rounded-md border border-border"
               style={{ background: "var(--background)", display: "block", aspectRatio: "1/1" }}
-              aria-hidden="true"
-            >
-              {/* Grid lines */}
+              aria-hidden="true">
               {Array.from({ length: 11 }, (_, i) => (
                 <line key={`gv${i}`} x1={i - 1} y1="-3" x2={i - 1} y2="10" stroke="oklch(0.5 0 0 / 0.18)" strokeWidth="0.025" />
               ))}
               {Array.from({ length: 14 }, (_, i) => (
                 <line key={`gh${i}`} x1="-2" y1={i - 3} x2="14" y2={i - 3} stroke="oklch(0.5 0 0 / 0.18)" strokeWidth="0.025" />
               ))}
-              {/* Board border (10mm margin, square=37.5mm → ratio 10/37.5) */}
-              <rect
-                x={-10/37.5} y={-10/37.5}
-                width={8 + 2*(10/37.5)} height={8 + 2*(10/37.5)}
-                fill="black" rx="0.05"
-              />
-              {/* Board squares */}
+              <rect x={-10/37.5} y={-10/37.5} width={8 + 2*(10/37.5)} height={8 + 2*(10/37.5)} fill="black" rx="0.05" />
               {Array.from({ length: 64 }, (_, i) => {
-                const row = Math.floor(i / 8);
-                const col = i % 8;
-                const light = (row + col) % 2 === 0;
-                return (
-                  <rect key={i} x={col} y={row} width={1} height={1}
-                    fill={light ? "var(--charm-board-light)" : "var(--charm-board-dark)"}
-                    opacity="0.92"
-                  />
-                );
+                const row = Math.floor(i / 8); const col = i % 8; const light = (row + col) % 2 === 0;
+                return <rect key={i} x={col} y={row} width={1} height={1} fill={light ? "var(--charm-board-light)" : "var(--charm-board-dark)"} opacity="0.92" />;
               })}
               <BoardPiecesSvg game={game} visible={scaraPiecesVisible} opacity={scaraPiecesOpacity} />
               <ChessComCoordinates svgBoardUnits />
-              {/* Arm base marker */}
               <circle cx={ARM_BASE.x} cy={ARM_BASE.y} r="0.18" fill="oklch(0.65 0.22 25)" opacity="0.85" />
-              {/* Arm */}
               <RobotArmOverlay
-                embed
-                move={robotMove}
+                embed move={robotMove}
                 mode={turnState === "arm_calibrating" ? "calibrating" : robotMove ? "playing" : "idle"}
-                onDone={finishRobotMove}
-                debugTarget={armDebug ? armDebugTarget : null}
+                onDone={finishRobotMove} debugTarget={armDebug ? armDebugTarget : null}
                 idleTarget={armCalibrated ? armIdleTarget : null}
-                opacity={armOpacity}
-                expectedOpacity={expectedOpacity}
-                onAnglesChange={setArmAngles}
+                opacity={armOpacity} expectedOpacity={expectedOpacity} onAnglesChange={setArmAngles}
               />
             </svg>
             <details className="rounded-md border border-border p-3">
               <summary className="cursor-pointer font-jetbrains text-xs font-semibold" style={{ color: "var(--charm-text)" }}>Arm debug</summary>
               <div className="mt-3 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                  <input type="checkbox" checked={armDebug} onChange={(event) => setArmDebug(event.target.checked)} />
-                  target mode
-                </label>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                {(["x", "y"] as const).map((axis) => (
-                  <label key={axis} className="space-y-1">
-                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>{axis} target</span>
-                    <input
-                      type="range"
-                      min={axis === "x" ? -0.5 : -0.5}
-                      max={axis === "x" ? 8.5 : 8.5}
-                      step="0.1"
-                      value={armDebugTarget[axis]}
-                      onChange={(event) => setArmDebugTarget((current) => ({ ...current, [axis]: Number(event.target.value) }))}
-                      className="w-full"
-                    />
-                    <span className="font-jetbrains text-xs" style={{ color: "var(--charm-cyan)" }}>{armDebugTarget[axis].toFixed(1)}</span>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                    <input type="checkbox" checked={armDebug} onChange={(e) => setArmDebug(e.target.checked)} />
+                    target mode
                   </label>
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="space-y-1">
-                  <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>arm opacity</span>
-                  <input type="range" min="0.15" max="1" step="0.05" value={armOpacity} onChange={(event) => setArmOpacity(Number(event.target.value))} className="w-full" />
-                </label>
-                <label className="space-y-1">
-                  <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>expected opacity</span>
-                  <input type="range" min="0" max="0.7" step="0.05" value={expectedOpacity} onChange={(event) => setExpectedOpacity(Number(event.target.value))} className="w-full" />
-                </label>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                  <input type="checkbox" checked={scaraPiecesVisible} onChange={(event) => setScaraPiecesVisible(event.target.checked)} />
-                  pieces visible
-                </label>
-                <label className="space-y-1">
-                  <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>pieces opacity</span>
-                  <input type="range" min="0.05" max="1" step="0.05" value={scaraPiecesOpacity} onChange={(event) => setScaraPiecesOpacity(Number(event.target.value))} className="w-full" />
-                </label>
-              </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  {(["x", "y"] as const).map((axis) => (
+                    <label key={axis} className="space-y-1">
+                      <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>{axis} target</span>
+                      <input type="range" min={-0.5} max={8.5} step="0.1" value={armDebugTarget[axis]}
+                        onChange={(e) => setArmDebugTarget((c) => ({ ...c, [axis]: Number(e.target.value) }))} className="w-full" />
+                      <span className="font-jetbrains text-xs" style={{ color: "var(--charm-cyan)" }}>{armDebugTarget[axis].toFixed(1)}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="space-y-1">
+                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>arm opacity</span>
+                    <input type="range" min="0.15" max="1" step="0.05" value={armOpacity} onChange={(e) => setArmOpacity(Number(e.target.value))} className="w-full" />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>expected opacity</span>
+                    <input type="range" min="0" max="0.7" step="0.05" value={expectedOpacity} onChange={(e) => setExpectedOpacity(Number(e.target.value))} className="w-full" />
+                  </label>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                    <input type="checkbox" checked={scaraPiecesVisible} onChange={(e) => setScaraPiecesVisible(e.target.checked)} />
+                    pieces visible
+                  </label>
+                  <label className="space-y-1">
+                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>pieces opacity</span>
+                    <input type="range" min="0.05" max="1" step="0.05" value={scaraPiecesOpacity} onChange={(e) => setScaraPiecesOpacity(Number(e.target.value))} className="w-full" />
+                  </label>
+                </div>
               </div>
             </details>
             <div className="grid grid-cols-2 gap-3">
@@ -955,284 +775,190 @@ export default function Dashboard() {
         </Card>
 
         <div className="flex flex-col gap-5">
-        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-          <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
-            <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Vision Pipeline</h2>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowParamsModal(true)}
-                className="flex items-center gap-1.5 rounded border px-2 py-1 font-jetbrains text-xs transition-colors"
-                style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "transparent" }}
-              >
-                <Settings className="size-3" />
-                Params
-              </button>
-              <Badge variant="outline" className="font-jetbrains" style={{ borderColor: "var(--charm-border)", color: "var(--charm-cyan)" }}>camera on</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="px-4 pb-4 space-y-4">
-            <div className="grid grid-cols-4 gap-2">
-              <Button variant="outline" size="sm" className="font-jetbrains" onClick={testCapture} disabled={busy || Boolean(testBusy)}>
-                {testBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
-                Capture
-              </Button>
-              <Button variant="outline" size="sm" className="font-jetbrains" onClick={testVisionPipeline} disabled={busy || Boolean(testBusy)}>
-                {testBusy === "pipeline" ? <Loader2 className="size-4 animate-spin" /> : <Eye className="size-4" />}
-                Pipeline
-              </Button>
-              <Button variant="outline" size="sm" className="font-jetbrains" onClick={() => setShowTuneCvModal(true)} disabled={!result?.refined_warp}>
-                <Sliders className="size-4" />
-                Tune CV
-              </Button>
-              <Button variant="outline" size="sm" className="font-jetbrains" onClick={processHumanTurn} disabled={busy || !armCalibrated || Boolean(testBusy)}>
-                <Bot className="size-4" />
-                Game
-              </Button>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="font-jetbrains flex-1"
-                onClick={captureEmptyReference}
-                disabled={Boolean(emptyRefBusy)}
-                title="Takes a fresh photo and warps it with the current saved calibration"
-              >
-                {emptyRefBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
-                Capture empty
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="font-jetbrains flex-1"
-                onClick={clearEmptyReference}
-                disabled={Boolean(emptyRefBusy) || !emptyRefExists}
-              >
-                {emptyRefBusy === "clear" ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
-                Clear empty
-              </Button>
-              <Badge
-                variant="outline"
-                className="font-jetbrains"
-                style={{
-                  borderColor: "var(--charm-border)",
-                  color: emptyRefExists ? "var(--charm-cyan)" : "var(--charm-muted)",
-                }}
-              >
-                {emptyRefExists ? "ref on" : "no ref"}
-              </Badge>
-            </div>
-            <div className="rounded-md border border-border p-2">
-              <div className="flex items-center justify-between mb-1">
-                <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>
-                  Empty reference (warped with current calibration)
-                </p>
-                <p className="font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
-                  {emptyRefSavedAt
-                    ? new Date(emptyRefSavedAt * 1000).toLocaleString()
-                    : "not captured"}
-                </p>
-              </div>
-              {emptyRefImage ? (
+          {/* CNN Vision card */}
+          <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+            <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
+              <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>CNN Vision</h2>
+              <div className="flex items-center gap-2">
                 <button
-                  type="button"
-                  onClick={() => setShowEmptyRefModal(true)}
-                  className="block w-full overflow-hidden rounded border border-border"
-                  title="Click to enlarge"
-                >
-                  <img
-                    src={imageSrc(emptyRefImage)}
-                    alt="Empty board reference"
-                    className="block h-32 w-full object-contain bg-black"
-                  />
+                  onClick={() => { void refreshCnnState(); setShowCnnModelModal(true); }}
+                  className="flex items-center gap-1.5 rounded border px-2 py-1 font-jetbrains text-xs transition-colors"
+                  style={{
+                    borderColor: activeCnnModel?.run_id ? "oklch(from var(--charm-cyan) l c h / 0.5)" : "var(--charm-border)",
+                    color: activeCnnModel?.run_id ? "var(--charm-cyan)" : "var(--charm-muted)",
+                    background: activeCnnModel?.run_id ? "oklch(from var(--charm-cyan) l c h / 0.08)" : "transparent",
+                  }}>
+                  <Zap className="size-3" />
+                  {activeCnnModel?.run_id
+                    ? `${activeCnnModel.run_id}${activeCnnModel.val_acc != null ? ` · ${(activeCnnModel.val_acc * 100).toFixed(1)}%` : ""}`
+                    : "no model — select"}
                 </button>
-              ) : (
-                <div
-                  className="flex h-32 items-center justify-center rounded border border-dashed border-border font-jetbrains text-xs"
-                  style={{ color: "var(--charm-muted)" }}
-                >
-                  No empty reference saved yet
+                <Badge variant="outline" className="font-jetbrains" style={{ borderColor: "var(--charm-border)", color: "var(--charm-cyan)" }}>camera on</Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="px-4 pb-4 space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <Button variant="outline" size="sm" className="font-jetbrains" onClick={testCapture} disabled={busy || Boolean(testBusy)}>
+                  {testBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
+                  Capture
+                </Button>
+                <Button variant="outline" size="sm" className="font-jetbrains" onClick={processHumanTurn} disabled={busy || !armCalibrated || Boolean(testBusy)}>
+                  <Bot className="size-4" />
+                  Game
+                </Button>
+              </div>
+              <div className="rounded-md border border-border px-3 py-2">
+                <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Latest capture</p>
+                <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>{lastCapturePath ?? result?.image_path ?? "waiting"}</p>
+              </div>
+              <DebugImages
+                panels={DEBUG_PANELS.map(({ key, label }) => ({
+                  key,
+                  label,
+                  b64: result?.[key as keyof PipelineResult] as string | undefined,
+                }))}
+                gridClassName="grid grid-cols-2 gap-3"
+                imageMaxHeight={210}
+              />
+              {result && (
+                <div className="overflow-auto">
+                  <ChessBoard colorLabels={result.color_labels} occupancyScores={result.occupancy_scores} brightnessScores={result.brightness_scores} highlightUnknown />
                 </div>
               )}
-            </div>
-            <div className="rounded-md border border-border px-3 py-2">
-              <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>Latest capture</p>
-              <p className="mt-1 truncate font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>{lastCapturePath ?? result?.image_path ?? "waiting"}</p>
-            </div>
-            <DebugImages
-              panels={DEBUG_PANELS.map(({ key, label }) => ({
-                key,
-                label,
-                b64: result?.[key as keyof PipelineResult] as string | undefined,
-              }))}
-              gridClassName="grid grid-cols-2 gap-3"
-              imageMaxHeight={210}
-            />
+            </CardContent>
+          </Card>
 
-            {result && (
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-md border border-border p-3">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Pieces</p>
-                  <p className="mt-1 font-jetbrains text-lg" style={{ color: "var(--charm-text)" }}>{result.stats.occupied}</p>
+          {/* Game State card */}
+          <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+            <CardHeader className="px-4 pt-4 pb-2">
+              <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game State</h2>
+            </CardHeader>
+            <CardContent className="px-4 pb-4 space-y-3">
+              <LogicalBoard game={game} lastMove={lastMove} />
+              <div className="grid grid-cols-1 gap-2">
+                <div className="rounded-md border border-border p-2">
+                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Last inferred move</p>
+                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>{stepResult?.inference.move_uci ?? "none"}</p>
                 </div>
-                <div className="rounded-md border border-border p-3">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Pipeline</p>
-                  <p className="mt-1 font-jetbrains text-lg" style={{ color: "var(--charm-cyan)" }}>{result.total_ms.toFixed(0)} ms</p>
+                <div className="rounded-md border border-border p-2">
+                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Mismatch count</p>
+                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{stepResult?.inference.mismatch_count ?? 0}</p>
                 </div>
               </div>
-            )}
-
-            {result && (
-              <div className="overflow-auto">
-                <ChessBoard colorLabels={result.color_labels} occupancyScores={result.occupancy_scores} brightnessScores={result.brightness_scores} highlightUnknown />
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-          <CardHeader className="px-4 pt-4 pb-2">
-            <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game State</h2>
-          </CardHeader>
-          <CardContent className="px-4 pb-4 space-y-3">
-            <LogicalBoard game={game} lastMove={lastMove} />
-            <div className="grid grid-cols-1 gap-2">
-              <div className="rounded-md border border-border p-2">
-                <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Last inferred move</p>
-                <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>{stepResult?.inference.move_uci ?? "none"}</p>
-              </div>
-              <div className="rounded-md border border-border p-2">
-                <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Mismatch count</p>
-                <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{stepResult?.inference.mismatch_count ?? 0}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
         </div>
       </div>
 
-      {showSkillModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-12 backdrop-blur-sm"
+      {/* CNN model picker modal */}
+      {showCnnModelModal && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-12 backdrop-blur-sm"
           style={{ background: "oklch(0 0 0 / 0.7)" }}
-          onClick={() => setShowSkillModal(false)}
-        >
-          <div
-            className="mx-4 w-full max-w-md rounded-md border shadow-2xl"
+          onClick={() => setShowCnnModelModal(false)}>
+          <div className="mx-4 w-full max-w-md rounded-md border shadow-2xl"
             style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
+              <div className="flex items-center gap-2">
+                <Zap className="size-4" style={{ color: "var(--charm-cyan)" }} />
+                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Select CNN Model</span>
+              </div>
+              <button onClick={() => setShowCnnModelModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+            </div>
+            <div className="space-y-2 p-4">
+              {cnnModels.length === 0 && (
+                <div className="rounded-md border border-border px-3 py-4 text-center font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                  No trained models found. Train one at <Link href="/lab/cnn" className="underline" style={{ color: "var(--charm-cyan)" }}>/lab/cnn</Link>.
+                </div>
+              )}
+              {cnnModels.map((m) => {
+                const isActive = activeCnnModel?.run_id === m.run_id;
+                return (
+                  <div key={m.run_id} className="flex items-center justify-between rounded-md border px-3 py-2"
+                    style={{
+                      background: isActive ? "oklch(from var(--charm-cyan) l c h / 0.1)" : "transparent",
+                      borderColor: isActive ? "var(--charm-cyan)" : "var(--charm-border)",
+                    }}>
+                    <div className="font-jetbrains text-xs">
+                      <div style={{ color: isActive ? "var(--charm-cyan)" : "var(--charm-text)" }}>{m.run_id}</div>
+                      <div style={{ color: "var(--charm-muted)" }}>
+                        {m.dataset ?? "?"} · val {m.val_acc != null ? `${(m.val_acc * 100).toFixed(1)}%` : "?"}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={isActive ? "outline" : "default"}
+                      disabled={cnnModelBusy}
+                      onClick={() => void activateCnnModel(m.run_id)}>
+                      {cnnModelBusy && isActive ? <Loader2 className="size-3 animate-spin" /> : isActive ? "active" : "activate"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stockfish skill modal */}
+      {showSkillModal && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-12 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.7)" }}
+          onClick={() => setShowSkillModal(false)}>
+          <div className="mx-4 w-full max-w-md rounded-md border shadow-2xl"
+            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
               <div className="flex items-center gap-2">
                 <Swords className="size-4" style={{ color: "var(--charm-cyan)" }} />
                 <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Stockfish Difficulty</span>
               </div>
-              <button
-                onClick={() => setShowSkillModal(false)}
-                className="font-jetbrains text-xs"
-                style={{ color: "var(--charm-muted)" }}
-              >
-                ✕ close
-              </button>
+              <button onClick={() => setShowSkillModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
             </div>
-
             <div className="space-y-5 p-5">
               <div className="flex items-baseline justify-between">
                 <div>
-                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>
-                    Skill Level
-                  </div>
+                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>Skill Level</div>
                   <div className="font-jetbrains text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
-                    {draftSkillLevel}
-                    <span className="ml-1 text-base" style={{ color: "var(--charm-muted)" }}>/ 20</span>
+                    {draftSkillLevel}<span className="ml-1 text-base" style={{ color: "var(--charm-muted)" }}>/ 20</span>
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>
-                    Estimated Elo
-                  </div>
-                  <div className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>
-                    ~{estimateEloForSkill(draftSkillLevel)}
-                  </div>
-                  <div className="font-jetbrains text-xs mt-0.5" style={{ color: "var(--charm-muted)" }}>
-                    {skillTier(draftSkillLevel)}
-                  </div>
+                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>Estimated Elo</div>
+                  <div className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>~{estimateEloForSkill(draftSkillLevel)}</div>
+                  <div className="font-jetbrains text-xs mt-0.5" style={{ color: "var(--charm-muted)" }}>{skillTier(draftSkillLevel)}</div>
                 </div>
               </div>
-
-              <Slider
-                value={[draftSkillLevel]}
-                min={MIN_SKILL_LEVEL}
-                max={MAX_SKILL_LEVEL}
-                step={1}
+              <Slider value={[draftSkillLevel]} min={MIN_SKILL_LEVEL} max={MAX_SKILL_LEVEL} step={1}
                 onValueChange={(v) => {
                   const next = Array.isArray(v) ? v[0] : v;
-                  if (Number.isFinite(next)) {
-                    setDraftSkillLevel(Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, next as number)));
-                  }
-                }}
-                className="w-full"
-              />
-
+                  if (Number.isFinite(next)) setDraftSkillLevel(Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, next as number)));
+                }} className="w-full" />
               <div className="flex justify-between font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
-                <span>1 · Beginner</span>
-                <span>10 · Club</span>
-                <span>20 · Master</span>
+                <span>1 · Beginner</span><span>10 · Club</span><span>20 · Master</span>
               </div>
-
-              <div
-                className="rounded-md border px-3 py-2 font-jetbrains text-xs"
-                style={{
-                  borderColor: "var(--charm-border)",
-                  background: "oklch(from var(--charm-cyan) l c h / 0.04)",
-                  color: "var(--charm-muted)",
-                }}
-              >
+              <div className="rounded-md border px-3 py-2 font-jetbrains text-xs"
+                style={{ borderColor: "var(--charm-border)", background: "oklch(from var(--charm-cyan) l c h / 0.04)", color: "var(--charm-muted)" }}>
                 Stockfish reconfigures on every robot move, so changes apply to the <span style={{ color: "var(--charm-cyan)" }}>next</span> move — including mid-game.
               </div>
-
               {draftSkillLevel !== skillLevel && (
-                <div
-                  className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
-                  style={{
-                    borderColor: "oklch(from var(--charm-cyan) l c h / 0.4)",
-                    background: "oklch(from var(--charm-cyan) l c h / 0.07)",
-                    color: "var(--charm-text)",
-                  }}
-                >
-                  <span>
-                    Current: <span style={{ color: "var(--charm-muted)" }}>Lv {skillLevel} (~{estimateEloForSkill(skillLevel)} Elo)</span>
-                  </span>
-                  <span>
-                    Pending: <span style={{ color: "var(--charm-cyan)" }}>Lv {draftSkillLevel} (~{estimateEloForSkill(draftSkillLevel)} Elo)</span>
-                  </span>
+                <div className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
+                  style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.4)", background: "oklch(from var(--charm-cyan) l c h / 0.07)", color: "var(--charm-text)" }}>
+                  <span>Current: <span style={{ color: "var(--charm-muted)" }}>Lv {skillLevel} (~{estimateEloForSkill(skillLevel)} Elo)</span></span>
+                  <span>Pending: <span style={{ color: "var(--charm-cyan)" }}>Lv {draftSkillLevel} (~{estimateEloForSkill(draftSkillLevel)} Elo)</span></span>
                 </div>
               )}
-
               <div className="flex justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setShowSkillModal(false)}
+                <button type="button" onClick={() => setShowSkillModal(false)}
                   className="rounded-md border px-3 py-1.5 font-jetbrains text-xs"
-                  style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "transparent" }}
-                >
+                  style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)", background: "transparent" }}>
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSkillLevel(draftSkillLevel);
-                    setSkillApplyToast({ level: draftSkillLevel, at: Date.now() });
-                    setShowSkillModal(false);
-                  }}
+                <button type="button"
+                  onClick={() => { setSkillLevel(draftSkillLevel); setSkillApplyToast({ level: draftSkillLevel, at: Date.now() }); setShowSkillModal(false); }}
                   disabled={draftSkillLevel === skillLevel}
                   className="rounded-md border px-3 py-1.5 font-jetbrains text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{
-                    borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
-                    background: "oklch(from var(--charm-cyan) l c h / 0.15)",
-                    color: "var(--charm-cyan)",
-                  }}
-                >
+                  style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "oklch(from var(--charm-cyan) l c h / 0.15)", color: "var(--charm-cyan)" }}>
                   Apply
                 </button>
               </div>
@@ -1242,14 +968,8 @@ export default function Dashboard() {
       )}
 
       {skillApplyToast && (
-        <div
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] rounded-md border px-4 py-2 font-jetbrains text-xs shadow-lg flex items-center gap-2"
-          style={{
-            borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
-            background: "var(--charm-card)",
-            color: "var(--charm-text)",
-          }}
-        >
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] rounded-md border px-4 py-2 font-jetbrains text-xs shadow-lg flex items-center gap-2"
+          style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "var(--charm-card)", color: "var(--charm-text)" }}>
           <CheckCircle2 className="size-4" style={{ color: "var(--charm-cyan)" }} />
           Stockfish skill level set to <span style={{ color: "var(--charm-cyan)" }}>{skillApplyToast.level}/20</span>
           <span style={{ color: "var(--charm-muted)" }}>(~{estimateEloForSkill(skillApplyToast.level)} Elo)</span>
@@ -1257,121 +977,16 @@ export default function Dashboard() {
         </div>
       )}
 
-      {showParamsModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-8 backdrop-blur-sm"
-          style={{ background: "oklch(0 0 0 / 0.7)" }}
-          onClick={() => setShowParamsModal(false)}
-        >
-          <div
-            className="mx-4 w-full max-w-md rounded-md border shadow-2xl !max-w-[calc(100%-18rem)]"
-            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
-              <div className="flex items-center gap-2">
-                <Settings className="size-4" style={{ color: "var(--charm-cyan)" }} />
-                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Pipeline Parameters</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setParams({ ...DEFAULT_PARAMS })}
-                  className="font-jetbrains text-xs"
-                  style={{ color: "var(--charm-cyan)" }}
-                >
-                  Reset
-                </button>
-                <button onClick={() => setShowParamsModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
-              </div>
-            </div>
-            <div className="max-h-[85vh] overflow-y-auto p-4 ">
-              <ParamControls params={params} onChange={setParams} onOpenManualCalibration={() => { setShowParamsModal(false); setShowManualCalibrationModal(true); }} />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showTuneCvModal && (
-        <TuneCvModal
-          onClose={() => setShowTuneCvModal(false)}
-          refinedWarpB64={result?.refined_warp}
-          imagePath={lastCapturePath ?? result?.image_path}
-          params={params}
-          onTuned={(t) => setParams((prev) => ({ ...prev, ...t }))}
-        />
-      )}
-
-      {showManualCalibrationModal && (
-        <div 
-          className="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm"
-          style={{ background: "oklch(0 0 0 / 0.7)" }}
-          onClick={() => setShowManualCalibrationModal(false)}
-        >
-          <div
-            className="w-full max-w-7xl max-h-[95vh] overflow-y-auto rounded-md border shadow-2xl bg-black"
-            style={{ borderColor: "var(--charm-border)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
-              <span className="font-jetbrains text-sm font-semibold text-white">Manual Calibration</span>
-              <button onClick={() => setShowManualCalibrationModal(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
-            </div>
-            <div className="bg-background">
-              <ManualCalibration imagePath={lastCapturePath} />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showEmptyRefModal && emptyRefImage && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm"
-          style={{ background: "oklch(0 0 0 / 0.8)" }}
-          onClick={() => setShowEmptyRefModal(false)}
-        >
-          <div
-            className="w-full max-w-3xl rounded-md border shadow-2xl"
-            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--charm-border)" }}>
-              <div className="flex flex-col">
-                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
-                  Empty board reference
-                </span>
-                <span className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
-                  {emptyRefSavedAt ? `saved ${new Date(emptyRefSavedAt * 1000).toLocaleString()}` : "no timestamp"}
-                  {" · warped with the saved board + inner calibration"}
-                </span>
-              </div>
-              <button
-                onClick={() => setShowEmptyRefModal(false)}
-                className="font-jetbrains text-xs"
-                style={{ color: "var(--charm-muted)" }}
-              >
-                ✕ close
-              </button>
-            </div>
-            <div className="p-4 flex items-center justify-center bg-black">
-              <img
-                src={imageSrc(emptyRefImage)}
-                alt="Empty board reference (large)"
-                className="max-h-[75vh] w-auto object-contain"
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
+      {/* CNN scan overlay (bottom right) */}
       {overlayOpen && result && (
-        <div className="fixed bottom-4 right-4 z-50 w-90 max-w-[calc(100vw-2rem)] rounded-md border p-3 shadow-2xl" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+        <div className="fixed bottom-4 right-4 z-50 w-90 max-w-[calc(100vw-2rem)] rounded-md border p-3 shadow-2xl"
+          style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
           <div className="mb-2 flex justify-end">
             <button onClick={() => setOverlayOpen(false)} className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>close</button>
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            <ImagePanel title="raw" image={result.original} />
-            <ImagePanel title="pre" image={result.preprocessed} />
-            <ImagePanel title="colors" image={result.piece_color_debug} />
+          <div className="grid grid-cols-2 gap-2">
+            <ImagePanel title="warp" image={result.refined_warp} />
+            <ImagePanel title="CNN" image={result.cnn_overlay} active={turnState === "processing"} />
           </div>
           <p className="mt-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
             {result.image_path ?? "latest frame"} · {stepResult?.inference.move_uci ? `move ${stepResult.inference.move_uci}` : "move pending"}

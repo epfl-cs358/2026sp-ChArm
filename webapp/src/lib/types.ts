@@ -64,6 +64,8 @@ export interface PipelineResult {
     black_pieces: number;
     unknown_pieces: number;
   };
+  cnn_overlay?: string;
+  cnn_active?: boolean;
   image_path?: string;
   timestamp: number;
   warp_error?: string;
