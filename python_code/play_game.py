@@ -119,6 +119,12 @@ def parse_args() -> argparse.Namespace:
         help="Starting difficulty: 0=Easy, 1=Medium, 2=Hard.",
     )
     parser.add_argument(
+        "--flip-180",
+        action="store_true",
+        help="Set if the camera sees white on top / black on bottom "
+             "(board is 180° rotated from the chess.Board standard orientation).",
+    )
+    parser.add_argument(
         "--board-calibration",
         default=str(DEFAULT_BOARD_CALIBRATION_JSON),
         help="Path to board calibration JSON.",
@@ -177,6 +183,7 @@ def main() -> None:
         arm_ser=arm_ser,
         arm_lock=arm_lock,
         player_color=args.player_color,
+        flip_180=args.flip_180,
         engine_path=args.engine_path,
         think_time=args.think_time,
     )

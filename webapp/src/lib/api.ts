@@ -411,7 +411,32 @@ export const api = {
       queue_path?: string;
       reason?: string;
     }>("/api/cnn/feedback", payload),
+
+  controllerStart: (payload: ControllerStartPayload) =>
+    post<ControllerStatus>("/api/controller/start", payload),
+  controllerStop: () => post<ControllerStatus>("/api/controller/stop", {}),
+  controllerStatus: () => get<ControllerStatus>("/api/controller/status"),
 };
+
+export interface ControllerStartPayload {
+  esp32_host?: string;
+  esp32_port?: number;
+  arm_port?: string | null;
+  player_color?: "white" | "black";
+  difficulty?: 0 | 1 | 2;
+  flip_180?: boolean;
+  engine_path?: string;
+  think_time?: number;
+}
+
+export interface ControllerStatus {
+  running: boolean;
+  pid?: number | null;
+  started_at?: number | null;
+  cmd?: string[] | null;
+  exit_code?: number | null;
+  log_tail?: string[];
+}
 
 // --- CNN-related response types ---
 

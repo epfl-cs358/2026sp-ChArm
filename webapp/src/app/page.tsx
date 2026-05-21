@@ -15,14 +15,18 @@ import {
   Gauge,
   Grid3X3,
   Loader2,
+  Play,
   Settings,
   ShieldCheck,
+  Square,
   Swords,
+  Terminal,
   UserRound,
   XCircle,
   Zap,
 } from "lucide-react";
 import { api, CnnActiveModel, CnnModelMeta, CvRouterConfig } from "@/lib/api";
+import { useCalibration } from "@/lib/calibration-context";
 import { imageSrc } from "@/lib/image";
 import {
   CalibrationData,
@@ -365,7 +369,7 @@ export default function Dashboard() {
   // localStorage in an effect after mount so SSR and the first client
   // render agree (avoids React hydration mismatches).
   const [robotPort, setRobotPort] = useState<string>(DEFAULT_SERIAL_PORT);
-  const [calibration, setCalibration] = useState<CalibrationData | null>(null);
+  const { calibration, refresh: refreshCalibration, setCalibration } = useCalibration();
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
   const [skillLevel, setSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
   const [showSkillModal, setShowSkillModal] = useState(false);
@@ -384,6 +388,54 @@ export default function Dashboard() {
     }
   }, []);
   const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
+
+  // ── play_game.py controller (LCD) ──────────────────────────────────────
+  const [controllerRunning, setControllerRunning] = useState(false);
+  const [controllerLog, setControllerLog] = useState<string[]>([]);
+  const [controllerBusy, setControllerBusy] = useState(false);
+  const [showControllerLog, setShowControllerLog] = useState(false);
+
+  useEffect(() => {
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const s = await api.controllerStatus();
+        if (stopped) return;
+        setControllerRunning(!!s.running);
+        if (s.log_tail) setControllerLog(s.log_tail);
+      } catch {
+        // network blip — ignore
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const toggleController = useCallback(async () => {
+    if (controllerBusy) return;
+    setControllerBusy(true);
+    try {
+      if (controllerRunning) {
+        const s = await api.controllerStop();
+        setControllerRunning(!!s.running);
+      } else {
+        const s = await api.controllerStart({
+          player_color: "white",
+          difficulty,
+        });
+        setControllerRunning(!!s.running);
+        setShowControllerLog(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Controller toggle failed");
+    } finally {
+      setControllerBusy(false);
+    }
+  }, [controllerBusy, controllerRunning, difficulty]);
 
   // CNN model state
   const [cnnModels, setCnnModels] = useState<CnnModelMeta[]>([]);
@@ -442,15 +494,16 @@ export default function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getRobotStatus(), api.getCalibration()])
-      .then(([robot, vision]) => {
+    // Calibration is already fetched by CalibrationProvider at the layout
+    // level; here we only need robot status.
+    api.getRobotStatus()
+      .then((robot) => {
         if (cancelled) return;
         setRobotStatus(robot);
         setRobotPort((current) => {
           const stored = typeof window !== "undefined" ? window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) : null;
           return stored || robot.active_port || robot.detected_port || current;
         });
-        setCalibration(vision);
         setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
       })
       .catch(() => undefined);
@@ -671,6 +724,45 @@ export default function Dashboard() {
         <div className="flex min-w-[260px] items-center justify-end gap-2 flex-wrap">
           <button
             type="button"
+            onClick={toggleController}
+            disabled={controllerBusy}
+            title={controllerRunning
+              ? "Stop play_game.py (LCD controller flow)"
+              : "Launch play_game.py — drives the LCD/rotary controller flow"}
+            className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors disabled:opacity-50"
+            style={controllerRunning ? {
+              borderColor: "oklch(0.65 0.22 25 / 0.6)",
+              background: "oklch(0.65 0.22 25 / 0.12)",
+              color: "oklch(0.65 0.22 25)",
+            } : {
+              borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)",
+              background: "oklch(from var(--charm-cyan) l c h / 0.08)",
+              color: "var(--charm-cyan)",
+            }}>
+            {controllerBusy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : controllerRunning ? (
+              <Square className="size-4" />
+            ) : (
+              <Play className="size-4" />
+            )}
+            <span className="font-semibold">
+              {controllerRunning ? "Stop LCD" : "Run LCD"}
+            </span>
+          </button>
+          {controllerLog.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowControllerLog((v) => !v)}
+              title="Toggle play_game.py log tail"
+              className="flex items-center gap-1.5 rounded-md border px-2 py-1.5 font-jetbrains text-xs"
+              style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)" }}>
+              <Terminal className="size-3.5" />
+              <span>{showControllerLog ? "Hide log" : "Show log"}</span>
+            </button>
+          ) : null}
+          <button
+            type="button"
             onClick={() => { setDraftSkillLevel(skillLevel); setShowSkillModal(true); }}
             title={`Stockfish skill ${skillLevel}/20 (~${estimateEloForSkill(skillLevel)} Elo). Click to change.`}
             className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors hover:bg-[oklch(from_var(--charm-cyan)_l_c_h_/_0.14)]"
@@ -713,6 +805,28 @@ export default function Dashboard() {
       </div>
 
       <FlowRail state={turnState} armCalibrated={armCalibrated} />
+
+      {showControllerLog && (
+        <div className="rounded-md border p-3 font-jetbrains text-xs"
+          style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <div className="flex items-center justify-between mb-2">
+            <span style={{ color: "var(--charm-muted)" }}>
+              play_game.py · {controllerRunning ? "running" : "stopped"}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowControllerLog(false)}
+              className="text-xs"
+              style={{ color: "var(--charm-muted)" }}>
+              close
+            </button>
+          </div>
+          <pre className="max-h-48 overflow-auto text-[11px] leading-relaxed whitespace-pre-wrap"
+            style={{ color: "var(--charm-text)" }}>
+            {controllerLog.length === 0 ? "(no output yet)" : controllerLog.join("\n")}
+          </pre>
+        </div>
+      )}
 
       {error && (
         <div className="rounded-md border px-4 py-3 text-sm font-jetbrains flex items-center gap-2"

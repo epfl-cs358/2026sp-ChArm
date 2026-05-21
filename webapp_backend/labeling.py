@@ -381,6 +381,124 @@ class DatasetStore:
             if img is not None:
                 yield img
 
+    # --------- rescan / metadata reconstruction ---------
+
+    def rescan(self, name: str) -> DatasetMetadata:
+        """Rebuild ``metadata.json`` by counting JPEGs already on disk.
+
+        Used when the user dropped a folder into ``labeled_datasets/`` by
+        hand (or merged two datasets) and ``metadata.json`` is missing or
+        out of sync. Preserves ``created_at`` and existing ``settings`` if
+        the file is present, otherwise fills sensible defaults.
+        """
+        name = _safe_name(name)
+        d = self.dataset_dir(name)
+        if not d.exists() or not d.is_dir():
+            raise FileNotFoundError(f"Dataset folder not found: {name}")
+
+        mp = self.metadata_path(name)
+        now = time.time()
+        if mp.exists():
+            try:
+                prev = DatasetMetadata.from_json(json.loads(mp.read_text()))
+                created_at = prev.created_at
+                settings = prev.settings
+            except Exception:
+                created_at = now
+                settings = DatasetSettings()
+        else:
+            created_at = now
+            settings = DatasetSettings()
+
+        meta = DatasetMetadata(
+            name=name,
+            created_at=created_at,
+            updated_at=now,
+            settings=settings,
+        )
+
+        empty_dir = d / "empty"
+        if empty_dir.is_dir():
+            meta.empty_frames = sum(
+                1 for p in empty_dir.iterdir()
+                if p.is_file() and p.suffix == ".jpg"
+            )
+
+        for color in ("white", "black"):
+            color_dir = d / color
+            if not color_dir.is_dir():
+                continue
+            bucket = meta.white if color == "white" else meta.black
+            for sq_dir in color_dir.iterdir():
+                if not sq_dir.is_dir():
+                    continue
+                sq = sq_dir.name.lower()
+                if sq not in SQUARES:
+                    continue
+                count = sum(
+                    1 for p in sq_dir.iterdir()
+                    if p.is_file() and p.suffix == ".jpg"
+                )
+                if count:
+                    bucket[sq] = count
+
+        bulk_root = d / "bulk"
+        if bulk_root.is_dir():
+            for color in ("empty", "white", "black"):
+                color_dir = bulk_root / color
+                if not color_dir.is_dir():
+                    continue
+                bucket = (
+                    meta.bulk_empty if color == "empty"
+                    else meta.bulk_white if color == "white"
+                    else meta.bulk_black
+                )
+                for sq_dir in color_dir.iterdir():
+                    if not sq_dir.is_dir():
+                        continue
+                    sq = sq_dir.name.lower()
+                    if sq not in SQUARES:
+                        continue
+                    count = sum(
+                        1 for p in sq_dir.iterdir()
+                        if p.is_file() and p.suffix == ".jpg"
+                    )
+                    if count:
+                        bucket[sq] = count
+
+        # Downstream artifacts may be stale after a rescan; recompute on demand.
+        meta.has_exemplar_config = (d / "exemplar_config.json").exists()
+        meta.has_accuracy = (d / "accuracy.json").exists()
+
+        self.save(meta)
+        return meta
+
+    def rescan_all(self) -> list[DatasetMetadata]:
+        """Rescan every dataset folder under the root, skipping cnn_* outputs.
+
+        Returns the rebuilt metadata for each folder that looked like a
+        labeling dataset (had at least one of empty/, white/, black/, bulk/).
+        """
+        out: list[DatasetMetadata] = []
+        if not self.root.is_dir():
+            return out
+        for child in sorted(self.root.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith("cnn_"):
+                continue
+            has_structure = any(
+                (child / sub).is_dir()
+                for sub in ("empty", "white", "black", "bulk")
+            )
+            if not has_structure and not (child / "metadata.json").exists():
+                continue
+            try:
+                out.append(self.rescan(child.name))
+            except Exception:
+                continue
+        return out
+
 
 def _check_color(color: str) -> str:
     c = color.lower().strip()

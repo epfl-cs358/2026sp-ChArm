@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -16,6 +17,23 @@ from charm.vision.piece_color_detector import (
     detect_piece_colors,
     draw_piece_color_debug,
 )
+
+
+@dataclass
+class PipelineOptions:
+    """Compat shim — the pipeline is fully hardcoded after the cv-vision-updates
+    retune, so these fields are accepted but ignored. Kept so callers in
+    ``game_session`` / ``vision_integration`` / the webapp keep importing it.
+    """
+
+    occupancy_threshold: float = 12.0
+    occupancy_delta_threshold: float = 12.0
+    white_threshold: float = 90.0
+    black_threshold: float = 90.0
+    white_delta_threshold: float = 5.0
+    black_delta_threshold: float = -30.0
+    warp_size: int = 800
+    reference_image_path: Optional[str] = None
 
 
 @dataclass
@@ -36,7 +54,10 @@ class BoardPipelineResult:
     black_bitmap: list[list[int]]
 
 
-def run_board_pipeline(image_path: str) -> BoardPipelineResult:
+def run_board_pipeline(
+    image_path: str,
+    options: Optional[PipelineOptions] = None,
+) -> BoardPipelineResult:
     """
     Minimal pipeline for an already-calibrated board image.
 
@@ -50,7 +71,14 @@ def run_board_pipeline(image_path: str) -> BoardPipelineResult:
         3) occupancy detection
         4) piece color detection
         5) bitmap generation
+
+    The ``options`` argument is accepted for backward compatibility with callers
+    that still pass a ``PipelineOptions`` instance, but the pipeline is fully
+    hardcoded after the cv-vision-updates retune (occupancy_threshold=12.0,
+    white/black piece thresholds=90, warp size 800). The values inside
+    ``options`` are intentionally ignored.
     """
+    del options  # compat-only, see docstring
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image from path: {image_path}")

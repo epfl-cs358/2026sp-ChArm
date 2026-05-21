@@ -92,12 +92,56 @@ def _iter_source_frames(source_root: Path) -> Iterable[tuple[Path, str, Optional
                 yield f, piece_kind, square_dir.name
 
 
-def _iter_bulk_cells(source_root: Path) -> Iterable[tuple[Path, str]]:
+def _compute_bulk_empty_caps(source_root: Path) -> dict[str, int]:
+    """Cap bulk-empty cells per square so empties don't drown out pieces.
+
+    Without a cap, a bulk-paint session that labels every square as empty
+    on each captured board adds 64 empties per frame vs ~25 piece cells
+    per (color, square) total — so the empty class can be 100× the piece
+    classes and the CNN learns "always predict empty" for cheap loss. The
+    rebalanced val loss in train_cnn.py compensates partially, but it's
+    still better to feed the model a sane class ratio.
+
+    Cap policy (per square): ``max(3 * piece_count_at_this_square, 30)``.
+    Preserves every piece sample; keeps roughly 3× as many empties for
+    diversity, with a floor of 30 so empty-rich squares still teach the
+    empty class even when their piece coverage is thin.
+    """
+    bulk_root = source_root / "bulk"
+    if not bulk_root.exists():
+        return {}
+    piece_counts: dict[str, int] = {}
+    for cls in ("white", "black"):
+        cls_dir = bulk_root / cls
+        if not cls_dir.exists():
+            continue
+        for sq_dir in cls_dir.iterdir():
+            if not sq_dir.is_dir():
+                continue
+            n = sum(1 for f in sq_dir.glob("*.jpg"))
+            piece_counts[sq_dir.name] = max(piece_counts.get(sq_dir.name, 0), n)
+    caps: dict[str, int] = {}
+    empty_dir = bulk_root / "empty"
+    if empty_dir.exists():
+        for sq_dir in empty_dir.iterdir():
+            if not sq_dir.is_dir():
+                continue
+            caps[sq_dir.name] = max(3 * piece_counts.get(sq_dir.name, 0), 30)
+    return caps
+
+
+def _iter_bulk_cells(
+    source_root: Path,
+    empty_caps: Optional[dict[str, int]] = None,
+) -> Iterable[tuple[Path, str]]:
     """Yield (cell_path, class_label) for every bulk-painted per-cell crop.
 
     Bulk-paint sessions save single-cell crops (already 100x100) under
     bulk/<class>/<sq>/cell_*.jpg, so we copy them straight into the CNN
     train/val split without re-cropping.
+
+    When ``empty_caps`` is provided, the empty class is sampled down to at
+    most ``empty_caps[sq]`` cells per square; piece classes are unaffected.
     """
     bulk_root = source_root / "bulk"
     if not bulk_root.exists():
@@ -109,13 +153,21 @@ def _iter_bulk_cells(source_root: Path) -> Iterable[tuple[Path, str]]:
         for sq_dir in sorted(cls_dir.iterdir()):
             if not sq_dir.is_dir():
                 continue
-            for f in sorted(sq_dir.glob("*.jpg")):
+            files = sorted(sq_dir.glob("*.jpg"))
+            if cls == "empty" and empty_caps is not None:
+                cap = empty_caps.get(sq_dir.name)
+                if cap is not None and len(files) > cap:
+                    files = files[:cap]
+            for f in files:
                 yield f, cls
 
 
-def _count_source_frames(source_root: Path) -> int:
+def _count_source_frames(
+    source_root: Path,
+    empty_caps: Optional[dict[str, int]] = None,
+) -> int:
     return sum(1 for _ in _iter_source_frames(source_root)) + sum(
-        1 for _ in _iter_bulk_cells(source_root)
+        1 for _ in _iter_bulk_cells(source_root, empty_caps=empty_caps)
     )
 
 
@@ -186,7 +238,8 @@ def build_cnn_dataset(
         json.dumps({"source_dataset": source_dataset_name}) + "\n"
     )
 
-    frames_total = _count_source_frames(source_root)
+    empty_caps = _compute_bulk_empty_caps(source_root)
+    frames_total = _count_source_frames(source_root, empty_caps=empty_caps)
     counts_train: dict[str, int] = {c: 0 for c in CLASSES}
     counts_val: dict[str, int] = {c: 0 for c in CLASSES}
 
@@ -244,7 +297,7 @@ def build_cnn_dataset(
 
     # Bulk-paint sessions contribute single-cell crops directly; no grid
     # splitting needed — just copy each cell into the chosen split.
-    for cell_path, cls in _iter_bulk_cells(source_root):
+    for cell_path, cls in _iter_bulk_cells(source_root, empty_caps=empty_caps):
         cell_img = cv2.imread(str(cell_path))
         if cell_img is None:
             frames_done += 1

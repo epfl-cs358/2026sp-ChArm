@@ -9,7 +9,9 @@ import serial
 
 from charm.arduino.uiController_bridge import ArduinoUIControllerLink
 from charm.arduino.arduino_bridge import execute_move, send_command
-from charm.game.game_session import GameSession
+from charm.game.cv_scan import build_router, persist_validated_capture
+from charm.game.game_session import GameSession, SessionResult
+from charm.vision.cv_router import AttemptDecision
 
 
 BoardImageProvider = Callable[[], str]
@@ -32,6 +34,9 @@ class GameControllerConfig:
     arm_lock: threading.Lock = None      # protects arm_ser writes
     # "white" or "black" — set by the app layer before the game starts.
     player_color: str = "white"
+    # Set to True when the camera sees white on top / black on bottom
+    # (180° rotated from the chess.Board standard orientation).
+    flip_180: bool = False
     on_player_done: Optional[MoveExecutor] = None
     on_set_difficulty: Optional[DifficultyHandler] = None
     engine_path: str = "stockfish"
@@ -74,52 +79,57 @@ class GameController:
     def check_board(self) -> bool:
         """Called by the bridge when Arduino sends CHECK_BOARD.
 
-        Returns True/False only — the bridge sends BOARD_OK or BOARD_FAIL
-        based on this return value.
+        Uses the same CV router config as the webapp (cv_router_config.json):
+        tries the configured primary mode (CNN if active, else vision) and
+        falls back to the other after attempts_each tries each. Validated
+        captures are appended to the shared dataset.
+
+        Returns True/False — the bridge sends BOARD_OK or BOARD_FAIL.
         """
         print("\n========== GAME CONTROLLER CHECK_BOARD DEBUG ==========", flush=True)
 
         try:
             self.session.reset()
 
-            print("[DEBUG] Step 1: board_image_provider()", flush=True)
-            image_path = self.config.board_image_provider()
-            print("[DEBUG] image_path =", image_path, flush=True)
+            router, fns, cfg = build_router()
+            print(f"[DEBUG] router: primary={cfg.primary} attempts_each={cfg.attempts_each} modes={list(fns.keys())}", flush=True)
 
-            print("[DEBUG] Step 2: initialize_from_image()", flush=True)
-            result = self.session.initialize_from_image(image_path)
+            last_initial: dict = {"result": None}
 
-            print("[DEBUG] initialize result =", result, flush=True)
-            print("[DEBUG] result.success =", result.success, flush=True)
-            print("[DEBUG] result.message =", result.message, flush=True)
-            print("[DEBUG] result.mismatch_count =", result.mismatch_count, flush=True)
-            print("[DEBUG] session.initialized =", self.session.is_initialized(), flush=True)
-            print("[DEBUG] session.current_fen =", self.session.get_current_fen(), flush=True)
+            def _on_init_attempt(mode, idx, capture) -> AttemptDecision:
+                print(f"[DEBUG] init attempt mode={mode} idx={idx}", flush=True)
+                result = self.session.initialize_from_bitmaps(
+                    capture.white_bitmap,
+                    capture.black_bitmap,
+                    max_mismatches=0,
+                )
+                last_initial["result"] = result
+                if result.success:
+                    persist_validated_capture(capture, cfg, mode_used=mode, move_uci=None)
+                return AttemptDecision(
+                    success=result.success,
+                    error=None if result.success else result.message,
+                )
 
-            if not result.success:
-                print("[DEBUG] RETURN FALSE: initialize_from_image failed", flush=True)
+            router_result = router.scan(fns, _on_init_attempt)
+            print(f"[DEBUG] router result: success={router_result.success} mode_used={router_result.mode_used} attempts={router_result.attempts_by_mode()}", flush=True)
+
+            if not router_result.success or last_initial["result"] is None or not last_initial["result"].success:
+                print("[DEBUG] RETURN FALSE: no attempt validated the initial board", flush=True)
                 print("=======================================================\n", flush=True)
                 return False
 
             print("[DEBUG] Step 3: start_game()", flush=True)
             print("[DEBUG] config.player_color =", self.config.player_color, flush=True)
-
             start_result = self.session.start_game(self.config.player_color)
-
-            print("[DEBUG] start_result =", start_result, flush=True)
             print("[DEBUG] start_result.success =", start_result.success, flush=True)
             print("[DEBUG] start_result.message =", start_result.message, flush=True)
-            print("[DEBUG] session.game_started =", self.session.is_game_started(), flush=True)
-            print("[DEBUG] player_color =", self.session.get_player_color(), flush=True)
-            print("[DEBUG] robot_color =", self.session.get_robot_color(), flush=True)
-            print("[DEBUG] robot_moves_first =", self.session.robot_moves_first(), flush=True)
 
             if not start_result.success:
                 print("[DEBUG] RETURN FALSE: start_game failed", flush=True)
                 print("=======================================================\n", flush=True)
                 return False
 
-            print("[DEBUG] Step 4: skip extra UI turn command during debug", flush=True)
             print("[DEBUG] RETURN TRUE: check_board success", flush=True)
             print("=======================================================\n", flush=True)
             return True
@@ -127,7 +137,6 @@ class GameController:
         except Exception as e:
             print("[DEBUG] EXCEPTION in check_board:", repr(e), flush=True)
             import traceback
-
             traceback.print_exc()
             print("[DEBUG] RETURN FALSE because exception occurred", flush=True)
             print("=======================================================\n", flush=True)
@@ -135,19 +144,38 @@ class GameController:
 
 
     def player_done(self) -> None:
-        """Called by the bridge when Arduino sends PLAYER_DONE (button press)."""
+        """Called by the bridge when Arduino sends PLAYER_DONE (button press).
+
+        Same router-driven flow as check_board: CNN-primary if active, vision
+        fallback, retries per cv_router_config.json.
+        """
         if self.config.on_player_done is not None:
             self.config.on_player_done()
 
-        # Capture the board and let the session detect + commit the player's move.
-        image_path = self.config.board_image_provider()
-        move_result = self.session.process_player_move_from_image(image_path)
+        router, fns, cfg = build_router()
+        last_move: dict = {"result": None}
 
-        if not move_result.success:
+        def _on_move_attempt(mode, idx, capture) -> AttemptDecision:
+            print(f"[DEBUG] move attempt mode={mode} idx={idx}", flush=True)
+            result = self.session.process_bitmaps(
+                capture.white_bitmap,
+                capture.black_bitmap,
+                max_mismatches=0,
+            )
+            last_move["result"] = result
+            if result.success:
+                persist_validated_capture(capture, cfg, mode_used=mode, move_uci=result.move_uci)
+            return AttemptDecision(
+                success=result.success,
+                error=None if result.success else result.message,
+            )
+
+        router_result = router.scan(fns, _on_move_attempt)
+        move_result: Optional[SessionResult] = last_move["result"]
+
+        if not router_result.success or move_result is None or not move_result.success:
             # Vision could not detect a valid move (illegal or ambiguous move).
             # Put the Arduino in ERROR mode so the LCD shows "ERR: check board".
-            # Player presses button to dismiss the error, which returns to GAME
-            # mode; they then press OK again to re-trigger PLAYER_DONE and retry.
             self.ui_link.set_mode(7)  # UIMode::ERROR = 7 in uiState.h
             return
 

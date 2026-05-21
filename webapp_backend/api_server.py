@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import collections
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Literal, Optional
 
 import cv2
 import chess
@@ -24,7 +27,18 @@ sys.path.insert(0, str(SRC_PATH))
 
 from webapp_backend import robot_adapter
 from charm.game.game_session import GameSession, SessionResult
-from charm.vision.pipeline import PipelineOptions
+from charm.vision.pipeline import PipelineOptions, run_board_pipeline
+from charm.vision.cv_router import (
+    AttemptDecision,
+    CaptureOutcome,
+    CVRouter,
+    RouterConfig,
+)
+from charm.vision.validated_capture import (
+    LABELED_DATASETS_ROOT,
+    save_validated_capture,
+    unflip_bitmap_180,
+)
 
 from charm.vision.four_point_calibration import (
     FourPointCalibration,
@@ -116,14 +130,10 @@ except ImportError:
 from charm.vision.occupancy_detector import (
     detect_occupancy,
     OccupancyResult,
-    compute_occupancy_score,
-    compute_reference_delta,
     draw_occupancy_debug,
     occupancy_to_matrix,
 )
 from charm.vision.piece_color_detector import (
-    compute_piece_brightness_score,
-    compute_piece_dark_score,
     draw_piece_color_debug,
 )
 
@@ -139,14 +149,13 @@ infer_move_from_bitmaps = _STATE_TRACKER_MODULE.infer_move_from_bitmaps
 BOARD_CAL_PATH = PYTHON_CODE_DIR / "board_calibration.json"
 INNER_CAL_PATH = PYTHON_CODE_DIR / "inner_warp_calibration.json"
 ROBOT_CAL_PATH = PYTHON_CODE_DIR / "robot_calibration.json"
-CV_TUNING_PATH = PYTHON_CODE_DIR / "cv_tuning.json"
 EMPTY_REF_PATH = PYTHON_CODE_DIR / "empty_board_reference.jpg"
 RAW_IMAGE_PATH = REPO_ROOT / "latest_raw.jpg"
 LEGACY_RAW_IMAGE_PATH = PYTHON_CODE_DIR / "latest_raw.jpg"
-SAVED_PARAMS_PATH = REPO_ROOT / "saved_pipeline_params.json"
 ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
 LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
+CV_ROUTER_CONFIG_PATH = PYTHON_CODE_DIR / "cv_router_config.json"
 DIFFICULTY_SKILL_LEVEL = {0: 5, 1: 12, 2: 20}
 
 
@@ -227,13 +236,6 @@ class BoardCornerCalibrationPayload(BaseModel):
 
 class ImagePathPayload(BaseModel):
     path: str
-
-
-class SavedParamsPayload(BaseModel):
-    params: PipelineParams
-    score: Optional[dict] = None
-    labels: Optional[list[list[str]]] = None
-    source_image: Optional[str] = None
 
 
 class PipelineSnapshotPayload(BaseModel):
@@ -332,18 +334,6 @@ class CameraCapturePayload(BaseModel):
     url: Optional[str] = None
     port: Optional[str] = None
     baud: int = 9600
-
-
-class TuneAnnotation(BaseModel):
-    row: int
-    col: int
-    label: str  # "empty" | "white" | "black"
-
-
-class CvTunePayload(BaseModel):
-    annotations: list[TuneAnnotation]
-    params: PipelineParams = Field(default_factory=PipelineParams)
-    image_path: Optional[str] = None
 
 
 class EmptyReferencePayload(BaseModel):
@@ -472,38 +462,6 @@ def _resolve_board_calibration(
     board_cal = load_four_point_calibration(str(BOARD_CAL_PATH))
     return board_cal, "saved", draw_calibration_points(image, board_cal)
 
-
-
-def _load_cv_tuning() -> Optional[dict]:
-    if not CV_TUNING_PATH.exists():
-        return None
-    try:
-        return json.loads(CV_TUNING_PATH.read_text())
-    except Exception:
-        return None
-
-
-def _save_cv_tuning(tuning: dict) -> None:
-    CV_TUNING_PATH.write_text(json.dumps(tuning, indent=2))
-
-
-def _apply_cv_tuning(params: PipelineParams) -> PipelineParams:
-    """Overlay persisted tuning on params for fields still at defaults."""
-    tuning = _load_cv_tuning()
-    if not tuning:
-        return params
-    defaults = PipelineParams()
-    for field in (
-        "occupancy_threshold",
-        "occupancy_delta_threshold",
-        "white_threshold",
-        "black_threshold",
-        "white_delta_threshold",
-        "black_delta_threshold",
-    ):
-        if field in tuning and getattr(params, field) == getattr(defaults, field):
-            setattr(params, field, float(tuning[field]))
-    return params
 
 
 def _classify_with_exemplars(occupancy_cells, config):
@@ -729,7 +687,6 @@ def _run_pipeline_and_write_calibrated(params: PipelineParams, capture: bool) ->
     if img is None:
         raise HTTPException(400, f"Failed to decode image: {path}")
 
-    params = _apply_cv_tuning(params)
     pipeline_result = run_pipeline(img, params)
     pipeline_result["image_path"] = str(path)
     pipeline_result["timestamp"] = time.time()
@@ -941,7 +898,6 @@ def pipeline_run(params: PipelineParams):
     img = cv2.imread(str(path))
     if img is None:
         raise HTTPException(400, "Failed to decode image")
-    params = _apply_cv_tuning(params)
     result = run_pipeline(img, params)
     result["image_path"] = str(path)
     result["timestamp"] = time.time()
@@ -990,156 +946,6 @@ def clear_empty_reference():
     if EMPTY_REF_PATH.exists():
         EMPTY_REF_PATH.unlink()
     return {"status": "cleared"}
-
-
-@app.get("/api/pipeline/tuning")
-def get_cv_tuning():
-    tuning = _load_cv_tuning()
-    return {"exists": tuning is not None, "tuning": tuning}
-
-
-@app.delete("/api/pipeline/tuning")
-def clear_cv_tuning():
-    if CV_TUNING_PATH.exists():
-        CV_TUNING_PATH.unlink()
-    return {"status": "cleared"}
-
-
-@app.post("/api/pipeline/tune")
-def tune_cv(payload: CvTunePayload):
-    if not payload.annotations:
-        raise HTTPException(400, "At least one annotation is required")
-
-    buckets: dict[str, list[TuneAnnotation]] = {"empty": [], "white": [], "black": []}
-    for ann in payload.annotations:
-        if ann.label not in buckets:
-            raise HTTPException(400, f"Unknown label: {ann.label}")
-        if not (0 <= ann.row < 8 and 0 <= ann.col < 8):
-            raise HTTPException(400, f"Cell out of range: ({ann.row},{ann.col})")
-        buckets[ann.label].append(ann)
-
-    missing = [label for label, items in buckets.items() if not items]
-    if missing:
-        raise HTTPException(
-            400,
-            f"Need at least one annotation per label; missing: {', '.join(missing)}",
-        )
-
-    warped = _warped_board_for_tuning(payload.params, payload.image_path)
-    x_lines, y_lines = detect_8x8_grid_lines(warped)
-    cells = extract_8x8_cells(warped, x_lines, y_lines)
-    cell_map = {(c.row, c.col): c for c in cells}
-
-    # Load empty-reference cells if present so we can also tune delta thresholds.
-    ref_cell_map: dict[tuple[int, int], object] = {}
-    if EMPTY_REF_PATH.exists():
-        ref_img = cv2.imread(str(EMPTY_REF_PATH))
-        if ref_img is not None:
-            if ref_img.shape[:2] != warped.shape[:2]:
-                ref_img = cv2.resize(ref_img, (warped.shape[1], warped.shape[0]))
-            ref_x, ref_y = detect_8x8_grid_lines(ref_img)
-            ref_cells = extract_8x8_cells(ref_img, ref_x, ref_y)
-            ref_cell_map = {(c.row, c.col): c for c in ref_cells}
-
-    samples: dict[str, list[dict]] = {"empty": [], "white": [], "black": []}
-    for label, items in buckets.items():
-        for ann in items:
-            cell = cell_map.get((ann.row, ann.col))
-            if cell is None:
-                raise HTTPException(500, f"Cell not extracted: ({ann.row},{ann.col})")
-            occ = float(compute_occupancy_score(cell.image))
-            bright = float(compute_piece_brightness_score(cell.image))
-            dark = float(compute_piece_dark_score(cell.image))
-            sample: dict = {
-                "row": ann.row,
-                "col": ann.col,
-                "occupancy_score": round(occ, 3),
-                "brightness_score": round(bright, 2),
-                "dark_score": round(dark, 2),
-            }
-            ref_cell = ref_cell_map.get((ann.row, ann.col))
-            if ref_cell is not None:
-                occupancy_delta = float(compute_reference_delta(cell.image, ref_cell.image))  # type: ignore[arg-type]
-                ref_bright = float(compute_piece_brightness_score(ref_cell.image))  # type: ignore[arg-type]
-                ref_dark = float(compute_piece_dark_score(ref_cell.image))  # type: ignore[arg-type]
-                sample["occupancy_delta"] = round(occupancy_delta, 3)
-                sample["bright_delta"] = round(bright - ref_bright, 2)
-                sample["dark_delta"] = round(dark - ref_dark, 2)
-            samples[label].append(sample)
-
-    # Helper: pick a threshold T such that occupied samples satisfy `metric > T`
-    # and empty samples satisfy `metric <= T`. When the classes don't overlap
-    # we use the midpoint; when they do (lighting noise pushes empties into
-    # the occupied range, etc.), we hug `min_occupied` with a small margin so
-    # AND-mode in detect_occupancy still catches every real piece — the other
-    # metric is responsible for filtering the overlapping empties.
-    def _pick_threshold(empty_vals: list[float], occ_vals: list[float]) -> float:
-        max_empty_v = max(empty_vals)
-        min_occ_v = min(occ_vals)
-        if min_occ_v > max_empty_v:
-            return (max_empty_v + min_occ_v) / 2.0
-        spread = max(abs(min_occ_v), 1.0)
-        return min_occ_v - 0.05 * spread
-
-    empty_occ = [s["occupancy_score"] for s in samples["empty"]]
-    occupied_occ = [
-        s["occupancy_score"]
-        for label in ("white", "black")
-        for s in samples[label]
-    ]
-    occupancy_threshold = _pick_threshold(empty_occ, occupied_occ)
-
-    white_bright = [s["brightness_score"] for s in samples["white"]]
-    black_bright = [s["brightness_score"] for s in samples["black"]]
-    midpoint = (max(black_bright) + min(white_bright)) / 2.0
-    white_threshold = midpoint
-    black_threshold = midpoint
-
-    tuning: dict = {
-        "occupancy_threshold": round(float(occupancy_threshold), 3),
-        "white_threshold": round(float(white_threshold), 2),
-        "black_threshold": round(float(black_threshold), 2),
-        "saved_at": time.time(),
-        "samples": samples,
-    }
-
-    # Reference-based delta thresholds. Only derive when every annotated cell
-    # has a per-cell delta (otherwise we'd be biased toward whatever subset
-    # happened to overlap the reference).
-    all_have_occ_delta = all(
-        "occupancy_delta" in s for label in ("empty", "white", "black") for s in samples[label]
-    )
-    if all_have_occ_delta:
-        empty_dd = [s["occupancy_delta"] for s in samples["empty"]]
-        occupied_dd = [
-            s["occupancy_delta"]
-            for label in ("white", "black")
-            for s in samples[label]
-        ]
-        occupancy_delta_threshold = _pick_threshold(empty_dd, occupied_dd)
-        tuning["occupancy_delta_threshold"] = round(float(occupancy_delta_threshold), 3)
-
-    all_have_dark_delta = all(
-        "dark_delta" in s for label in ("white", "black") for s in samples[label]
-    )
-    if all_have_dark_delta:
-        # Black pieces have very negative dark_delta (~-100); white pieces are near 0.
-        # Pick a midpoint between max black dark_delta and min white dark_delta.
-        white_dark_deltas = [s["dark_delta"] for s in samples["white"]]
-        black_dark_deltas = [s["dark_delta"] for s in samples["black"]]
-        black_delta_threshold = (max(black_dark_deltas) + min(white_dark_deltas)) / 2.0
-        tuning["black_delta_threshold"] = round(float(black_delta_threshold), 3)
-        # white_delta_threshold is currently unused on the reference path but
-        # we save a neutral value to keep PipelineParams overlay symmetric.
-        tuning["white_delta_threshold"] = round(float(black_delta_threshold), 3)
-
-    _save_cv_tuning(tuning)
-
-    return {
-        "status": "saved",
-        "path": str(CV_TUNING_PATH),
-        "tuning": tuning,
-    }
 
 
 @app.post("/api/pipeline/upload")
@@ -1256,6 +1062,278 @@ def game_step(payload: GameStepPayload):
     }
 
 
+# ----------------------------------------------------------------------------
+# CV router glue
+# ----------------------------------------------------------------------------
+
+
+def _load_router_config() -> RouterConfig:
+    return RouterConfig.load(CV_ROUTER_CONFIG_PATH)
+
+
+def _save_router_config(cfg: RouterConfig) -> None:
+    cfg.save(CV_ROUTER_CONFIG_PATH)
+
+
+def _decode_b64_to_ndarray(b64_str: str) -> Optional[np.ndarray]:
+    """Decode a base64-encoded JPEG back into a BGR ndarray for cell slicing."""
+    if not b64_str:
+        return None
+    try:
+        if "," in b64_str:
+            b64_str = b64_str.split(",", 1)[1]
+        raw = base64.b64decode(b64_str)
+        arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        return arr
+    except Exception:
+        return None
+
+
+def _make_scan_vision(payload) -> "Callable[[], CaptureOutcome]":
+    """Return a callable that captures a fresh frame and runs the classical pipeline.
+
+    Two-stage warp + ``run_board_pipeline`` (cv-vision-updates tuned thresholds),
+    then a 180° flip. The camera is mounted with the human player on top of the
+    image (white pieces at top, black at bottom), but ``state_tracker``
+    expects row 0 = rank 8 = black. Flip aligns the two.
+    """
+    def _do() -> CaptureOutcome:
+        if not BOARD_CAL_PATH.exists() or not INNER_CAL_PATH.exists():
+            raise RuntimeError("Board calibration missing — calibrate the board first.")
+        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
+        if not raw_path.exists():
+            raise RuntimeError(f"Image not found: {raw_path}")
+
+        raw = cv2.imread(str(raw_path))
+        if raw is None:
+            raise RuntimeError(f"Failed to decode {raw_path}")
+
+        board_cal = load_four_point_calibration(BOARD_CAL_PATH)
+        inner_cal = load_inner_warp_calibration(str(INNER_CAL_PATH))
+        first_warp = warp_from_calibration(raw, board_cal, output_size=800)
+        refined = refine_board_with_inner_corners(first_warp, inner_cal, output_size=800)
+        cv2.imwrite(str(LATEST_CALIBRATED_PATH), refined)
+
+        bp = run_board_pipeline(str(LATEST_CALIBRATED_PATH), options=PipelineOptions())
+        wb = _flip_bitmap_180(bp.white_bitmap)
+        bb = _flip_bitmap_180(bp.black_bitmap)
+
+        color_labels: list[list[str]] = []
+        for r in range(8):
+            row: list[str] = []
+            for c in range(8):
+                if wb[r][c]:
+                    row.append("white")
+                elif bb[r][c]:
+                    row.append("black")
+                else:
+                    row.append("empty")
+            color_labels.append(row)
+
+        payload_dict: dict = {
+            "image_path": str(raw_path),
+            "timestamp": time.time(),
+            "refined_warp": to_b64(bp.warped_board),
+            "occupancy_debug": to_b64(bp.occupancy_debug_image),
+            "piece_color_debug": to_b64(bp.piece_color_debug_image),
+            "grid_debug": to_b64(bp.grid_debug_image),
+            "occupancy_matrix": bp.occupancy_matrix,
+            "white_bitmap": wb,
+            "black_bitmap": bb,
+            "color_labels": color_labels,
+            "cv_mode": "vision",
+        }
+        return CaptureOutcome(
+            white_bitmap=wb,
+            black_bitmap=bb,
+            payload=payload_dict,
+            refined_image=refined,
+        )
+
+    return _do
+
+
+def _make_scan_cnn(payload) -> "Callable[[], CaptureOutcome]":
+    """Return a callable that captures a fresh frame and runs the CNN classifier.
+
+    Same 180° flip as the vision path. Camera mount: white-on-top of image.
+    """
+    def _do() -> CaptureOutcome:
+        if not _read_active_cnn_run_id():
+            raise RuntimeError("No active CNN model")
+        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
+        wb, bb, pipeline_result = _run_cnn_game_scan(raw_path)
+        wb = _flip_bitmap_180(wb)
+        bb = _flip_bitmap_180(bb)
+        pipeline_result["white_bitmap"] = wb
+        pipeline_result["black_bitmap"] = bb
+        refined_arr = _decode_b64_to_ndarray(pipeline_result.get("refined_warp", ""))
+        pipeline_result["cv_mode"] = "cnn"
+        return CaptureOutcome(
+            white_bitmap=wb,
+            black_bitmap=bb,
+            payload=pipeline_result,
+            refined_image=refined_arr,
+        )
+
+    return _do
+
+
+def _persist_validated_capture(
+    capture: CaptureOutcome,
+    mode_used: str,
+    move_uci: Optional[str],
+    session_id: Optional[str],
+) -> Optional[dict]:
+    """Best-effort: save the 64 cells of a validated frame into the live dataset."""
+    cfg = _load_router_config()
+    if not cfg.auto_save_validated:
+        return None
+    if capture is None or capture.refined_image is None:
+        return None
+    try:
+        # capture.white/black_bitmap are post-flip (chess orientation:
+        # row 0 = rank 8 = top of state_tracker board). The refined image is
+        # in raw image orientation (white-on-top), so un-flip the bitmaps
+        # before slicing cells so each crop is labeled with what's physically
+        # in that image square.
+        summary = save_validated_capture(
+            refined_image=capture.refined_image,
+            white_bitmap_image_orient=unflip_bitmap_180(capture.white_bitmap),
+            black_bitmap_image_orient=unflip_bitmap_180(capture.black_bitmap),
+            move_uci=move_uci,
+            mode_used=mode_used,
+            session_id=session_id,
+            dataset_name=cfg.dataset_name,
+            datasets_root=LABELED_DATASETS_ROOT,
+        )
+        return {
+            "saved": summary.saved,
+            "dataset": cfg.dataset_name,
+            "counts": summary.counts,
+            "error": summary.error,
+        }
+    except Exception as exc:
+        return {"saved": False, "dataset": cfg.dataset_name, "error": str(exc)}
+
+
+def _build_router(payload) -> tuple[CVRouter, dict, RouterConfig]:
+    """Build a router + per-mode capture fns based on current config and CNN availability.
+
+    When no CNN model is active we drop CNN from the fns dict AND force the
+    effective primary to "vision" so the router runs only vision attempts
+    (no phantom "cnn not configured" entry in the attempts log).
+    """
+    cfg = _load_router_config()
+    cnn_active = bool(_read_active_cnn_run_id())
+    fns: dict = {"vision": _make_scan_vision(payload)}
+    if cnn_active:
+        fns["cnn"] = _make_scan_cnn(payload)
+
+    effective_primary = cfg.primary if cnn_active else "vision"
+    if effective_primary != cfg.primary:
+        # Override for this scan only — don't persist; the user might activate a
+        # CNN later and we want their saved preference to come back.
+        cfg = RouterConfig(
+            primary=effective_primary,
+            attempts_each=cfg.attempts_each,
+            auto_save_validated=cfg.auto_save_validated,
+            dataset_name=cfg.dataset_name,
+        )
+    return CVRouter(config=cfg), fns, cfg
+
+
+def _router_attempts_summary(result) -> dict:
+    return {
+        "mode_used": result.mode_used,
+        "by_mode": result.attempts_by_mode(),
+        "total": len(result.attempts),
+        "attempts": [
+            {
+                "mode": a.mode,
+                "index": a.index,
+                "success": a.success,
+                "error": a.error,
+                "elapsed_ms": round(a.elapsed_ms, 1),
+            }
+            for a in result.attempts
+        ],
+        "final_error": result.final_error,
+    }
+
+
+@app.get("/api/cv-config")
+def get_cv_config():
+    cfg = _load_router_config()
+    return {
+        "primary": cfg.primary,
+        "attempts_each": cfg.attempts_each,
+        "auto_save_validated": cfg.auto_save_validated,
+        "dataset_name": cfg.dataset_name,
+        "cnn_active": bool(_read_active_cnn_run_id()),
+    }
+
+
+class CvConfigPayload(BaseModel):
+    primary: Optional[str] = None
+    attempts_each: Optional[int] = None
+    auto_save_validated: Optional[bool] = None
+    dataset_name: Optional[str] = None
+
+
+@app.post("/api/cv-config")
+def post_cv_config(payload: CvConfigPayload):
+    cfg = _load_router_config()
+    if payload.primary is not None:
+        if payload.primary not in ("vision", "cnn"):
+            raise HTTPException(400, "primary must be 'vision' or 'cnn'")
+        cfg.primary = payload.primary
+    if payload.attempts_each is not None:
+        if payload.attempts_each < 1 or payload.attempts_each > 20:
+            raise HTTPException(400, "attempts_each must be between 1 and 20")
+        cfg.attempts_each = int(payload.attempts_each)
+    if payload.auto_save_validated is not None:
+        cfg.auto_save_validated = bool(payload.auto_save_validated)
+    if payload.dataset_name is not None:
+        name = payload.dataset_name.strip()
+        if not name:
+            raise HTTPException(400, "dataset_name cannot be empty")
+        cfg.dataset_name = name
+    _save_router_config(cfg)
+    return get_cv_config()
+
+
+@app.get("/api/validated-dataset/stats")
+def get_validated_dataset_stats():
+    cfg = _load_router_config()
+    meta_path = LABELED_DATASETS_ROOT / cfg.dataset_name / "metadata.json"
+    if not meta_path.exists():
+        return {
+            "dataset": cfg.dataset_name,
+            "exists": False,
+            "captures": 0,
+            "last": [],
+            "bulk_empty": 0,
+            "bulk_white": 0,
+            "bulk_black": 0,
+        }
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception as exc:
+        raise HTTPException(500, f"Could not parse metadata: {exc}")
+    captures = meta.get("captures") or []
+    return {
+        "dataset": cfg.dataset_name,
+        "exists": True,
+        "captures": len(captures),
+        "last": captures[-10:],
+        "bulk_empty": sum((meta.get("bulk_empty") or {}).values()),
+        "bulk_white": sum((meta.get("bulk_white") or {}).values()),
+        "bulk_black": sum((meta.get("bulk_black") or {}).values()),
+        "path": str(meta_path.parent),
+    }
+
+
 @app.get("/api/game/session")
 def game_session_status():
     return _game_session_payload("ok")
@@ -1276,47 +1354,51 @@ def game_session_start(payload: GameSessionPayload):
 
     _GAME_SESSION.reset()
 
-    if _read_active_cnn_run_id():
-        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
-        white_bitmap, black_bitmap, pipeline_result = _run_cnn_game_scan(raw_path)
-        white_bitmap = _flip_bitmap_180(white_bitmap)
-        black_bitmap = _flip_bitmap_180(black_bitmap)
-        pipeline_result["white_bitmap"] = white_bitmap
-        pipeline_result["black_bitmap"] = black_bitmap
-        initial = _GAME_SESSION.initialize_from_bitmaps(
-            white_bitmap, black_bitmap, max_mismatches=payload.max_mismatches
-        )
-    else:
-        _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
-        pipeline_result["white_bitmap"] = _flip_bitmap_180(pipeline_result["white_bitmap"])
-        pipeline_result["black_bitmap"] = _flip_bitmap_180(pipeline_result["black_bitmap"])
-        pipeline_result["color_labels"] = [list(reversed(row)) for row in reversed(pipeline_result["color_labels"])]
-        pipeline_options = PipelineOptions(
-            occupancy_threshold=payload.params.occupancy_threshold,
-            occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
-            white_threshold=payload.params.white_threshold,
-            black_threshold=payload.params.black_threshold,
-            white_delta_threshold=payload.params.white_delta_threshold,
-            black_delta_threshold=payload.params.black_delta_threshold,
-            warp_size=payload.params.warp_size,
-            reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
-        )
-        initial = _GAME_SESSION.initialize_from_image(
-            str(calibrated_path),
+    router, fns, cfg = _build_router(payload)
+    last_initial: Optional[SessionResult] = None
+    last_payload: dict = {}
+
+    def _on_init_attempt(mode, idx, capture: CaptureOutcome) -> AttemptDecision:
+        nonlocal last_initial, last_payload
+        last_payload = capture.payload
+        # initialize_from_bitmaps does not mutate on failure; it does set
+        # session state on success — but the router returns immediately on
+        # success, so this is safe to call once per attempt.
+        last_initial = _GAME_SESSION.initialize_from_bitmaps(
+            capture.white_bitmap,
+            capture.black_bitmap,
             max_mismatches=payload.max_mismatches,
-            flip_180=True,
-            pipeline_options=pipeline_options,
         )
+        return AttemptDecision(
+            success=last_initial.success,
+            error=None if last_initial.success else last_initial.message,
+        )
+
+    router_result = router.scan(fns, _on_init_attempt)
+    pipeline_result = last_payload or {}
+    pipeline_result["cv_router"] = _router_attempts_summary(router_result)
+    initial = last_initial if last_initial is not None else SessionResult(
+        success=False,
+        message=router_result.final_error or "No scan attempted.",
+    )
 
     if not initial.success:
         expected_board = chess.Board()
         pipeline_result["board_validation_debug"] = {
             "expected_fen": expected_board.fen(),
             "mismatch_count": initial.mismatch_count,
-            "observed_white_bitmap": pipeline_result["white_bitmap"],
-            "observed_black_bitmap": pipeline_result["black_bitmap"],
+            "observed_white_bitmap": pipeline_result.get("white_bitmap"),
+            "observed_black_bitmap": pipeline_result.get("black_bitmap"),
         }
         return _game_session_payload("board_failed", pipeline_result=pipeline_result, started=initial)
+
+    # Persist the validated frame for future CNN training (best-effort).
+    pipeline_result["validated_capture"] = _persist_validated_capture(
+        router_result.capture,
+        mode_used=router_result.mode_used or "unknown",
+        move_uci=None,
+        session_id="session_start",
+    )
 
     started = _GAME_SESSION.start_game(payload.player_color)
     if not started.success:
@@ -1369,33 +1451,34 @@ def game_session_player_done(payload: GameSessionTurnPayload):
     human_board_before = _GAME_SESSION.get_current_board()
     human_board_copy = human_board_before.copy(stack=True) if human_board_before is not None else None
 
-    if _read_active_cnn_run_id():
-        raw_path = _capture_or_resolve_image(payload.params, payload.capture)
-        white_bitmap, black_bitmap, pipeline_result = _run_cnn_game_scan(raw_path)
-        white_bitmap = _flip_bitmap_180(white_bitmap)
-        black_bitmap = _flip_bitmap_180(black_bitmap)
-        pipeline_result["white_bitmap"] = white_bitmap
-        pipeline_result["black_bitmap"] = black_bitmap
-        human_result = _GAME_SESSION.process_bitmaps(
-            white_bitmap, black_bitmap, max_mismatches=payload.max_mismatches
-        )
-    else:
-        _, pipeline_result, calibrated_path = _run_pipeline_and_write_calibrated(payload.params, payload.capture)
-        turn_pipeline_options = PipelineOptions(
-            occupancy_threshold=payload.params.occupancy_threshold,
-            occupancy_delta_threshold=payload.params.occupancy_delta_threshold,
-            white_threshold=payload.params.white_threshold,
-            black_threshold=payload.params.black_threshold,
-            white_delta_threshold=payload.params.white_delta_threshold,
-            black_delta_threshold=payload.params.black_delta_threshold,
-            warp_size=payload.params.warp_size,
-            reference_image_path=str(EMPTY_REF_PATH) if EMPTY_REF_PATH.exists() else None,
-        )
-        human_result = _GAME_SESSION.process_player_move_from_image(
-            str(calibrated_path),
+    router, fns, cfg = _build_router(payload)
+    last_human: Optional[SessionResult] = None
+    last_payload: dict = {}
+
+    def _on_move_attempt(mode, idx, capture: CaptureOutcome) -> AttemptDecision:
+        nonlocal last_human, last_payload
+        last_payload = capture.payload
+        # process_bitmaps only mutates board state on a successful legal move,
+        # so calling it repeatedly across failing attempts is safe; the router
+        # returns as soon as success is True so we don't double-commit.
+        last_human = _GAME_SESSION.process_bitmaps(
+            capture.white_bitmap,
+            capture.black_bitmap,
             max_mismatches=payload.max_mismatches,
-            pipeline_options=turn_pipeline_options,
         )
+        return AttemptDecision(
+            success=last_human.success,
+            error=None if last_human.success else last_human.message,
+        )
+
+    router_result = router.scan(fns, _on_move_attempt)
+    pipeline_result = last_payload or {}
+    pipeline_result["cv_router"] = _router_attempts_summary(router_result)
+    human_result = last_human if last_human is not None else SessionResult(
+        success=False,
+        message=router_result.final_error or "No scan attempted.",
+    )
+
     if not human_result.success:
         return _game_session_payload(
             "player_move_failed",
@@ -1403,6 +1486,14 @@ def game_session_player_done(payload: GameSessionTurnPayload):
             human_move=human_result,
             human_board_before=human_board_copy,
         )
+
+    # Persist the validated frame for future CNN training (best-effort).
+    pipeline_result["validated_capture"] = _persist_validated_capture(
+        router_result.capture,
+        mode_used=router_result.mode_used or "unknown",
+        move_uci=human_result.move_uci,
+        session_id="player_done",
+    )
 
     current_board = _GAME_SESSION.get_current_board()
     if current_board is not None and current_board.is_game_over():
@@ -1707,52 +1798,6 @@ def capture_from_camera(payload: CameraCapturePayload):
 @app.get("/api/params/defaults")
 def get_defaults():
     return PipelineParams().model_dump(exclude={"image_path"})
-
-
-@app.get("/api/params/saved")
-def get_saved_params():
-    if not SAVED_PARAMS_PATH.exists():
-        return {"exists": False, "path": str(SAVED_PARAMS_PATH)}
-    try:
-        return {
-            "exists": True,
-            "path": str(SAVED_PARAMS_PATH),
-            "data": json.loads(SAVED_PARAMS_PATH.read_text()),
-        }
-    except Exception as e:
-        raise HTTPException(500, f"Failed to read saved params: {e}")
-
-
-@app.put("/api/params/saved")
-def save_params(payload: SavedParamsPayload):
-    data = {
-        "params": payload.params.model_dump(exclude={"image_path"}),
-        "score": payload.score,
-        "labels": payload.labels,
-        "source_image": payload.source_image,
-        "saved_at": time.time(),
-    }
-    try:
-        SAVED_PARAMS_PATH.write_text(json.dumps(data, indent=2))
-    except Exception as e:
-        raise HTTPException(500, f"Failed to save params: {e}")
-
-    # Side-effect: upsert into color_annotations.json when labels are provided
-    if payload.labels and payload.source_image:
-        try:
-            board_64 = [
-                payload.labels[r][c] for r in range(8) for c in range(8)
-            ]
-            _upsert_annotation(
-                image_id=payload.source_image,
-                scene_id=Path(payload.source_image).stem,
-                board_64=board_64,
-                image_path=payload.source_image,
-            )
-        except Exception:
-            pass  # annotation write failure must not break param save
-
-    return {"status": "saved", "path": str(SAVED_PARAMS_PATH), "data": data}
 
 
 def _load_annotations() -> list[dict]:
@@ -2114,6 +2159,29 @@ def get_label_dataset(name: str):
     if not LABEL_STORE.exists(name):
         raise HTTPException(404, f"Dataset not found: {name}")
     return _meta_response(name)
+
+
+@app.post("/api/labeling/datasets/rescan-all")
+def rescan_all_label_datasets():
+    """Rebuild metadata.json for every folder under labeled_datasets/.
+
+    Picks up datasets dropped in by hand (e.g. a manually combined folder
+    with no metadata) and refreshes counts for ones that were edited
+    out-of-band.
+    """
+    metas = LABEL_STORE.rescan_all()
+    return {"rescanned": [m.to_json() for m in metas]}
+
+
+@app.post("/api/labeling/datasets/{name}/rescan")
+def rescan_label_dataset(name: str):
+    try:
+        meta = LABEL_STORE.rescan(name)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"metadata": meta.to_json()}
 
 
 @app.delete("/api/labeling/datasets/{name}")
@@ -2610,8 +2678,10 @@ def cnn_build_dataset(payload: CnnBuildDatasetPayload):
     if not source_dir.exists():
         raise HTTPException(404, f"Source dataset not found: {payload.source}")
 
-    if not BOARD_CAL_PATH.exists() or not INNER_CAL_PATH.exists():
-        raise HTTPException(400, "Board and inner-warp calibrations must be saved first.")
+    # Note: calibration is intentionally not required here. The labeling pipeline
+    # stores pre-warped 800x800 frames, so build_cnn_dataset goes straight to
+    # grid splitting and never reads board_calibration.json / inner_warp_calibration.json.
+    # Calibration is only needed for live scanning (step 5 of the wizard).
 
     build_id = uuid.uuid4().hex[:12]
     with _CNN_BUILD_LOCK:
@@ -3227,6 +3297,143 @@ def cnn_feedback(payload: CnnFeedbackPayload):
             "source.json link, then future feedback will append directly."
         ),
     }
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Controller subprocess (play_game.py)
+# ───────────────────────────────────────────────────────────────────────────
+# A single subprocess at a time. The webapp button POSTs to /api/controller/start;
+# the page polls /api/controller/status to render the run state and tail logs.
+
+_CONTROLLER_LOCK = threading.Lock()
+_CONTROLLER_STATE: dict = {
+    "process": None,         # subprocess.Popen | None
+    "pid": None,
+    "started_at": None,      # epoch seconds
+    "cmd": None,             # list[str]
+    "log": collections.deque(maxlen=400),
+}
+
+
+def _stream_subprocess_to_log(stream) -> None:
+    for raw in iter(stream.readline, b""):
+        try:
+            text = raw.decode(errors="replace").rstrip()
+        except Exception:
+            break
+        if text:
+            _CONTROLLER_STATE["log"].append(text)
+    try:
+        stream.close()
+    except Exception:
+        pass
+
+
+class ControllerStartPayload(BaseModel):
+    esp32_host: str = "172.21.66.20"
+    esp32_port: int = 8765
+    arm_port: Optional[str] = None
+    player_color: Literal["white", "black"] = "white"
+    difficulty: int = Field(1, ge=0, le=2)
+    flip_180: bool = False
+    engine_path: str = "stockfish"
+    think_time: float = 0.5
+
+
+@app.post("/api/controller/start")
+def controller_start(payload: ControllerStartPayload):
+    with _CONTROLLER_LOCK:
+        proc = _CONTROLLER_STATE["process"]
+        if proc is not None and proc.poll() is None:
+            raise HTTPException(409, f"Controller already running (pid {_CONTROLLER_STATE['pid']})")
+
+        play_game_path = PYTHON_CODE_DIR / "play_game.py"
+        if not play_game_path.exists():
+            raise HTTPException(500, f"play_game.py not found at {play_game_path}")
+
+        cmd = [
+            sys.executable,
+            str(play_game_path),
+            "--esp32-host", payload.esp32_host,
+            "--esp32-port", str(payload.esp32_port),
+            "--player-color", payload.player_color,
+            "--difficulty", str(payload.difficulty),
+            "--engine-path", payload.engine_path,
+            "--think-time", str(payload.think_time),
+        ]
+        if payload.arm_port:
+            cmd += ["--arm-port", payload.arm_port]
+        if payload.flip_180:
+            cmd += ["--flip-180"]
+
+        _CONTROLLER_STATE["log"].clear()
+        try:
+            new_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(PYTHON_CODE_DIR),
+                bufsize=1,
+            )
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to start play_game.py: {exc}") from exc
+
+        _CONTROLLER_STATE["process"] = new_proc
+        _CONTROLLER_STATE["pid"] = new_proc.pid
+        _CONTROLLER_STATE["started_at"] = time.time()
+        _CONTROLLER_STATE["cmd"] = cmd
+
+        threading.Thread(
+            target=_stream_subprocess_to_log,
+            args=(new_proc.stdout,),
+            daemon=True,
+            name="controller-stdout-pump",
+        ).start()
+
+        return {
+            "running": True,
+            "pid": new_proc.pid,
+            "started_at": _CONTROLLER_STATE["started_at"],
+            "cmd": cmd,
+        }
+
+
+@app.get("/api/controller/status")
+def controller_status():
+    proc = _CONTROLLER_STATE["process"]
+    running = proc is not None and proc.poll() is None
+    exit_code = None
+    if proc is not None and not running:
+        exit_code = proc.returncode
+    return {
+        "running": running,
+        "pid": _CONTROLLER_STATE["pid"] if running else None,
+        "started_at": _CONTROLLER_STATE["started_at"] if running else None,
+        "cmd": _CONTROLLER_STATE["cmd"] if running else None,
+        "exit_code": exit_code,
+        "log_tail": list(_CONTROLLER_STATE["log"])[-80:],
+    }
+
+
+@app.post("/api/controller/stop")
+def controller_stop():
+    with _CONTROLLER_LOCK:
+        proc = _CONTROLLER_STATE["process"]
+        if proc is None or proc.poll() is not None:
+            return {
+                "running": False,
+                "exit_code": proc.returncode if proc is not None else None,
+            }
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        return {"running": False, "exit_code": proc.returncode}
 
 
 if __name__ == "__main__":

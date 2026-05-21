@@ -57,12 +57,41 @@ def compare_board_to_bitmaps(
     observed_white_bitmap: Bitmap,
     observed_black_bitmap: Bitmap,
 ) -> int:
-    candidate_white_bitmap, candidate_black_bitmap = board_to_bitmaps(board)
+    # Per-square loop only for diagnostic [MISMATCH] prints. The returned count
+    # uses the per-channel sum (webapp's original convention) so that callers
+    # passing a non-zero max_mismatches see the same threshold semantics as
+    # before the prints were restored.
+    for row in range(8):
+        for col in range(8):
+            rank = 7 - row
+            file = col
+            square = chess.square(file, rank)
 
-    return count_bitmap_mismatches(candidate_white_bitmap, observed_white_bitmap) + count_bitmap_mismatches(
-        candidate_black_bitmap,
-        observed_black_bitmap,
+            piece = board.piece_at(square)
+            expected_white = piece is not None and piece.color == chess.WHITE
+            expected_black = piece is not None and piece.color == chess.BLACK
+
+            detected_white = bool(observed_white_bitmap[row][col])
+            detected_black = bool(observed_black_bitmap[row][col])
+
+            if expected_white != detected_white or expected_black != detected_black:
+                print(
+                    f"[MISMATCH] {chess.square_name(square)} "
+                    f"expected_white={expected_white}, "
+                    f"expected_black={expected_black}, "
+                    f"detected_white={detected_white}, "
+                    f"detected_black={detected_black}"
+                )
+
+    candidate_white_bitmap, candidate_black_bitmap = board_to_bitmaps(board)
+    mismatch_count = count_bitmap_mismatches(
+        candidate_white_bitmap, observed_white_bitmap
+    ) + count_bitmap_mismatches(
+        candidate_black_bitmap, observed_black_bitmap
     )
+
+    print("[DEBUG] total mismatch_count =", mismatch_count)
+    return mismatch_count
 
 
 @dataclass

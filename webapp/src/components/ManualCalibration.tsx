@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { api } from "@/lib/api";
 import { imageSrc } from "@/lib/image";
 import { CalibrationData, DEFAULT_PARAMS } from "@/lib/types";
+import { useCalibration } from "@/lib/calibration-context";
 
 type Corner = "top_left" | "top_right" | "bottom_right" | "bottom_left";
 type Point = [number, number];
@@ -206,6 +207,7 @@ function PointOverlay({
 }
 
 export default function ManualCalibration({ imagePath: initialImagePath }: { imagePath?: string | null }) {
+  const { refresh: refreshCalibrationContext } = useCalibration();
   const [calibration, setCalibration] = useState<CalibrationData>({ board: null, inner: null });
   const [rawImage, setRawImage] = useState<string | null>(null);
   const [currentImagePath, setCurrentImagePath] = useState<string | null>(initialImagePath ?? null);
@@ -427,6 +429,9 @@ export default function ManualCalibration({ imagePath: initialImagePath }: { ima
         setSaveStatus("Saved ✓");
         setTimeout(() => setSaveStatus(null), 3000);
       }
+      // Broadcast the new calibration so every consumer (main page, lab, robot)
+      // sees it immediately without a remount/refetch.
+      void refreshCalibrationContext();
     } catch (e: unknown) {
       setSaveStatus(`Error: ${e instanceof Error ? e.message : "failed"}`);
     } finally {

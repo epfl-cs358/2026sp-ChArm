@@ -16,6 +16,74 @@ Bitmap = list[list[int]]
 PlayerColor = Literal["white", "black"]
 
 
+def _save_validated_capture_best_effort(
+    refined_image,
+    white_bitmap_image_orient,
+    black_bitmap_image_orient,
+    move_uci: Optional[str],
+    mode_used: str,
+) -> None:
+    """Append a validated capture into the shared labeled dataset.
+
+    Reads ``cv_router_config.json`` so play_game.py and the webapp write into
+    the same dataset (default ``labeled_datasets/validated_live/``). Each cell
+    is written under a UUID filename, so concurrent or sequential calls from
+    either entry point only append — they never overwrite each other.
+
+    Best-effort: a failure here must not interrupt the game.
+    """
+    try:
+        from charm.vision.cv_router import RouterConfig
+        from charm.vision.validated_capture import (
+            LABELED_DATASETS_ROOT,
+            save_validated_capture,
+        )
+
+        cfg = RouterConfig.load()
+        if not cfg.auto_save_validated:
+            return
+
+        summary = save_validated_capture(
+            refined_image=refined_image,
+            white_bitmap_image_orient=white_bitmap_image_orient,
+            black_bitmap_image_orient=black_bitmap_image_orient,
+            move_uci=move_uci,
+            mode_used=mode_used,
+            session_id="play_game",
+            dataset_name=cfg.dataset_name,
+            datasets_root=LABELED_DATASETS_ROOT,
+        )
+        print(
+            f"[CAPTURE] dataset={cfg.dataset_name} saved={summary.saved} "
+            f"counts={summary.counts} error={summary.error}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[CAPTURE] best-effort save failed: {exc!r}", flush=True)
+
+
+def print_occupancy_bitmaps(white_bitmap, black_bitmap) -> None:
+    print("========== DETECTED BOARD BITMAP ==========")
+    print("Legend: W=white, B=black, .=empty, X=both")
+    print("    a b c d e f g h")
+    for row in range(8):
+        rank = 8 - row
+        symbols = []
+        for col in range(8):
+            is_white = bool(white_bitmap[row][col])
+            is_black = bool(black_bitmap[row][col])
+            if is_white and is_black:
+                symbols.append("X")
+            elif is_white:
+                symbols.append("W")
+            elif is_black:
+                symbols.append("B")
+            else:
+                symbols.append(".")
+        print(f"{rank} | " + " ".join(symbols))
+    print("==========================================")
+
+
 @dataclass
 class SessionResult:
     success: bool
@@ -129,6 +197,7 @@ class GameSession:
         max_mismatches: int = 0,
         flip_180: bool = False,
         pipeline_options: Optional[PipelineOptions] = None,
+        auto_orient: bool = False,
     ) -> SessionResult:
         """
         Validate the standard initial chess position from a calibrated board image.
@@ -144,21 +213,63 @@ class GameSession:
 
         Pass `pipeline_options` to match the tuned detector params and empty-board
         reference used by the webapp's debug pipeline; otherwise legacy defaults apply.
+
+        When `auto_orient` is True the function tests the bitmap both as-is and
+        flipped 180°, then picks whichever orientation has fewer mismatches against
+        the standard initial position. The chosen orientation is stored on the
+        session so subsequent player-move scans use it. This is what `play_game.py`
+        uses to match the webapp's hardcoded "camera = white-on-top" lab mount
+        without requiring the user to set --flip-180 manually.
         """
+        print("\n========== INITIAL BOARD CHECK DEBUG ==========")
+        print("[DEBUG] image_path =", image_path)
+        print("[DEBUG] max_mismatches =", max_mismatches)
+        print("[DEBUG] auto_orient =", auto_orient)
+
         pipeline_result = run_board_pipeline(image_path, options=pipeline_options)
 
-        white_bitmap = pipeline_result.white_bitmap
-        black_bitmap = pipeline_result.black_bitmap
-        if flip_180:
-            white_bitmap = [list(reversed(row)) for row in reversed(white_bitmap)]
-            black_bitmap = [list(reversed(row)) for row in reversed(black_bitmap)]
+        raw_white = pipeline_result.white_bitmap
+        raw_black = pipeline_result.black_bitmap
+        flipped_white = [list(reversed(row)) for row in reversed(raw_white)]
+        flipped_black = [list(reversed(row)) for row in reversed(raw_black)]
 
         expected_board = chess.Board()
+
+        if auto_orient:
+            print("[DEBUG] --- testing unflipped orientation ---")
+            mismatch_unflipped = compare_board_to_bitmaps(expected_board, raw_white, raw_black)
+            print("[DEBUG] --- testing flipped orientation ---")
+            mismatch_flipped = compare_board_to_bitmaps(expected_board, flipped_white, flipped_black)
+            print(f"[DEBUG] auto_orient mismatches: unflipped={mismatch_unflipped}, flipped={mismatch_flipped}")
+            if mismatch_flipped < mismatch_unflipped:
+                chosen_flip = True
+            else:
+                chosen_flip = False
+        else:
+            chosen_flip = flip_180
+
+        if chosen_flip:
+            white_bitmap, black_bitmap = flipped_white, flipped_black
+        else:
+            white_bitmap, black_bitmap = raw_white, raw_black
+
+        print("[DEBUG] chosen flip_180 =", chosen_flip)
+        print("[DEBUG] white_bitmap (post-orient) =", white_bitmap)
+        print("[DEBUG] black_bitmap (post-orient) =", black_bitmap)
+        print_occupancy_bitmaps(white_bitmap, black_bitmap)
+
+        print("[DEBUG] expected initial board FEN =", expected_board.fen())
+        print("[DEBUG] expected white squares =", chess.SquareSet(expected_board.occupied_co[chess.WHITE]))
+        print("[DEBUG] expected black squares =", chess.SquareSet(expected_board.occupied_co[chess.BLACK]))
+
         mismatch_count = compare_board_to_bitmaps(
             expected_board,
             white_bitmap,
             black_bitmap,
         )
+
+        print("[DEBUG] mismatch_count =", mismatch_count)
+        print("===============================================\n")
 
         if mismatch_count > max_mismatches:
             result = SessionResult(
@@ -175,10 +286,18 @@ class GameSession:
         self.tracker = BoardStateTracker(expected_board)
         self.initialized = True
         self.game_started = False
-        self.flip_180 = flip_180
+        self.flip_180 = chosen_flip
         self.pipeline_options = pipeline_options
         self.player_color = None
         self.robot_color = None
+
+        _save_validated_capture_best_effort(
+            refined_image=pipeline_result.warped_board,
+            white_bitmap_image_orient=raw_white,
+            black_bitmap_image_orient=raw_black,
+            move_uci=None,
+            mode_used="play_game_init",
+        )
 
         result = SessionResult(
             success=True,
@@ -455,6 +574,15 @@ class GameSession:
             return result
 
         move_uci = inference_result.move.uci()
+
+        pipeline_result = update_result.pipeline_result
+        _save_validated_capture_best_effort(
+            refined_image=pipeline_result.warped_board,
+            white_bitmap_image_orient=pipeline_result.white_bitmap,
+            black_bitmap_image_orient=pipeline_result.black_bitmap,
+            move_uci=move_uci,
+            mode_used="play_game_move",
+        )
 
         result = SessionResult(
             success=True,
