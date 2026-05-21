@@ -820,7 +820,7 @@ export default function Dashboard() {
                 gridClassName="grid grid-cols-2 gap-3"
                 imageMaxHeight={210}
               />
-              {result && (
+              {result?.color_labels && (
                 <div className="overflow-auto">
                   <ChessBoard colorLabels={result.color_labels} occupancyScores={result.occupancy_scores} brightnessScores={result.brightness_scores} highlightUnknown />
                 </div>
