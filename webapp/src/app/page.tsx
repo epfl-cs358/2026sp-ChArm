@@ -124,6 +124,9 @@ const PIECE_IMAGE_PATHS: Record<string, string> = {
   bq: "/chesscom-pieces/bq.png", bk: "/chesscom-pieces/bk.png",
 };
 const DEFAULT_SERIAL_PORT = "/dev/ttyUSB0";
+const DEFAULT_ESP32_HOST = "172.21.70.102";
+const DEFAULT_ESP32_PORT = 8765;
+const DEFAULT_ENGINE_PATH = "/usr/games/stockfish";
 const ROBOT_PORT_STORAGE_KEY = "charm.robot.port";
 
 type TurnState =
@@ -424,8 +427,12 @@ export default function Dashboard() {
         setControllerRunning(!!s.running);
       } else {
         const s = await api.controllerStart({
+          esp32_host: DEFAULT_ESP32_HOST,
+          esp32_port: DEFAULT_ESP32_PORT,
+          arm_port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
           player_color: "white",
           difficulty,
+          engine_path: DEFAULT_ENGINE_PATH,
         });
         setControllerRunning(!!s.running);
         setShowControllerLog(true);
@@ -502,7 +509,11 @@ export default function Dashboard() {
         setRobotStatus(robot);
         setRobotPort((current) => {
           const stored = typeof window !== "undefined" ? window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) : null;
-          return stored || robot.active_port || robot.detected_port || current;
+          const detected = robot.active_port || robot.detected_port || null;
+          const knownPorts = new Set(robot.ports.map((p) => p.device));
+          const preferred = stored || current;
+          if (!preferred || preferred === DEFAULT_SERIAL_PORT) return detected || preferred || current;
+          return knownPorts.has(preferred) ? preferred : (detected || preferred || current);
         });
         setArmIdleTarget(robotPositionToBoardTarget(robot.robot_calibration.calibration.home, robot));
       })
@@ -511,6 +522,15 @@ export default function Dashboard() {
     refreshCvConfig();
     return () => { cancelled = true; };
   }, [refreshCnnState, refreshCvConfig]);
+
+  const resolveSerialPort = useCallback((currentPort?: string | null) => {
+    const current = currentPort || robotPort;
+    const detected = robotStatus?.active_port || robotStatus?.detected_port || null;
+    if (!current) return detected || undefined;
+    if (current === DEFAULT_SERIAL_PORT) return detected || undefined;
+    if (robotStatus?.ports.some((p) => p.device === current)) return current;
+    return detected || current;
+  }, [robotPort, robotStatus]);
 
   const activateCnnModel = useCallback(async (run_id: string) => {
     setCnnModelBusy(true);
@@ -525,15 +545,18 @@ export default function Dashboard() {
     }
   }, [refreshCnnState]);
 
+  const busy = turnState === "arm_calibrating" || turnState === "capturing" || turnState === "processing" || turnState === "robot_thinking" || turnState === "robot_moving";
+
   const runStartupCalibrate = useCallback(async () => {
     if (turnState === "arm_calibrating") return;
+    setMoveLog((current) => [...current, "Calibrate: click"]);
     setError(null);
     setTurnState("arm_calibrating");
     try {
       const response = await api.sendRobotCommand({
         command: "arm-calibrate",
-        port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
-        baud: 9600,
+        port: resolveSerialPort(robotPort),
+        baud: 115200,
       });
       setMoveLog((current) => [
         ...current,
@@ -552,10 +575,35 @@ export default function Dashboard() {
     }
   }, [robotPort, robotStatus, turnState]);
 
+  const runRecalibrate = useCallback(async () => {
+    if (turnState === "arm_calibrating" || busy) return;
+    const resumeState = turnState;
+    setError(null);
+    setTurnState("arm_calibrating");
+    try {
+      const response = await api.sendRobotCommand({
+        command: "arm-calibrate",
+        port: resolveSerialPort(robotPort),
+        baud: 115200,
+      });
+      setMoveLog((current) => [
+        ...current,
+        response.responses.length > 0 ? `Recalibrate: ${response.responses.at(-1)}` : "Recalibrate: command sent",
+      ]);
+      setArmIdleTarget(robotPositionToBoardTarget(
+        response.position ?? robotStatus?.robot_calibration.calibration.home ?? { x: 0, y: 0 },
+        robotStatus
+      ));
+      setArmCalibrated(true);
+      setTurnState(resumeState === "arm_calibrate" ? "human_turn" : resumeState);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Arm recalibration failed");
+      setTurnState("error");
+    }
+  }, [robotPort, robotStatus, turnState, busy]);
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const finishRobotMove = useCallback((_finishedMove: ArmMove) => {}, []);
-
-  const busy = turnState === "arm_calibrating" || turnState === "capturing" || turnState === "processing" || turnState === "robot_thinking" || turnState === "robot_moving";
 
   const processHumanTurn = useCallback(async () => {
     if (!armCalibrated) {
@@ -577,8 +625,8 @@ export default function Dashboard() {
           params: DEFAULT_PARAMS,
           capture: true,
           max_mismatches: 0,
-          port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
-          baud: 9600,
+          port: resolveSerialPort(robotPort),
+          baud: 115200,
         });
         if (session.pipeline) {
           setResult(session.pipeline);
@@ -618,8 +666,8 @@ export default function Dashboard() {
         max_mismatches: 0,
         difficulty,
         skill_level: skillLevel,
-        port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
-        baud: 9600,
+        port: resolveSerialPort(robotPort),
+        baud: 115200,
       });
       if (response.pipeline) {
         setLastCapturePath(response.pipeline.image_path ?? null);
@@ -783,6 +831,16 @@ export default function Dashboard() {
             style={{ background: armCalibrated ? "transparent" : "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {turnState === "arm_calibrating" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
             {armCalibrated ? "Arm calibrated" : "Arm calibration required"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={runRecalibrate}
+            disabled={turnState === "arm_calibrating" || busy}
+            className="font-jetbrains"
+            title="Re-home the arm without resetting the current game state."
+          >
+            <ShieldCheck className="size-4" />
+            Recalibrate arm
           </Button>
           <Button
             variant="outline"

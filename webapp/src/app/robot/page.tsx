@@ -232,7 +232,7 @@ export default function RobotPage() {
     if (typeof window === "undefined") return DEFAULT_SERIAL_PORT;
     return window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY) || DEFAULT_SERIAL_PORT;
   });
-  const [baud, setBaud] = useState(9600);
+  const [baud, setBaud] = useState(115200);
   const [square, setSquare] = useState("e4");
   const [uci, setUci] = useState("e2e4");
   const [raw, setRaw] = useState("pos");
@@ -261,7 +261,13 @@ export default function RobotPage() {
 
   const applyStatus = useCallback((next: RobotStatus) => {
     setStatus(next);
-    setPort((current) => current === DEFAULT_SERIAL_PORT ? next.detected_port || next.active_port || current : current);
+    setPort((current) => {
+      const detected = next.detected_port || next.active_port || null;
+      if (!detected) return current;
+      if (!current || current === DEFAULT_SERIAL_PORT) return detected;
+      const knownPorts = new Set(next.ports.map((p) => p.device));
+      return knownPorts.has(current) ? current : detected;
+    });
 
     const c = next.robot_calibration.calibration;
     setSquareSize(Math.hypot(c.file_vector.x, c.file_vector.y));
@@ -286,6 +292,15 @@ export default function RobotPage() {
       place_z: { ...DEFAULT_PLACE_Z, ...c.place_z },
     });
   }, []);
+
+  const resolveSerialPort = useCallback((currentPort?: string | null) => {
+    const current = currentPort || port;
+    const detected = status?.detected_port || status?.active_port || null;
+    if (!current) return detected || undefined;
+    if (current === DEFAULT_SERIAL_PORT) return detected || undefined;
+    if (status?.ports.some((p) => p.device === current)) return current;
+    return detected || current;
+  }, [port, status]);
 
   const applyBoardInfo = useCallback((response: RobotCommandResult) => {
     const boardInfo = response.board_info;
@@ -342,7 +357,7 @@ export default function RobotPage() {
       setResult(null);
     }
     try {
-      const response = await api.readRobotEeprom(port || undefined, baud);
+      const response = await api.readRobotEeprom(resolveSerialPort(), baud);
       if (!options?.silent) setResult(response);
       if (response.position) setLivePosition(response.position);
       if (!applyBoardInfo(response) && !options?.silent) {
@@ -393,7 +408,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command: "capture-corner",
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
         corner,
       });
@@ -431,7 +446,7 @@ export default function RobotPage() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const response = await api.getRobotPosition(port || undefined, baud);
+        const response = await api.getRobotPosition(resolveSerialPort(), baud);
         if (!cancelled && response.position) {
           setLivePosition(response.position);
         }
@@ -455,7 +470,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command: "jog",
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
         raw: key,
       });
@@ -463,7 +478,7 @@ export default function RobotPage() {
       if (response.position) {
         setLivePosition(response.position);
       } else {
-        const posResponse = await api.getRobotPosition(port || undefined, baud);
+        const posResponse = await api.getRobotPosition(resolveSerialPort(), baud);
         if (posResponse.position) setLivePosition(posResponse.position);
       }
     } catch (e: unknown) {
@@ -482,7 +497,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command: "board-cal-key",
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
         raw: key,
       });
@@ -490,7 +505,7 @@ export default function RobotPage() {
       if (response.position) {
         setLivePosition(response.position);
       } else {
-        const posResponse = await api.getRobotPosition(port || undefined, baud);
+        const posResponse = await api.getRobotPosition(resolveSerialPort(), baud);
         if (posResponse.position) setLivePosition(posResponse.position);
       }
       if (response.responses.some((line) => line.includes("Saved to EEPROM") || line.includes("Cancelled") || line.includes("Incomplete"))) {
@@ -545,13 +560,13 @@ export default function RobotPage() {
       const response = jogModeHint
         ? await api.sendRobotCommand({
             command: "jog",
-            port: port || undefined,
+            port: resolveSerialPort(),
             baud,
             raw: "q",
           })
         : await api.sendRobotCommand({
             command: "raw",
-            port: port || undefined,
+            port: resolveSerialPort(),
             baud,
             raw: "cm",
           });
@@ -571,7 +586,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command: "board-calibrate",
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
       });
       setResult(response);
@@ -590,7 +605,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command: "board-cal-clear",
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
       });
       setResult(response);
@@ -610,7 +625,7 @@ export default function RobotPage() {
     try {
       const response = await api.sendRobotCommand({
         command,
-        port: port || undefined,
+        port: resolveSerialPort(),
         baud,
         square,
         uci,
@@ -641,7 +656,7 @@ export default function RobotPage() {
       for (const sq of ["a1", "h1", "h8", "a8", "a1"]) {
         const response = await api.sendRobotCommand({
           command: "move-square",
-          port: port || undefined,
+          port: resolveSerialPort(),
           baud,
           square: sq,
         });
@@ -706,7 +721,7 @@ export default function RobotPage() {
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>Baud</span>
-                  <input value={baud} onChange={(e) => setBaud(Number(e.target.value) || 9600)} className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-jetbrains" />
+                  <input value={baud} onChange={(e) => setBaud(Number(e.target.value) || 115200)} className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-jetbrains" />
                 </label>
               </div>
               {status?.ports && status.ports.length > 0 && (
