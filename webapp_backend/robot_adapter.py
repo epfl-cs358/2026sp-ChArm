@@ -109,18 +109,12 @@ def list_ports() -> list[dict]:
 
 
 def find_port() -> Optional[str]:
-    by_id_dir = Path("/dev/serial/by-id")
-    if by_id_dir.exists():
-        for path in sorted(by_id_dir.iterdir()):
-            if path.is_symlink():
-                return str(path.resolve())
-
     try:
         import serial.tools.list_ports
 
         ports = list(serial.tools.list_ports.comports())
     except Exception:
-        return None
+        ports = []
 
     preferred = ("arduino", "usb serial", "usb-serial", "wch", "ch340", "teensy")
     for port in ports:
@@ -129,6 +123,13 @@ def find_port() -> Optional[str]:
         ).lower()
         if any(marker in haystack for marker in preferred):
             return port.device
+
+    by_id_dir = Path("/dev/serial/by-id")
+    if by_id_dir.exists():
+        for path in sorted(by_id_dir.iterdir()):
+            if path.is_symlink():
+                return str(path.resolve())
+
     return None
 
 

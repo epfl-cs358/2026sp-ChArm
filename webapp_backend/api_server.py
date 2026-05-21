@@ -156,7 +156,10 @@ ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
 LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
 CV_ROUTER_CONFIG_PATH = PYTHON_CODE_DIR / "cv_router_config.json"
+# Shared with python_code/src/charm/game/game_controller.py
+CONTROLLER_GAME_STATE_FILE = PYTHON_CODE_DIR / "controller_game_state.json"
 DIFFICULTY_SKILL_LEVEL = {0: 5, 1: 12, 2: 20}
+ROBOT_BAUD_DEFAULT = 115200
 
 
 def _resolve_skill_level(skill_level: Optional[int], difficulty: int) -> int:
@@ -280,7 +283,7 @@ class RobotCalibrationPayload(BaseModel):
 class RobotCommandPayload(BaseModel):
     command: str
     port: Optional[str] = None
-    baud: int = 9600
+    baud: int = ROBOT_BAUD_DEFAULT
     square: Optional[str] = None
     uci: Optional[str] = None
     raw: Optional[str] = None
@@ -313,7 +316,7 @@ class GameSessionPayload(BaseModel):
     engine_path: str = "stockfish"
     think_time: float = 0.5
     port: Optional[str] = None
-    baud: int = 9600
+    baud: int = ROBOT_BAUD_DEFAULT
     execute_robot: bool = True
 
 
@@ -326,14 +329,14 @@ class GameSessionTurnPayload(BaseModel):
     engine_path: str = "stockfish"
     think_time: float = 0.5
     port: Optional[str] = None
-    baud: int = 9600
+    baud: int = ROBOT_BAUD_DEFAULT
     execute_robot: bool = True
 
 
 class CameraCapturePayload(BaseModel):
     url: Optional[str] = None
     port: Optional[str] = None
-    baud: int = 9600
+    baud: int = ROBOT_BAUD_DEFAULT
 
 
 class EmptyReferencePayload(BaseModel):
@@ -487,7 +490,6 @@ def _classify_with_exemplars(occupancy_cells, config):
                 col=cell.col,
                 occupied=occupied,
                 score=float(res.confidence_margin),
-                delta=None,
             )
         )
         if not occupied:
@@ -816,7 +818,9 @@ def disconnect_robot():
 
 
 @app.get("/api/robot/position")
-def robot_position(port: Optional[str] = None, baud: int = 9600):
+def robot_position(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
+    if _controller_subprocess_running():
+        raise HTTPException(409, "LCD controller is running — arm commands blocked.")
     try:
         responses = robot_adapter.send_commands(["pos"], port, baud)
         return robot_adapter.response(responses, ROBOT_CAL_PATH)
@@ -825,8 +829,19 @@ def robot_position(port: Optional[str] = None, baud: int = 9600):
         raise HTTPException(500, str(e))
 
 
+def _controller_subprocess_running() -> bool:
+    proc = _CONTROLLER_STATE["process"]
+    return proc is not None and proc.poll() is None
+
+
 @app.post("/api/robot/command")
 def robot_command(payload: RobotCommandPayload):
+    if _controller_subprocess_running():
+        raise HTTPException(
+            409,
+            "LCD controller is running — webapp arm commands are blocked "
+            "to avoid serial-port conflicts. Stop the LCD first.",
+        )
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         commands = robot_adapter.commands_for_request(payload_data)
@@ -867,6 +882,12 @@ def robot_command(payload: RobotCommandPayload):
 
 @app.post("/api/robot/inject-cal")
 def inject_board_cal(payload: RobotCommandPayload):
+    if _controller_subprocess_running():
+        raise HTTPException(
+            409,
+            "LCD controller is running — webapp arm commands are blocked "
+            "to avoid serial-port conflicts. Stop the LCD first.",
+        )
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         payload_data["command"] = "inject-cal"
@@ -881,7 +902,9 @@ def inject_board_cal(payload: RobotCommandPayload):
 
 
 @app.get("/api/robot/eeprom")
-def robot_eeprom(port: Optional[str] = None, baud: int = 9600):
+def robot_eeprom(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
+    if _controller_subprocess_running():
+        raise HTTPException(409, "LCD controller is running — arm commands blocked.")
     try:
         responses = robot_adapter.send_commands(["boardInfo"], port, baud)
         return robot_adapter.response(responses, ROBOT_CAL_PATH)
@@ -1347,6 +1370,12 @@ def game_session_reset():
 
 @app.post("/api/game/session/start")
 def game_session_start(payload: GameSessionPayload):
+    if _controller_subprocess_running():
+        raise HTTPException(
+            409,
+            "LCD controller is running — webapp game session is disabled. "
+            "Stop the LCD first or use the LCD buttons to play.",
+        )
     if payload.player_color not in {"white", "black"}:
         raise HTTPException(400, "player_color must be 'white' or 'black'")
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
@@ -1443,6 +1472,12 @@ def game_session_start(payload: GameSessionPayload):
 
 @app.post("/api/game/session/player-done")
 def game_session_player_done(payload: GameSessionTurnPayload):
+    if _controller_subprocess_running():
+        raise HTTPException(
+            409,
+            "LCD controller is running — webapp game session is disabled. "
+            "Stop the LCD first or use the LCD buttons to play.",
+        )
     if not _GAME_SESSION.is_game_started():
         raise HTTPException(400, "Game session has not started. Run /api/game/session/start first.")
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
@@ -2008,7 +2043,7 @@ class LabelingArmPayload(BaseModel):
     action: str  # "pickup_source" | "place_target" | "return_to_source" | "home" | "move_piece" | "pick_and_place"
     from_square: Optional[str] = None
     port: Optional[str] = None
-    baud: int = 9600
+    baud: int = ROBOT_BAUD_DEFAULT
 
 
 def _meta_response(name: str) -> dict:
@@ -2285,15 +2320,15 @@ def capture_square_for_dataset(name: str, payload: LabelingCaptureSquarePayload)
         if not payload.skip_arm_home_check and port and home_pt:
             try:
                 pos_resp = robot_adapter.send_commands(
-                    ["pos"], port, 9600, max_wait=5.0, stop_on="Position:"
+                    ["pos"], port, ROBOT_BAUD_DEFAULT, max_wait=5.0, stop_on="Position:"
                 )
             except Exception:
                 pos_resp = []
             if not _position_matches_home(
                 robot_adapter.parse_position(pos_resp), home_pt
             ):
-                home_resp = _send_motion(["home"], port, 9600)
-                _verify_arm_home(home_resp, port, 9600)
+                home_resp = _send_motion(["home"], port, ROBOT_BAUD_DEFAULT)
+                _verify_arm_home(home_resp, port, ROBOT_BAUD_DEFAULT)
         frames = _capture_warped_frames(payload.params, frames_count, meta.settings.settle_ms, payload.capture)
         mode = payload.mode if payload.mode in ("overwrite", "append") else "overwrite"
         saved = LABEL_STORE.write_square_frames(
@@ -3330,13 +3365,13 @@ def _stream_subprocess_to_log(stream) -> None:
 
 
 class ControllerStartPayload(BaseModel):
-    esp32_host: str = "172.21.66.20"
+    esp32_host: str = "172.21.70.102"
     esp32_port: int = 8765
     arm_port: Optional[str] = None
     player_color: Literal["white", "black"] = "white"
     difficulty: int = Field(1, ge=0, le=2)
     flip_180: bool = False
-    engine_path: str = "stockfish"
+    engine_path: str = "/usr/games/stockfish"
     think_time: float = 0.5
 
 
@@ -3361,12 +3396,26 @@ def controller_start(payload: ControllerStartPayload):
             "--engine-path", payload.engine_path,
             "--think-time", str(payload.think_time),
         ]
-        if payload.arm_port:
-            cmd += ["--arm-port", payload.arm_port]
+        resolved_arm_port = payload.arm_port
+        if resolved_arm_port and not Path(resolved_arm_port).exists():
+            resolved_arm_port = None
+        if resolved_arm_port is None:
+            resolved_arm_port = robot_adapter.connected_port() or robot_adapter.find_port()
+        if resolved_arm_port:
+            cmd += ["--arm-port", resolved_arm_port]
         if payload.flip_180:
             cmd += ["--flip-180"]
 
         _CONTROLLER_STATE["log"].clear()
+        # Drop any state file left over from a previous run so the webapp
+        # doesn't briefly render stale moves before the controller writes fresh state.
+        _cleanup_controller_state_file()
+        # Release any serial handle the webapp may still be holding, otherwise
+        # play_game.py will fail to open the port (Resource busy).
+        try:
+            robot_adapter.close()
+        except Exception:
+            pass
         try:
             new_proc = subprocess.Popen(
                 cmd,
@@ -3415,11 +3464,41 @@ def controller_status():
     }
 
 
+@app.get("/api/controller/game-state")
+def controller_game_state():
+    """Game state published by play_game.py's GameController.
+
+    The controller writes controller_game_state.json after every transition.
+    We treat the file as authoritative *only while the subprocess is alive*;
+    otherwise the state is stale and we return idle.
+    """
+    proc = _CONTROLLER_STATE["process"]
+    running = proc is not None and proc.poll() is None
+    empty = {
+        "phase": "idle",
+        "fen": None,
+        "moves": [],
+        "player_color": None,
+        "robot_color": None,
+        "difficulty": None,
+        "updated_at": None,
+    }
+    if not running:
+        return empty
+    try:
+        return json.loads(CONTROLLER_GAME_STATE_FILE.read_text())
+    except FileNotFoundError:
+        return {**empty, "phase": "starting"}
+    except Exception:
+        return {**empty, "phase": "unknown"}
+
+
 @app.post("/api/controller/stop")
 def controller_stop():
     with _CONTROLLER_LOCK:
         proc = _CONTROLLER_STATE["process"]
         if proc is None or proc.poll() is not None:
+            _cleanup_controller_state_file()
             return {
                 "running": False,
                 "exit_code": proc.returncode if proc is not None else None,
@@ -3433,7 +3512,16 @@ def controller_stop():
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
+        _cleanup_controller_state_file()
         return {"running": False, "exit_code": proc.returncode}
+
+
+def _cleanup_controller_state_file() -> None:
+    for path in (CONTROLLER_GAME_STATE_FILE, CONTROLLER_GAME_STATE_FILE.with_suffix(".tmp")):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

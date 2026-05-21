@@ -25,7 +25,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import { api, CnnActiveModel, CnnModelMeta, CvRouterConfig } from "@/lib/api";
+import { api, CnnActiveModel, CnnModelMeta, ControllerPhase, CvRouterConfig } from "@/lib/api";
 import { useCalibration } from "@/lib/calibration-context";
 import { imageSrc } from "@/lib/image";
 import {
@@ -51,6 +51,22 @@ const SKILL_LEVEL_STORAGE_KEY = "charm-stockfish-skill-level";
 const DEFAULT_SKILL_LEVEL = 12;
 const MIN_SKILL_LEVEL = 1;
 const MAX_SKILL_LEVEL = 20;
+
+function controllerPhaseLabel(phase: ControllerPhase): string {
+  switch (phase) {
+    case "idle": return "idle";
+    case "starting": return "starting…";
+    case "waiting": return "waiting for start";
+    case "arm_calibrating": return "calibrating arm";
+    case "checking_board": return "checking board";
+    case "player_turn": return "your turn";
+    case "bot_thinking": return "thinking";
+    case "bot_moving": return "moving";
+    case "game_over": return "game over";
+    case "error": return "error — see LCD";
+    default: return phase;
+  }
+}
 
 function estimateEloForSkill(skill: number): number {
   const anchors: Array<[number, number]> = [
@@ -397,6 +413,9 @@ export default function Dashboard() {
   const [controllerLog, setControllerLog] = useState<string[]>([]);
   const [controllerBusy, setControllerBusy] = useState(false);
   const [showControllerLog, setShowControllerLog] = useState(false);
+  const [controllerPhase, setControllerPhase] = useState<ControllerPhase>("idle");
+  const [controllerMoves, setControllerMoves] = useState<string[]>([]);
+  const [controllerPlayerColor, setControllerPlayerColor] = useState<"white" | "black" | null>(null);
 
   useEffect(() => {
     let stopped = false;
@@ -404,8 +423,30 @@ export default function Dashboard() {
       try {
         const s = await api.controllerStatus();
         if (stopped) return;
-        setControllerRunning(!!s.running);
+        const running = !!s.running;
+        setControllerRunning(running);
         if (s.log_tail) setControllerLog(s.log_tail);
+
+        if (!running) {
+          setControllerPhase("idle");
+          setControllerMoves([]);
+          setControllerPlayerColor(null);
+          return;
+        }
+
+        const gs = await api.controllerGameState();
+        if (stopped) return;
+        setControllerPhase(gs.phase);
+        setControllerMoves(gs.moves ?? []);
+        setControllerPlayerColor(gs.player_color);
+        if (gs.fen) {
+          try {
+            setGame(new Chess(gs.fen));
+          } catch {
+            // Ignore — the controller may briefly publish a transient or
+            // pre-start FEN; the next poll will correct it.
+          }
+        }
       } catch {
         // network blip — ignore
       }
@@ -417,32 +458,6 @@ export default function Dashboard() {
       window.clearInterval(id);
     };
   }, []);
-
-  const toggleController = useCallback(async () => {
-    if (controllerBusy) return;
-    setControllerBusy(true);
-    try {
-      if (controllerRunning) {
-        const s = await api.controllerStop();
-        setControllerRunning(!!s.running);
-      } else {
-        const s = await api.controllerStart({
-          esp32_host: DEFAULT_ESP32_HOST,
-          esp32_port: DEFAULT_ESP32_PORT,
-          arm_port: robotPort || robotStatus?.active_port || robotStatus?.detected_port || DEFAULT_SERIAL_PORT,
-          player_color: "white",
-          difficulty,
-          engine_path: DEFAULT_ENGINE_PATH,
-        });
-        setControllerRunning(!!s.running);
-        setShowControllerLog(true);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Controller toggle failed");
-    } finally {
-      setControllerBusy(false);
-    }
-  }, [controllerBusy, controllerRunning, difficulty]);
 
   // CNN model state
   const [cnnModels, setCnnModels] = useState<CnnModelMeta[]>([]);
@@ -531,6 +546,32 @@ export default function Dashboard() {
     if (robotStatus?.ports.some((p) => p.device === current)) return current;
     return detected || current;
   }, [robotPort, robotStatus]);
+
+  const toggleController = useCallback(async () => {
+    if (controllerBusy) return;
+    setControllerBusy(true);
+    try {
+      if (controllerRunning) {
+        const s = await api.controllerStop();
+        setControllerRunning(!!s.running);
+      } else {
+        const s = await api.controllerStart({
+          esp32_host: DEFAULT_ESP32_HOST,
+          esp32_port: DEFAULT_ESP32_PORT,
+          arm_port: resolveSerialPort(robotPort) || DEFAULT_SERIAL_PORT,
+          player_color: "white",
+          difficulty,
+          engine_path: DEFAULT_ENGINE_PATH,
+        });
+        setControllerRunning(!!s.running);
+        setShowControllerLog(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Controller toggle failed");
+    } finally {
+      setControllerBusy(false);
+    }
+  }, [controllerBusy, controllerRunning, difficulty, resolveSerialPort, robotPort]);
 
   const activateCnnModel = useCallback(async (run_id: string) => {
     setCnnModelBusy(true);
@@ -798,6 +839,18 @@ export default function Dashboard() {
               {controllerRunning ? "Stop LCD" : "Run LCD"}
             </span>
           </button>
+          {controllerRunning ? (
+            <Badge
+              variant="outline"
+              title={
+                controllerPlayerColor
+                  ? `LCD game in progress · player=${controllerPlayerColor} · ${controllerMoves.length} moves played`
+                  : "LCD controller active — webapp controls are read-only"
+              }
+              style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", color: "var(--charm-cyan)" }}>
+              LCD: {controllerPhaseLabel(controllerPhase)}
+            </Badge>
+          ) : null}
           {controllerLog.length > 0 ? (
             <button
               type="button"
@@ -826,7 +879,8 @@ export default function Dashboard() {
           </Badge>
           <Button
             onClick={runStartupCalibrate}
-            disabled={turnState === "arm_calibrating" || armCalibrated}
+            disabled={turnState === "arm_calibrating" || armCalibrated || controllerRunning}
+            title={controllerRunning ? "LCD controller is running — stop it first" : undefined}
             className="font-jetbrains"
             style={{ background: armCalibrated ? "transparent" : "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {turnState === "arm_calibrating" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
@@ -835,9 +889,11 @@ export default function Dashboard() {
           <Button
             variant="outline"
             onClick={runRecalibrate}
-            disabled={turnState === "arm_calibrating" || busy}
+            disabled={turnState === "arm_calibrating" || busy || controllerRunning}
             className="font-jetbrains"
-            title="Re-home the arm without resetting the current game state."
+            title={controllerRunning
+              ? "LCD controller is running — stop it first"
+              : "Re-home the arm without resetting the current game state."}
           >
             <ShieldCheck className="size-4" />
             Recalibrate arm
@@ -853,7 +909,8 @@ export default function Dashboard() {
           </Button>
           <Button
             onClick={processHumanTurn}
-            disabled={busy || !armCalibrated}
+            disabled={busy || !armCalibrated || controllerRunning}
+            title={controllerRunning ? "LCD controller is running — stop it first" : undefined}
             className="font-jetbrains"
             style={{ background: "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}

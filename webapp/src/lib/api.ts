@@ -416,6 +416,7 @@ export const api = {
     post<ControllerStatus>("/api/controller/start", payload),
   controllerStop: () => post<ControllerStatus>("/api/controller/stop", {}),
   controllerStatus: () => get<ControllerStatus>("/api/controller/status"),
+  controllerGameState: () => get<ControllerGameState>("/api/controller/game-state"),
 };
 
 export interface ControllerStartPayload {
@@ -436,6 +437,29 @@ export interface ControllerStatus {
   cmd?: string[] | null;
   exit_code?: number | null;
   log_tail?: string[];
+}
+
+export type ControllerPhase =
+  | "idle"
+  | "starting"
+  | "waiting"
+  | "arm_calibrating"
+  | "checking_board"
+  | "player_turn"
+  | "bot_thinking"
+  | "bot_moving"
+  | "game_over"
+  | "error"
+  | "unknown";
+
+export interface ControllerGameState {
+  phase: ControllerPhase;
+  fen: string | null;
+  moves: string[];
+  player_color: "white" | "black" | null;
+  robot_color: "white" | "black" | null;
+  difficulty?: number | null;
+  updated_at: number | null;
 }
 
 // --- CNN-related response types ---

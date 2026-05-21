@@ -38,25 +38,18 @@ def _build_model(num_classes: int = 3):
 
     model = models.Sequential([
         layers.Input(shape=(100, 100, 3)),
-        # Geometric augmentation. Vertical flips create views a top-down board
-        # never produces, so horizontal + small rotation/translation/zoom only.
-        # The translation matters because arm-placed training pieces sit dead
-        # centre; without it the CNN assumes a centred blob.
+        # Minimal augmentation — keep only what reflects real variability the
+        # camera/board actually produces, and drop everything that distorts the
+        # signal the model needs to learn (piece colour, sharp edges).
+        #   - RandomFlip("horizontal"): free 2x data, board is left/right symmetric.
+        #   - RandomBrightness(0.15): real lighting changes between sessions.
+        # Dropped: rotation/translation/zoom (cells are axis-aligned and the
+        # validated_live dataset already contains naturally off-centre pieces),
+        # hue/saturation (piece colour IS the label — don't perturb it), and
+        # GaussianNoise (sensor noise on this camera is already small).
         layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.2),
-        layers.RandomTranslation(0.08, 0.08),
-        layers.RandomZoom(0.1),
-        # Photometric augmentation — this is what makes the model survive a
-        # change of room/lighting. Without it the CNN memorises the training
-        # environment's white balance and falls over under different LEDs.
-        layers.RandomBrightness(0.3, value_range=(0, 255)),
-        layers.RandomContrast(0.3),
-        layers.RandomHue(0.05, value_range=(0, 255)),
-        layers.RandomSaturation((0.7, 1.3), value_range=(0, 255)),
+        layers.RandomBrightness(0.15, value_range=(0, 255)),
         layers.Rescaling(1.0 / 255),
-        # Sensor / JPEG noise after rescale: Keras 3 requires stddev in [0,1].
-        # 0.02 ≈ 5/255 grey-level noise, enough to break exact-pixel memorisation.
-        layers.GaussianNoise(0.02),
         layers.Conv2D(16, 3, padding="same", activation="relu"),
         layers.MaxPooling2D(2),
         layers.Conv2D(32, 3, padding="same", activation="relu"),

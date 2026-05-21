@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 import chess
@@ -12,6 +15,14 @@ from charm.arduino.arduino_bridge import execute_move, send_command
 from charm.game.cv_scan import build_router, persist_validated_capture
 from charm.game.game_session import GameSession, SessionResult
 from charm.vision.cv_router import AttemptDecision
+
+
+# Shared with webapp_backend/api_server.py — both must resolve to the same
+# absolute path (python_code/controller_game_state.json) so the webapp can
+# poll the LCD-driven game state.
+_CONTROLLER_STATE_FILE = (
+    Path(__file__).resolve().parents[3] / "controller_game_state.json"
+)
 
 
 BoardImageProvider = Callable[[], str]
@@ -72,9 +83,29 @@ class GameController:
 
     def start(self) -> None:
         self.ui_link.start()
+        self._write_state("waiting")
 
     def stop(self) -> None:
         self.ui_link.close()
+
+    def _write_state(self, phase: str) -> None:
+        """Atomically publish current game state for the webapp to poll."""
+        board = self.session.get_current_board()
+        state = {
+            "phase": phase,
+            "fen": board.fen() if board is not None else None,
+            "moves": self.session.get_move_history(),
+            "player_color": self.session.get_player_color(),
+            "robot_color": self.session.get_robot_color(),
+            "difficulty": self.current_difficulty,
+            "updated_at": time.time(),
+        }
+        try:
+            tmp = _CONTROLLER_STATE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.replace(_CONTROLLER_STATE_FILE)  # atomic on POSIX
+        except Exception as exc:
+            print(f"[GAME] failed to write state file: {exc!r}", flush=True)
 
     def check_board(self) -> bool:
         """Called by the bridge when Arduino sends CHECK_BOARD.
@@ -90,6 +121,7 @@ class GameController:
 
         try:
             self.session.reset()
+            self._write_state("checking_board")
 
             router, fns, cfg = build_router()
             print(f"[DEBUG] router: primary={cfg.primary} attempts_each={cfg.attempts_each} modes={list(fns.keys())}", flush=True)
@@ -117,6 +149,7 @@ class GameController:
             if not router_result.success or last_initial["result"] is None or not last_initial["result"].success:
                 print("[DEBUG] RETURN FALSE: no attempt validated the initial board", flush=True)
                 print("=======================================================\n", flush=True)
+                self._write_state("error")
                 return False
 
             print("[DEBUG] Step 3: start_game()", flush=True)
@@ -128,10 +161,14 @@ class GameController:
             if not start_result.success:
                 print("[DEBUG] RETURN FALSE: start_game failed", flush=True)
                 print("=======================================================\n", flush=True)
+                self._write_state("error")
                 return False
 
             print("[DEBUG] RETURN TRUE: check_board success", flush=True)
             print("=======================================================\n", flush=True)
+            # If the robot moves first (player chose black), the controller
+            # will immediately drive a robot move; otherwise it's the human's turn.
+            self._write_state("bot_thinking" if self.session.robot_moves_first() else "player_turn")
             return True
 
         except Exception as e:
@@ -140,6 +177,7 @@ class GameController:
             traceback.print_exc()
             print("[DEBUG] RETURN FALSE because exception occurred", flush=True)
             print("=======================================================\n", flush=True)
+            self._write_state("error")
             return False
 
 
@@ -177,12 +215,14 @@ class GameController:
             # Vision could not detect a valid move (illegal or ambiguous move).
             # Put the Arduino in ERROR mode so the LCD shows "ERR: check board".
             self.ui_link.set_mode(7)  # UIMode::ERROR = 7 in uiState.h
+            self._write_state("error")
             return
 
         # Check if the player's move ended the game.
         board = self.session.get_current_board()
         if board is not None and board.is_game_over():
             self.ui_link.game_over(self._game_over_reason(board))
+            self._write_state("game_over")
             return
 
         if board is not None:
@@ -192,6 +232,7 @@ class GameController:
                 self.ui_link.player_turn_black()
 
         self.ui_link.bot_thinking()
+        self._write_state("bot_thinking")
         self._do_robot_move()
 
     def _do_robot_move(self) -> None:
@@ -204,9 +245,11 @@ class GameController:
 
         if not robot_result.success:
             self.ui_link.move_done()
+            self._write_state("error")
             return
 
         self.ui_link.bot_moving()
+        self._write_state("bot_moving")
 
         # board must be read BEFORE committing so execute_move can inspect
         # piece types and capture info from the pre-move board state.
@@ -223,6 +266,7 @@ class GameController:
         updated_board = self.session.get_current_board()
         if updated_board is not None and updated_board.is_game_over():
             self.ui_link.game_over(self._game_over_reason(updated_board))
+            self._write_state("game_over")
             return
 
         if updated_board is not None:
@@ -232,6 +276,7 @@ class GameController:
                 self.ui_link.player_turn_black()
 
         self.ui_link.move_done()
+        self._write_state("player_turn")
 
     def run_calibration(self) -> None:
         """Called by the bridge when the ESP32 sends CALIBRATION. Forwards the
@@ -241,13 +286,16 @@ class GameController:
             print("[GAME] No arm serial configured, skipping calibration", flush=True)
             return
 
+        self._write_state("arm_calibrating")
         send_command("calibrate", self.config.arm_ser, self.config.arm_lock)
         print("[GAME] Calibration complete", flush=True)
         self.ui_link.set_mode(1)
+        self._write_state("waiting")
 
     def set_player_color(self, color: str) -> None:
         """Called by the bridge when Arduino sends SET_COLOR (color selection screen)."""
         self.config.player_color = color
+        self._write_state("waiting")
 
     def set_difficulty(self, difficulty: int) -> None:
         """Update Stockfish skill level based on Arduino difficulty setting.
@@ -260,6 +308,7 @@ class GameController:
 
         if self.config.on_set_difficulty is not None:
             self.config.on_set_difficulty(difficulty)
+        self._write_state("waiting")
 
     def _game_over_reason(self, board: chess.Board) -> str:
         outcome = board.outcome()

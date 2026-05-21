@@ -21,6 +21,7 @@ source folder's ground truth.
 from __future__ import annotations
 
 import random
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,11 @@ from typing import Callable, Iterable, Optional
 import cv2
 
 from charm.vision.grid_splitter import extract_8x8_cells
+
+# bulk-paint filenames look like "cell_<32-hex-uuid>_<square>.jpg".
+# Cells captured from the same board frame share the UUID, so we can
+# group by it to split train/val per-frame instead of per-cell.
+_BULK_UUID_RE = re.compile(r"^cell_([a-f0-9]{32})_[a-h][1-8]\.jpg$", re.IGNORECASE)
 
 WARP_SIZE = 800
 LABELED_DATASETS_ROOT = Path(__file__).resolve().parents[3] / "labeled_datasets"
@@ -177,6 +183,37 @@ def _ensure_output_layout(output_root: Path) -> None:
             (output_root / split / cls).mkdir(parents=True, exist_ok=True)
 
 
+def _frame_uuid_from_bulk_path(cell_path: Path) -> Optional[str]:
+    """Return the per-frame UUID embedded in a bulk-paint cell filename, or None.
+
+    Filenames look like ``cell_<32-hex-uuid>_<square>.jpg``. All 64 cells from
+    one bulk-paint capture share the same UUID, so we can use it to keep
+    frame-mates together when splitting train/val.
+    """
+    m = _BULK_UUID_RE.match(cell_path.name)
+    return m.group(1) if m else None
+
+
+def _split_for_group(
+    group_key: str,
+    cache: dict[str, str],
+    rng: random.Random,
+    val_split: float,
+) -> str:
+    """Return ``"val"`` or ``"train"`` for a group, drawing once per unique key.
+
+    Re-using one decision for every member of the same group is the whole point
+    of the per-frame split: it keeps cells from the same capture out of both
+    sides of the train/val boundary.
+    """
+    cached = cache.get(group_key)
+    if cached is not None:
+        return cached
+    choice = "val" if rng.random() < val_split else "train"
+    cache[group_key] = choice
+    return choice
+
+
 def _label_for_cell(
     row: int, col: int, kind: str, target_square: Optional[str]
 ) -> str:
@@ -244,6 +281,11 @@ def build_cnn_dataset(
     counts_val: dict[str, int] = {c: 0 for c in CLASSES}
 
     rng = random.Random(0xC4A2)  # deterministic split + empty sampling
+    # Per-frame split: one train/val decision per source frame (full-frame
+    # path) or per bulk-paint capture UUID (bulk path). Re-used for every
+    # cell from the same group. Prevents data leakage that inflates val_acc
+    # toward 100% when cells from one capture session land in both splits.
+    split_cache: dict[str, str] = {}
 
     frames_done = 0
     for frame_path, kind, target_square in _iter_source_frames(source_root):
@@ -274,8 +316,10 @@ def build_cnn_dataset(
         to_write: list[tuple[object, str]] = [(c, lbl) for c, lbl in piece_cells]
         to_write.extend((c, "empty") for c in chosen_empties)
 
+        # One split decision for the whole frame, shared across all its cells.
+        frame_key = f"frame::{frame_path}"
+        split = _split_for_group(frame_key, split_cache, rng, val_split)
         for cell, label in to_write:
-            split = "val" if rng.random() < val_split else "train"
             out_dir = output_root / split / label
             out_path = out_dir / f"{uuid.uuid4().hex}.png"
             cv2.imwrite(str(out_path), cell.image)
@@ -297,12 +341,18 @@ def build_cnn_dataset(
 
     # Bulk-paint sessions contribute single-cell crops directly; no grid
     # splitting needed — just copy each cell into the chosen split.
+    # All 64 cells from one bulk-paint capture share a UUID in the filename;
+    # group by it so frame-mates go to the same split. Fall back to a
+    # per-cell decision for any filename that doesn't match the expected
+    # pattern (legacy / hand-imported cells) so they're not silently dropped.
     for cell_path, cls in _iter_bulk_cells(source_root, empty_caps=empty_caps):
         cell_img = cv2.imread(str(cell_path))
         if cell_img is None:
             frames_done += 1
             continue
-        split = "val" if rng.random() < val_split else "train"
+        frame_uuid = _frame_uuid_from_bulk_path(cell_path)
+        group_key = f"bulk::{frame_uuid}" if frame_uuid else f"bulk-cell::{cell_path}"
+        split = _split_for_group(group_key, split_cache, rng, val_split)
         out_dir = output_root / split / cls
         out_path = out_dir / f"{uuid.uuid4().hex}.png"
         cv2.imwrite(str(out_path), cell_img)
