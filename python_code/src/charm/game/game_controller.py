@@ -55,13 +55,6 @@ class GameControllerConfig:
 
 
 class GameController:
-    # Map Arduino difficulty (0-2) to Stockfish skill level (0-20)
-    DIFFICULTY_MAP = {
-        0: 5,   # EASY: beginner level
-        1: 12,  # MEDIUM: intermediate level
-        2: 20,  # HARD: maximum strength
-    }
-
     def __init__(
         self,
         ui_link: ArduinoUIControllerLink,
@@ -71,14 +64,18 @@ class GameController:
         self.ui_link = ui_link
         self.session = session if session is not None else GameSession()
         self.config = config
-        self.current_difficulty = 1  # Default to MEDIUM (Arduino difficulty 1)
-        self.current_skill_level = self.DIFFICULTY_MAP[1]
+        self.current_difficulty = 10  # Default level 10 out of 20
+        self.current_skill_level = 9  # Stockfish skill = difficulty - 1
+        self._promotion_event = threading.Event()
+        self._promotion_piece: str = "q"
         self.ui_link.set_handlers(
             on_check_board=self.check_board,
             on_player_done=self.player_done,
             on_set_difficulty=self.set_difficulty,
             on_set_color=self.set_player_color,
             on_calibration=self.run_calibration,
+            on_manual_control=self.handle_manual_control,
+            on_promotion_choice=self._on_promotion_choice,
         )
 
     def start(self) -> None:
@@ -88,7 +85,7 @@ class GameController:
     def stop(self) -> None:
         self.ui_link.close()
 
-    def _write_state(self, phase: str) -> None:
+    def _write_state(self, phase: str, error_message: str = None, bot_move: str = None) -> None:
         """Atomically publish current game state for the webapp to poll."""
         board = self.session.get_current_board()
         state = {
@@ -98,6 +95,8 @@ class GameController:
             "player_color": self.session.get_player_color(),
             "robot_color": self.session.get_robot_color(),
             "difficulty": self.current_difficulty,
+            "error_message": error_message,
+            "bot_move": bot_move,
             "updated_at": time.time(),
         }
         try:
@@ -134,6 +133,7 @@ class GameController:
                     capture.white_bitmap,
                     capture.black_bitmap,
                     max_mismatches=0,
+                    flip_180=self.config.flip_180,
                 )
                 last_initial["result"] = result
                 if result.success:
@@ -166,9 +166,13 @@ class GameController:
 
             print("[DEBUG] RETURN TRUE: check_board success", flush=True)
             print("=======================================================\n", flush=True)
-            # If the robot moves first (player chose black), the controller
-            # will immediately drive a robot move; otherwise it's the human's turn.
-            self._write_state("bot_thinking" if self.session.robot_moves_first() else "player_turn")
+            if self.session.robot_moves_first():
+                # Player chose black — bot (white) moves first; _do_robot_move
+                # sends player_turn_white + bot_thinking internally.
+                self._do_robot_move()
+            else:
+                self.ui_link.player_turn_white()
+                self._write_state("player_turn")
             return True
 
         except Exception as e:
@@ -212,11 +216,19 @@ class GameController:
         move_result: Optional[SessionResult] = last_move["result"]
 
         if not router_result.success or move_result is None or not move_result.success:
-            # Vision could not detect a valid move (illegal or ambiguous move).
-            # Put the Arduino in ERROR mode so the LCD shows "ERR: check board".
-            self.ui_link.set_mode(7)  # UIMode::ERROR = 7 in uiState.h
-            self._write_state("error")
+            msg = (move_result.message if move_result is not None else None) or "Illegal move"
+            self.ui_link.error_msg(msg)
+            self._write_state("error", error_message=msg)
             return
+
+        # If the player promoted a pawn, ask which piece they want.
+        if move_result.move_uci and len(move_result.move_uci) == 5:
+            self._promotion_event.clear()
+            self.ui_link.promotion_needed()
+            self._promotion_event.wait(timeout=60.0)
+            chosen = self._promotion_piece
+            if chosen != "q":
+                self.session.fix_last_promotion(chosen)
 
         # Check if the player's move ended the game.
         board = self.session.get_current_board()
@@ -225,18 +237,25 @@ class GameController:
             self._write_state("game_over")
             return
 
-        if board is not None:
-            if board.turn == chess.WHITE:
-                self.ui_link.player_turn_white()
-            else:
-                self.ui_link.player_turn_black()
+        if board is not None and board.is_check():
+            self.ui_link.send_check()
 
-        self.ui_link.bot_thinking()
-        self._write_state("bot_thinking")
         self._do_robot_move()
 
     def _do_robot_move(self) -> None:
         """Compute, physically execute, and commit the robot's next move."""
+        # Tell the LCD whose turn it is (the bot's colour) and that it's thinking.
+        # Doing this here makes the method self-contained so it works whether
+        # called from player_done() or directly from check_board().
+        init_board = self.session.get_current_board()
+        if init_board is not None:
+            if init_board.turn == chess.WHITE:
+                self.ui_link.player_turn_white()
+            else:
+                self.ui_link.player_turn_black()
+        self.ui_link.bot_thinking()
+        self._write_state("bot_thinking")
+
         robot_result = self.session.compute_robot_move(
             engine_path=self.config.engine_path,
             think_time=self.config.think_time,
@@ -248,16 +267,20 @@ class GameController:
             self._write_state("error")
             return
 
-        self.ui_link.bot_moving()
-        self._write_state("bot_moving")
-
-        # board must be read BEFORE committing so execute_move can inspect
-        # piece types and capture info from the pre-move board state.
+        # board must be read BEFORE committing so execute_move and _format_bot_move
+        # can inspect piece types and capture info from the pre-move board state.
         board = self.session.get_current_board()
         if board is None:
             return
 
-        execute_move(robot_result.move_uci, board, self.config.arm_ser, self.config.arm_lock)
+        move_label = self._format_bot_move(robot_result.move_uci, board)
+        self.ui_link.bot_move(move_label)
+        self.ui_link.bot_moving()
+        if len(robot_result.move_uci) == 5:
+            self.ui_link.bot_promoting(robot_result.move_uci[4])
+        self._write_state("bot_moving", bot_move=move_label)
+
+        execute_move(robot_result.move_uci, board, self.config.arm_ser, self.config.arm_lock, flip_180=self.config.flip_180)
 
         # Commit the robot's move into the session's internal board.
         self.session.commit_robot_move(robot_result.move_uci)
@@ -274,6 +297,8 @@ class GameController:
                 self.ui_link.player_turn_white()
             else:
                 self.ui_link.player_turn_black()
+            if updated_board.is_check():
+                self.ui_link.send_check()
 
         self.ui_link.move_done()
         self._write_state("player_turn")
@@ -295,20 +320,65 @@ class GameController:
     def set_player_color(self, color: str) -> None:
         """Called by the bridge when Arduino sends SET_COLOR (color selection screen)."""
         self.config.player_color = color
+        self.config.flip_180 = (color == "black")
         self._write_state("waiting")
 
     def set_difficulty(self, difficulty: int) -> None:
         """Update Stockfish skill level based on Arduino difficulty setting.
 
         Args:
-            difficulty: Arduino difficulty value (0=EASY, 1=MEDIUM, 2=HARD)
+            difficulty: Numeric level 1–20 from the ESP32 slider.
+                        Maps to Stockfish skill 0–19 (level 1 → skill 0).
         """
         self.current_difficulty = difficulty
-        self.current_skill_level = self.DIFFICULTY_MAP.get(difficulty, 12)
+        self.current_skill_level = max(0, min(19, difficulty - 1))
 
         if self.config.on_set_difficulty is not None:
             self.config.on_set_difficulty(difficulty)
         self._write_state("waiting")
+
+    def _on_promotion_choice(self, piece: str) -> None:
+        """Called by the bridge when ESP32 sends PROMOTION_CHOICE <piece>."""
+        self._promotion_piece = piece.lower()
+        self._promotion_event.set()
+
+    def handle_manual_control(self, cmd: str) -> None:
+        """Relay a manual jog command from the ESP32 to the Mega."""
+        _CMD_MAP = {
+            "MANUAL_JOINT1_FWD":    "jogJ1 2.0",
+            "MANUAL_JOINT1_BWD":    "jogJ1 -2.0",
+            "MANUAL_JOINT2_FWD":    "jogJ2 2.0",
+            "MANUAL_JOINT2_BWD":    "jogJ2 -2.0",
+            "MANUAL_Z_FWD":         "jogZ 0.5",
+            "MANUAL_Z_BWD":         "jogZ -0.5",
+            "MANUAL_GRIPPER_OPEN":  "OG",
+            "MANUAL_GRIPPER_CLOSE": "CG",
+        }
+        mega_cmd = _CMD_MAP.get(cmd)
+        if mega_cmd is None:
+            print(f"[GAME] Unknown manual control command: {cmd}", flush=True)
+            return
+        if self.config.arm_ser is None or self.config.arm_lock is None:
+            print(f"[GAME] No arm serial configured, ignoring {cmd}", flush=True)
+            return
+        print(f"[GAME] Manual control: {cmd} -> {mega_cmd}", flush=True)
+        send_command(mega_cmd, self.config.arm_ser, self.config.arm_lock)
+
+    def _format_bot_move(self, uci: str, board: chess.Board) -> str:
+        try:
+            move = chess.Move.from_uci(uci)
+            from_sq = chess.square_name(move.from_square)
+            to_sq = chess.square_name(move.to_square)
+            if board.is_castling(move):
+                return "O-O-O" if board.is_queenside_castling(move) else "O-O"
+            promo = ("=" + chess.piece_symbol(move.promotion).upper()) if move.promotion else ""
+            if board.is_en_passant(move):
+                return f"{from_sq}x{to_sq} ep{promo}"
+            if board.is_capture(move):
+                return f"{from_sq}x{to_sq}{promo}"
+            return f"{from_sq}->{to_sq}{promo}"
+        except Exception:
+            return uci
 
     def _game_over_reason(self, board: chess.Board) -> str:
         outcome = board.outcome()

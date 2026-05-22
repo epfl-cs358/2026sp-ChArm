@@ -5,11 +5,22 @@ import serial
 import chess
 
 
-def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: threading.Lock):
-    print(f"[ARM] execute_move called: {uci_move}", flush=True)
+def _mirror_sq(sq: str) -> str:
+    """Mirror a square name 180°: a1↔h8, e2↔d7, etc."""
+    file = chr(ord('h') - (ord(sq[0]) - ord('a')))
+    rank = str(9 - int(sq[1]))
+    return file + rank
+
+
+def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: threading.Lock, flip_180: bool = False):
+    print(f"[ARM] execute_move called: {uci_move} flip={flip_180}", flush=True)
     move = chess.Move.from_uci(uci_move)
-    from_square = chess.square_name(move.from_square)
-    to_square = chess.square_name(move.to_square)
+
+    def sq(square_name: str) -> str:
+        return _mirror_sq(square_name) if flip_180 else square_name
+
+    from_square = sq(chess.square_name(move.from_square))
+    to_square   = sq(chess.square_name(move.to_square))
 
     # Get the piece being moved
     piece = board.piece_at(move.from_square)
@@ -28,17 +39,17 @@ def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: th
     rook_to = None
     if is_castling:
         if move.to_square == chess.G1:  # White kingside
-            rook_from = "h1"
-            rook_to = "f1"
+            rook_from = sq("h1")
+            rook_to   = sq("f1")
         elif move.to_square == chess.C1:  # White queenside
-            rook_from = "a1"
-            rook_to = "d1"
+            rook_from = sq("a1")
+            rook_to   = sq("d1")
         elif move.to_square == chess.G8:  # Black kingside
-            rook_from = "h8"
-            rook_to = "f8"
+            rook_from = sq("h8")
+            rook_to   = sq("f8")
         elif move.to_square == chess.C8:  # Black queenside
-            rook_from = "a8"
-            rook_to = "d8"
+            rook_from = sq("a8")
+            rook_to   = sq("d8")
 
     if is_capture and captured_piece:
         # Pick up captured piece and put it in trash

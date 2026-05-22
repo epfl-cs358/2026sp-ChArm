@@ -30,6 +30,7 @@ private:
 
     unsigned long debounceMs;
     unsigned long lastButtonChangeMs;
+    unsigned long lastEncoderMs;
 };
 
 #endif

@@ -9,6 +9,7 @@ ButtonInput::ButtonInput(int pinCLK, int pinDT, int pinSW) {
     this->buttonPressStartMs = 0;
     this->debounceMs = 20;
     this->lastButtonChangeMs = 0;
+    this->lastEncoderMs = 0;
 }
 
 void ButtonInput::begin() {
@@ -22,11 +23,13 @@ void ButtonInput::begin() {
 }
 
 InputEvent ButtonInput::readEvent() {
-    // Check encoder rotation
+    // Check encoder rotation with debounce
+    unsigned long now = millis();
     bool currentCLKState = digitalRead(pinCLK);
     if (currentCLKState != lastCLKState) {
         lastCLKState = currentCLKState;
-        if (!currentCLKState) {  // Falling edge
+        if (!currentCLKState && (now - lastEncoderMs >= 50)) {  // Falling edge + debounce
+            lastEncoderMs = now;
             bool dtState = digitalRead(pinDT);
             if (dtState != currentCLKState) {
                 return INPUT_NEXT;  // Clockwise
@@ -38,7 +41,6 @@ InputEvent ButtonInput::readEvent() {
 
     // Check button
     bool currentButtonState = digitalRead(pinSW);
-    unsigned long now = millis();
 
     if (currentButtonState != lastButtonState) {
         lastButtonChangeMs = now;

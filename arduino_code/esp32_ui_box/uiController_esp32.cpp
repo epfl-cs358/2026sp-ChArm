@@ -50,6 +50,8 @@ void UIControllerESP32::loop(WiFiClient& client) {
         pendingLcdUpdate = true;
     }
 
+    if (uiState.tickScroll()) pendingLcdUpdate = true;
+
     if (pendingLcdUpdate) {
         lcd.update(uiState.getLine1(), uiState.getLine2());
         pendingLcdUpdate = false;
@@ -89,8 +91,21 @@ void UIControllerESP32::processLine(WiFiClient& client, const String& line) {
         uiState.setGameStatus(THINKING);
         pendingLcdUpdate = true;
 
+    } else if (line.startsWith("BOT_MOVE ")) {
+        String uci = line.substring(9);
+        uci.trim();
+        String readable = uci.substring(0, 2) + "->" + uci.substring(2, 4);
+        if (uci.length() == 5) readable += uci.charAt(4);  // promotion piece
+        uiState.setBotMove(readable);
+        pendingLcdUpdate = true;
+
     } else if (line.equalsIgnoreCase("BOT_MOVING")) {
         uiState.setGameStatus(MOVING);
+        pendingLcdUpdate = true;
+
+    } else if (line.startsWith("BOT_PROMOTING ")) {
+        char piece = line.charAt(14);
+        uiState.setBotPromoting(piece);
         pendingLcdUpdate = true;
 
     } else if (line.equalsIgnoreCase("PLAYER_TURN_WHITE")) {
@@ -107,6 +122,10 @@ void UIControllerESP32::processLine(WiFiClient& client, const String& line) {
         uiState.setGameStatus(WAITING_PLAYER);
         pendingLcdUpdate = true;
 
+    } else if (line.equalsIgnoreCase("CHECK")) {
+        uiState.setInCheck();
+        pendingLcdUpdate = true;
+
     } else if (line.startsWith("GAME_OVER ")) {
         String reason = line.substring(10);
         reason.trim();
@@ -121,6 +140,16 @@ void UIControllerESP32::processLine(WiFiClient& client, const String& line) {
         }
         pendingLcdUpdate = true;
         sendMessage(client, "OK");
+
+    } else if (line.startsWith("ERROR_MSG ")) {
+        String msg = line.substring(10);
+        msg.trim();
+        uiState.setErrorMessage(msg);
+        pendingLcdUpdate = true;
+
+    } else if (line.equalsIgnoreCase("PROMOTION_NEEDED")) {
+        uiState.setMode(PROMOTION);
+        pendingLcdUpdate = true;
 
     } else if (line.startsWith("SET_MODE ")) {
         int n = line.substring(9).toInt();
@@ -144,12 +173,7 @@ void UIControllerESP32::handleButtons(WiFiClient& client) {
         case MENU:
             if      (ev == INPUT_NEXT)   uiState.menuNext();
             else if (ev == INPUT_PREV)   uiState.menuPrev();
-            else if (ev == INPUT_SELECT) {
-                if (uiState.getSelectedMenuItem() == START_GAME)
-                    uiState.setMode(COLOR_SELECT);
-                else
-                    uiState.selectCurrentMenuItem();
-            }
+            else if (ev == INPUT_SELECT) uiState.selectCurrentMenuItem();
             break;
 
         case COLOR_SELECT:
@@ -210,14 +234,33 @@ void UIControllerESP32::handleButtons(WiFiClient& client) {
             break;
         }
 
+        case PROMOTION:
+            if      (ev == INPUT_NEXT)   uiState.promotionNext();
+            else if (ev == INPUT_PREV)   uiState.promotionPrev();
+            else if (ev == INPUT_SELECT) {
+                String msg = String("PROMOTION_CHOICE ") + String(uiState.getPromotionLetter());
+                sendMessage(client, msg);
+                uiState.setMode(GAME);
+            }
+            break;
+
         case GAME:
             if (ev == INPUT_SELECT && uiState.getGameStatus() == WAITING_PLAYER)
                 sendMessage(client, "PLAYER_DONE");
             break;
 
         case ERROR:
-            if (ev == INPUT_SELECT)
-                uiState.clearError();
+            if (ev == INPUT_SELECT) {
+                if (uiState.getModeBeforeError() == COLOR_SELECT) {
+                    // Board setup failed — retry the check without asking for color again.
+                    uiState.clearError();
+                    waitingForBoard = true;
+                    boardRequestTs = millis();
+                    sendMessage(client, "CHECK_BOARD");
+                } else {
+                    uiState.clearError();
+                }
+            }
             break;
 
         default:

@@ -3,8 +3,8 @@
 UIState::UIState() {
     this->currentMode = BOOT;
     this->selectedMenuItem = START_GAME;
-    this->currentDifficulty = MEDIUM;
-    this->tempDifficulty = currentDifficulty;
+    this->currentDifficulty = 10;
+    this->tempDifficulty = 10;
     this->selectedControlTarget = JOINT1;
     this->gripperAction = GRIPPER_OPEN;
     this->currentTurn = WHITE;
@@ -12,6 +12,14 @@ UIState::UIState() {
     this->modeBeforeError = MENU;
     this->selectedColor = WHITE;
     this->gameOverReason = GAME_OVER_DRAW;
+    this->errorMessage = "";
+    this->scrollOffset = 0;
+    this->lastScrollMs = 0;
+    this->botMoveStr = "";
+    this->isPromoting = false;
+    this->promotingPiece = 'Q';
+    this->inCheck = false;
+    this->selectedPromotion = PROMO_QUEEN;
 }
 
 void UIState::setMode(UIMode mode) {
@@ -64,9 +72,6 @@ void UIState::menuPrev() {
 void UIState::selectCurrentMenuItem() {
     switch (selectedMenuItem) {
         case START_GAME:
-            setMode(GAME);
-            break;
-        case DIFFICULTY_ITEM:
             enterDifficulty();
             break;
         case CALIBRATION_ITEM:
@@ -83,14 +88,14 @@ MenuItem UIState::getSelectedMenuItem() const {
 }
 
 void UIState::difficultyNext() {
-    tempDifficulty = (Difficulty)((tempDifficulty + 1) % DIFFICULTY_COUNT);
+    tempDifficulty = (tempDifficulty >= DIFFICULTY_MAX) ? DIFFICULTY_MIN : tempDifficulty + 1;
 }
 
 void UIState::difficultyPrev() {
-    tempDifficulty = (Difficulty)((tempDifficulty + DIFFICULTY_COUNT - 1) % DIFFICULTY_COUNT);
+    tempDifficulty = (tempDifficulty <= DIFFICULTY_MIN) ? DIFFICULTY_MAX : tempDifficulty - 1;
 }
 
-Difficulty UIState::getDifficulty() const {
+int UIState::getDifficulty() const {
     return currentDifficulty;
 }
 
@@ -101,7 +106,7 @@ void UIState::enterDifficulty() {
 
 void UIState::commitDifficulty() {
     currentDifficulty = tempDifficulty;
-    setMode(MENU);
+    setMode(COLOR_SELECT);
 }
 
 void UIState::cancelDifficulty() {
@@ -110,7 +115,7 @@ void UIState::cancelDifficulty() {
     setMode(MENU);
 }
 
-Difficulty UIState::getTempDifficulty() const {
+int UIState::getTempDifficulty() const {
     return tempDifficulty;
 }
 
@@ -167,16 +172,77 @@ PlayerTurn UIState::getSelectedColor() const {
 }
 
 void UIState::setGameStatus(GameStatus status) {
+    if (status == WAITING_PLAYER) isPromoting = false;
+    if (status == THINKING) inCheck = false;
     gameStatus = status;
+}
+
+void UIState::setInCheck() {
+    inCheck = true;
+}
+
+void UIState::setBotPromoting(char piece) {
+    isPromoting = true;
+    promotingPiece = piece;
 }
 
 GameStatus UIState::getGameStatus() const {
     return gameStatus;
 }
 
+void UIState::setBotMove(const String& moveStr) {
+    botMoveStr = moveStr;
+}
+
+void UIState::setErrorMessage(const String& msg) {
+    errorMessage = msg;
+    scrollOffset = 0;
+    lastScrollMs = millis();
+    setMode(ERROR);
+}
+
+bool UIState::tickScroll() {
+    if (currentMode != ERROR || errorMessage.length() <= 16) return false;
+    if (millis() - lastScrollMs >= 400) {
+        lastScrollMs = millis();
+        scrollOffset++;
+        if (scrollOffset > (int)errorMessage.length() - 16) scrollOffset = 0;
+        return true;
+    }
+    return false;
+}
+
 void UIState::clearError() {
     if (currentMode == ERROR) {
         currentMode = modeBeforeError;
+        errorMessage = "";
+        scrollOffset = 0;
+    }
+}
+
+UIMode UIState::getModeBeforeError() const {
+    return modeBeforeError;
+}
+
+void UIState::promotionNext() {
+    selectedPromotion = (PromotionPiece)((selectedPromotion + 1) % 4);
+}
+
+void UIState::promotionPrev() {
+    selectedPromotion = (PromotionPiece)((selectedPromotion + 3) % 4);
+}
+
+PromotionPiece UIState::getSelectedPromotion() const {
+    return selectedPromotion;
+}
+
+char UIState::getPromotionLetter() const {
+    switch (selectedPromotion) {
+        case PROMO_QUEEN:  return 'Q';
+        case PROMO_ROOK:   return 'R';
+        case PROMO_BISHOP: return 'B';
+        case PROMO_KNIGHT: return 'N';
+        default:           return 'Q';
     }
 }
 
@@ -225,10 +291,13 @@ String UIState::getLine1() const {
             return "Calibration";
 
         case GAME:
+            if (gameStatus == MOVING) return "Bot moving";
+            if (inCheck)
+                return currentTurn == WHITE ? "CHECK White Turn" : "CHECK Black Turn";
             return currentTurn == WHITE ? "White Turn" : "Black Turn";
 
         case ERROR:
-            return "ERR: check board";
+            return errorMessage.length() > 0 ? "Illegal move !" : "Set up ERROR";
 
         case GAME_OVER:
             switch (gameOverReason) {
@@ -238,6 +307,9 @@ String UIState::getLine1() const {
                 case GAME_OVER_DRAW:      return "Draw";
             }
             return "Game Over";
+
+        case PROMOTION:
+            return "Promote pawn";
 
         default:
             return "?";
@@ -252,19 +324,13 @@ String UIState::getLine2() const {
         case MENU:
             switch (selectedMenuItem) {
                 case START_GAME: return "> Start Game";
-                case DIFFICULTY_ITEM: return "> Difficulty";
                 case CALIBRATION_ITEM: return "> Calibration";
                 case MANUAL_CONTROL_ITEM: return "> Manual Control";
             }
             return "?";
 
         case DIFFICULTY:
-            switch (tempDifficulty) {
-                case EASY: return "> Easy";
-                case MEDIUM: return "> Medium";
-                case HARD: return "> Hard";
-            }
-            return "?";
+            return "> " + String(tempDifficulty);
 
         case MANUAL_CONTROL:
             switch (selectedControlTarget) {
@@ -295,12 +361,22 @@ String UIState::getLine2() const {
                 case THINKING:
                     return "BOT thinking...";
                 case MOVING:
-                    return "BOT moving...";
+                    if (isPromoting) {
+                        switch (promotingPiece) {
+                            case 'Q': return "Promotes Queen";
+                            case 'R': return "Promotes Rook";
+                            case 'B': return "Promotes Bishop";
+                            case 'N': return "Promotes Knight";
+                        }
+                    }
+                    return botMoveStr.length() > 0 ? botMoveStr : "BOT moving...";
             }
             return "?";
 
         case ERROR:
-            return "Check board";
+            if (errorMessage.length() == 0) return "Check board";
+            if (errorMessage.length() <= 16) return errorMessage;
+            return errorMessage.substring(scrollOffset, scrollOffset + 16);
 
         case GAME_OVER:
             switch (gameOverReason) {
@@ -310,6 +386,15 @@ String UIState::getLine2() const {
                 case GAME_OVER_DRAW:      return "Game Over";
             }
             return "Game Over";
+
+        case PROMOTION:
+            switch (selectedPromotion) {
+                case PROMO_QUEEN:  return "> Queen";
+                case PROMO_ROOK:   return "> Rook";
+                case PROMO_BISHOP: return "> Bishop";
+                case PROMO_KNIGHT: return "> Knight";
+            }
+            return "> Queen";
 
         default:
             return "?";

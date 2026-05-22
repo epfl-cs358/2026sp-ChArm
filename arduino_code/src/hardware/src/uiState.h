@@ -14,7 +14,15 @@ enum UIMode {
     GAME,
     ERROR,
     COLOR_SELECT,  // 8 — added at end so ERROR stays 7
-    GAME_OVER      // 9
+    GAME_OVER,     // 9
+    PROMOTION      // 10
+};
+
+enum PromotionPiece {
+    PROMO_QUEEN,
+    PROMO_ROOK,
+    PROMO_BISHOP,
+    PROMO_KNIGHT
 };
 
 enum GameOverReason {
@@ -26,16 +34,10 @@ enum GameOverReason {
 
 enum MenuItem {
     START_GAME,
-    DIFFICULTY_ITEM,
     CALIBRATION_ITEM,
     MANUAL_CONTROL_ITEM
 };
 
-enum Difficulty {
-    EASY,
-    MEDIUM,
-    HARD
-};
 
 enum ControlTarget {
     JOINT1,
@@ -77,16 +79,16 @@ public:
     void selectCurrentMenuItem();
     MenuItem getSelectedMenuItem() const;
 
-    // Difficulty navigation and setting
+    // Difficulty navigation and setting (numeric 1–20)
     void difficultyNext();
     void difficultyPrev();
-    Difficulty getDifficulty() const;
+    int getDifficulty() const;
 
-     // temporary Difficulty
+    // temporary Difficulty
     void enterDifficulty();
     void commitDifficulty();
     void cancelDifficulty();
-    Difficulty getTempDifficulty() const;
+    int getTempDifficulty() const;
 
     // ControlTarget navigation and setting
     void controlNext();
@@ -105,15 +107,27 @@ public:
 
     void setGameStatus(GameStatus status);
     GameStatus getGameStatus() const;
+    void setBotMove(const String& moveStr);
+    void setBotPromoting(char piece);  // piece: 'Q','R','B','N'
+    void setInCheck();
 
     // Color selection (COLOR_SELECT mode)
     void colorToggle();
     PlayerTurn getSelectedColor() const;
 
+    void setErrorMessage(const String& msg);
     void clearError();
+    bool tickScroll();
+    UIMode getModeBeforeError() const;
 
     void setGameOver(GameOverReason reason);
     GameOverReason getGameOverReason() const;
+
+    // Promotion selection (PROMOTION mode)
+    void promotionNext();
+    void promotionPrev();
+    PromotionPiece getSelectedPromotion() const;
+    char getPromotionLetter() const;
 
     // Display methods
     String getLine1() const;
@@ -122,8 +136,8 @@ public:
 private:
     UIMode currentMode;
     MenuItem selectedMenuItem;
-    Difficulty currentDifficulty;
-    Difficulty tempDifficulty;
+    int currentDifficulty;
+    int tempDifficulty;
     ControlTarget selectedControlTarget;
     GripperAction gripperAction;
     PlayerTurn currentTurn;
@@ -131,9 +145,18 @@ private:
     UIMode modeBeforeError;
     PlayerTurn selectedColor;
     GameOverReason gameOverReason;
-    
-    static const int MENU_COUNT = 4;
-    static const int DIFFICULTY_COUNT = 3;
+    String errorMessage;
+    int scrollOffset;
+    unsigned long lastScrollMs;
+    String botMoveStr;
+    bool isPromoting;
+    char promotingPiece;
+    bool inCheck;
+    PromotionPiece selectedPromotion;
+
+    static const int MENU_COUNT = 3;
+    static const int DIFFICULTY_MIN = 1;
+    static const int DIFFICULTY_MAX = 20;
     static const int CONTROL_COUNT = 5;
     static const int GRIPPER_CONTROL_COUNT = 2;
 };

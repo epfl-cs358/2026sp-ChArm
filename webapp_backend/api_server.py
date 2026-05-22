@@ -3369,7 +3369,7 @@ class ControllerStartPayload(BaseModel):
     esp32_port: int = 8765
     arm_port: Optional[str] = None
     player_color: Literal["white", "black"] = "white"
-    difficulty: int = Field(1, ge=0, le=2)
+    difficulty: int = Field(10, ge=1, le=20)
     flip_180: bool = False
     engine_path: str = "/usr/games/stockfish"
     think_time: float = 0.5

@@ -9,7 +9,16 @@ OnPlayerDone = Callable[[], None]
 OnSetDifficulty = Callable[[int], None]
 OnSetColor = Callable[[str], None]  # called with "white" or "black"
 OnCalibration = Callable[[], None]
+OnManualControl = Callable[[str], None]  # called with e.g. "MANUAL_JOINT1_FWD"
+OnPromotionChoice = Callable[[str], None]  # called with "q", "r", "b", or "n"
 OnLine = Callable[[str], None]
+
+_MANUAL_COMMANDS = {
+    "MANUAL_JOINT1_FWD", "MANUAL_JOINT1_BWD",
+    "MANUAL_JOINT2_FWD", "MANUAL_JOINT2_BWD",
+    "MANUAL_Z_FWD",      "MANUAL_Z_BWD",
+    "MANUAL_GRIPPER_OPEN", "MANUAL_GRIPPER_CLOSE",
+}
 
 
 class ArduinoUIControllerLink:
@@ -40,6 +49,8 @@ class ArduinoUIControllerLink:
         on_set_difficulty: Optional[OnSetDifficulty] = None,
         on_set_color: Optional[OnSetColor] = None,
         on_calibration: Optional[OnCalibration] = None,
+        on_manual_control: Optional[OnManualControl] = None,
+        on_promotion_choice: Optional[OnPromotionChoice] = None,
         on_line: Optional[OnLine] = None,
     ) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,6 +62,8 @@ class ArduinoUIControllerLink:
         self._on_set_difficulty = on_set_difficulty
         self._on_set_color = on_set_color
         self._on_calibration = on_calibration
+        self._on_manual_control = on_manual_control
+        self._on_promotion_choice = on_promotion_choice
         self._on_line = on_line
 
         self._stop_event = threading.Event()
@@ -64,6 +77,8 @@ class ArduinoUIControllerLink:
         on_set_difficulty: Optional[OnSetDifficulty] = None,
         on_set_color: Optional[OnSetColor] = None,
         on_calibration: Optional[OnCalibration] = None,
+        on_manual_control: Optional[OnManualControl] = None,
+        on_promotion_choice: Optional[OnPromotionChoice] = None,
         on_line: Optional[OnLine] = None,
     ) -> None:
         self._on_check_board = on_check_board
@@ -71,6 +86,9 @@ class ArduinoUIControllerLink:
         self._on_set_difficulty = on_set_difficulty
         self._on_set_color = on_set_color
         self._on_calibration = on_calibration
+        self._on_manual_control = on_manual_control
+        if on_promotion_choice is not None:
+            self._on_promotion_choice = on_promotion_choice
 
         # Only overwrite _on_line if caller explicitly passes one.
         if on_line is not None:
@@ -118,6 +136,10 @@ class ArduinoUIControllerLink:
     def bot_thinking(self) -> None:
         self.send("BOT_THINKING")
 
+    def bot_move(self, uci: str) -> None:
+        """Send BOT_MOVE <uci> so the ESP32 can display the move on line 2."""
+        self.send(f"BOT_MOVE {uci}")
+
     def bot_moving(self) -> None:
         self.send("BOT_MOVING")
 
@@ -130,11 +152,25 @@ class ArduinoUIControllerLink:
     def player_turn_black(self) -> None:
         self.send("PLAYER_TURN_BLACK")
 
+    def error_msg(self, message: str) -> None:
+        """Send ERROR_MSG to the ESP32 — sets ERROR mode with a scrolling detail line."""
+        self.send(f"ERROR_MSG {message}")
+
     def set_mode(self, mode: int) -> None:
         self.send(f"SET_MODE {mode}")
 
     def set_difficulty(self, difficulty: int) -> None:
         self.send(f"SET_DIFFICULTY {difficulty}")
+
+    def send_check(self) -> None:
+        self.send("CHECK")
+
+    def bot_promoting(self, piece: str) -> None:
+        """Send BOT_PROMOTING <piece> so the LCD shows which piece the bot promotes to."""
+        self.send(f"BOT_PROMOTING {piece.upper()}")
+
+    def promotion_needed(self) -> None:
+        self.send("PROMOTION_NEEDED")
 
     def game_over(self, reason: str) -> None:
         """Send GAME_OVER <reason> to the ESP32.
@@ -206,6 +242,25 @@ class ArduinoUIControllerLink:
 
         if line in {"OK", "BOARD_OK_ACK", "BOARD_FAIL_ACK", "BOARD_TIMEOUT"}:
             print(f"[UI DEBUG] ESP32 status line: {line}", flush=True)
+            return
+
+        if line.startswith("PROMOTION_CHOICE "):
+            piece = line.split(maxsplit=1)[1].strip().lower()
+            if self._on_promotion_choice is not None:
+                try:
+                    self._on_promotion_choice(piece)
+                except Exception as e:
+                    print(f"[UI DEBUG] Exception during on_promotion_choice: {repr(e)}", flush=True)
+            return
+
+        if line in _MANUAL_COMMANDS:
+            if self._on_manual_control is not None:
+                try:
+                    self._on_manual_control(line)
+                except Exception as e:
+                    print(f"[UI DEBUG] Exception during on_manual_control: {repr(e)}", flush=True)
+            else:
+                print(f"[UI DEBUG] Manual control '{line}' received but no handler set", flush=True)
             return
 
         print(f"[UI DEBUG] Unknown ESP32 line ignored: {line}", flush=True)

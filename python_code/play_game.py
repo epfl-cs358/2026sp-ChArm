@@ -114,9 +114,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--difficulty",
         type=int,
-        choices=[0, 1, 2],
-        default=1,
-        help="Starting difficulty: 0=Easy, 1=Medium, 2=Hard.",
+        default=10,
+        help="Starting difficulty level 1–20 (default: 10).",
     )
     parser.add_argument(
         "--flip-180",
@@ -195,8 +194,7 @@ def main() -> None:
 
     controller.start()
 
-    difficulty_label = {0: "Easy", 1: "Medium", 2: "Hard"}
-    print(f"Game ready. Player: {args.player_color}, difficulty: {difficulty_label[args.difficulty]}")
+    print(f"Game ready. Player: {args.player_color}, difficulty: level {args.difficulty}/20")
     print("Use the buttons on the ESP32 box to start a game.")
     print("Ctrl-C to quit.\n")
 

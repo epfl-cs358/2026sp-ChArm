@@ -404,6 +404,21 @@ static void handleCommand(String cmd) {
     } else if (cmd.startsWith("GA ")) {
       arm.setGripperAngle(cmd.substring(3).toFloat());
 
+    } else if (cmd.startsWith("jogJ1 ")) {
+      float deg = cmd.substring(6).toFloat();
+      arm.moveJ1(arm.j1Angle() + deg);
+      Serial.print("[jog] J1 -> "); Serial.println(arm.j1Angle());
+
+    } else if (cmd.startsWith("jogJ2 ")) {
+      float deg = cmd.substring(6).toFloat();
+      arm.moveJ2(arm.j2Angle() + deg);
+      Serial.print("[jog] J2 -> "); Serial.println(arm.j2Angle());
+
+    } else if (cmd.startsWith("jogZ ")) {
+      float mm = cmd.substring(5).toFloat();
+      arm.moveByZ(mm);
+      Serial.print("[jog] Z -> "); Serial.println(arm.z());
+
     } else if (cmd.startsWith("angleX ")) {
       arm.moveJ1(cmd.substring(7).toFloat());
 

@@ -343,7 +343,7 @@ class GameSession:
         self.tracker = BoardStateTracker(expected_board)
         self.initialized = True
         self.game_started = False
-        self.flip_180 = False
+        self.flip_180 = flip_180
         self.pipeline_options = None
         self.player_color = None
         self.robot_color = None
@@ -373,8 +373,13 @@ class GameSession:
             return init_error
 
         assert self.tracker is not None
+        wb = white_bitmap
+        bb = black_bitmap
+        if self.flip_180:
+            wb = [list(reversed(row)) for row in reversed(wb)]
+            bb = [list(reversed(row)) for row in reversed(bb)]
         inference_result = self.tracker.update_from_bitmaps(
-            white_bitmap, black_bitmap, max_mismatches=max_mismatches
+            wb, bb, max_mismatches=max_mismatches
         )
 
         if inference_result.move is None:
@@ -727,6 +732,37 @@ class GameSession:
     # ------------------------------------------------------------------
     # Optional fallback: manually commit robot move without vision
     # ------------------------------------------------------------------
+    def fix_last_promotion(self, piece_letter: str) -> SessionResult:
+        """Replace the last committed promotion move with the player's chosen piece.
+
+        Called after process_bitmaps committed a queen-default promotion but the
+        player selected a different piece via the LCD. Pops the board, re-pushes
+        with the correct promotion piece, and updates the step record.
+        """
+        assert self.tracker is not None
+        board = self.tracker.board
+        if not board.move_stack:
+            return SessionResult(success=False, message="No move to fix.")
+        last_move = board.pop()
+        if not last_move.promotion:
+            board.push(last_move)
+            return SessionResult(success=False, message="Last move was not a promotion.")
+        piece_map = {"q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT}
+        piece_type = piece_map.get(piece_letter.lower(), chess.QUEEN)
+        correct_move = chess.Move(last_move.from_square, last_move.to_square, promotion=piece_type)
+        board.push(correct_move)
+        move_uci = correct_move.uci()
+        if self.steps:
+            self.steps[-1] = SessionStep(
+                step_index=self.steps[-1].step_index,
+                image_path=self.steps[-1].image_path,
+                success=True,
+                message="Promotion piece updated by player choice.",
+                move_uci=move_uci,
+                motion_step=self._move_to_motion_step(move_uci),
+            )
+        return SessionResult(success=True, message="Promotion fixed.", move_uci=move_uci)
+
     def commit_robot_move(self, move_uci: str) -> SessionResult:
         """
         Manually update the internal board after a robot move.
