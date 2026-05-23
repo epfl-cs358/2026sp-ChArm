@@ -107,12 +107,13 @@ void ScaraArm::moveByZ(float mm) {
 bool ScaraArm::moveXYZ(float x, float y, float z) {
     beforeMove();
     leadScrew.moveTo_mm(z);
-    return moveXY(x, y);
+    bool result = moveXY(x, y);
     afterMove();
+    return result;
 }
 
-void ScaraArm::moveJ1(float deg) { joint1.moveTo(deg); sync(); }
-void ScaraArm::moveJ2(float deg) { joint2.moveTo(deg); sync(); }
+void ScaraArm::moveJ1(float deg) { beforeMove(); joint1.moveTo(deg); afterMove(); sync(); }
+void ScaraArm::moveJ2(float deg) { beforeMove(); joint2.moveTo(deg); afterMove(); sync(); }
 
 void ScaraArm::openGripper()              { gripper.open(); }
 void ScaraArm::closeGripper()             { gripper.close(); }

@@ -92,11 +92,9 @@ void UIControllerESP32::processLine(WiFiClient& client, const String& line) {
         pendingLcdUpdate = true;
 
     } else if (line.startsWith("BOT_MOVE ")) {
-        String uci = line.substring(9);
-        uci.trim();
-        String readable = uci.substring(0, 2) + "->" + uci.substring(2, 4);
-        if (uci.length() == 5) readable += uci.charAt(4);  // promotion piece
-        uiState.setBotMove(readable);
+        String label = line.substring(9);
+        label.trim();
+        uiState.setBotMove(label);
         pendingLcdUpdate = true;
 
     } else if (line.equalsIgnoreCase("BOT_MOVING")) {

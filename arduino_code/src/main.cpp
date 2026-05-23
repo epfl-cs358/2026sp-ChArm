@@ -396,8 +396,10 @@ static void handleCommand(String cmd) {
     // ── Multi-char commands ───────────────────────────────────────────────────
     if (cmd == "OG") {
       arm.openGripper();
+      Serial.println("done");
     } else if (cmd == "CG") {
       arm.closeGripper();
+      Serial.println("done");
     } else if (cmd == "GS") {
       Serial.println(arm.gripperOpen() ? "Gripper: open" : "Gripper: closed");
 
@@ -408,16 +410,19 @@ static void handleCommand(String cmd) {
       float deg = cmd.substring(6).toFloat();
       arm.moveJ1(arm.j1Angle() + deg);
       Serial.print("[jog] J1 -> "); Serial.println(arm.j1Angle());
+      Serial.println("done");
 
     } else if (cmd.startsWith("jogJ2 ")) {
       float deg = cmd.substring(6).toFloat();
       arm.moveJ2(arm.j2Angle() + deg);
       Serial.print("[jog] J2 -> "); Serial.println(arm.j2Angle());
+      Serial.println("done");
 
     } else if (cmd.startsWith("jogZ ")) {
       float mm = cmd.substring(5).toFloat();
       arm.moveByZ(mm);
       Serial.print("[jog] Z -> "); Serial.println(arm.z());
+      Serial.println("done");
 
     } else if (cmd.startsWith("angleX ")) {
       arm.moveJ1(cmd.substring(7).toFloat());
@@ -453,6 +458,7 @@ static void handleCommand(String cmd) {
     } else if (cmd == "home") {
       Serial.println("Going home: J1=0, J2=0, Z=hover");
       arm.goHome();
+      Serial.println("home done");
 
     } else if (cmd.startsWith("pick ")) {
       String vals = cmd.substring(5);

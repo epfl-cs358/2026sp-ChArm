@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ChArm chess game")
     parser.add_argument(
         "--esp32-host",
-        default="172.21.71.52",
+        default="172.21.70.102",
         help="IP address of the ESP32 UI box.",
     )
     parser.add_argument(

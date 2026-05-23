@@ -31,6 +31,7 @@ private:
     unsigned long debounceMs;
     unsigned long lastButtonChangeMs;
     unsigned long lastEncoderMs;
+    bool encoderWaitingForHigh;  // true after event fires; blocks until CLK returns HIGH
 };
 
 #endif

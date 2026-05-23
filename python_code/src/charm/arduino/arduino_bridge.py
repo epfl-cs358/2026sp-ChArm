@@ -69,8 +69,8 @@ def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: th
 
 
 _TERMINATION_SUFFIXES = ("done", "failed")
-_TERMINATION_PREFIXES = ("invalid", "usage", "bad ", "going home", "board not", "trash not")
-_COMMAND_TIMEOUT_S = 60.0   # max seconds to wait for the Mega to finish a command
+_TERMINATION_PREFIXES = ("invalid", "usage", "bad ", "board not", "trash not")
+_COMMAND_TIMEOUT_S = 120.0  # max seconds to wait for the Mega to finish a command
 
 
 def send_command(command: str, ser: serial.Serial, lock: threading.Lock) -> str:

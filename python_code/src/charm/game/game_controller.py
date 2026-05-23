@@ -167,9 +167,11 @@ class GameController:
             print("[DEBUG] RETURN TRUE: check_board success", flush=True)
             print("=======================================================\n", flush=True)
             if self.session.robot_moves_first():
-                # Player chose black — bot (white) moves first; _do_robot_move
-                # sends player_turn_white + bot_thinking internally.
-                self._do_robot_move()
+                # Player chose black — bot (white) moves first.
+                # Start the robot move in a background thread so BOARD_OK is
+                # sent back to the ESP32 immediately (before the 10-second
+                # BOARD_TIMEOUT fires while the arm is still moving).
+                threading.Thread(target=self._do_robot_move, daemon=True).start()
             else:
                 self.ui_link.player_turn_white()
                 self._write_state("player_turn")

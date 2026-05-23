@@ -10,6 +10,7 @@ ButtonInput::ButtonInput(int pinCLK, int pinDT, int pinSW) {
     this->debounceMs = 20;
     this->lastButtonChangeMs = 0;
     this->lastEncoderMs = 0;
+    this->encoderWaitingForHigh = false;
 }
 
 void ButtonInput::begin() {
@@ -23,14 +24,23 @@ void ButtonInput::begin() {
 }
 
 InputEvent ButtonInput::readEvent() {
-    // Check encoder rotation with debounce
+    // Check encoder rotation with debounce.
+    // Strategy: fire on the first falling edge after 80ms of quiet, then require
+    // CLK to return HIGH before accepting another event.  This prevents late
+    // bounces (encoders that bounce >50ms) from registering as extra clicks.
     unsigned long now = millis();
     bool currentCLKState = digitalRead(pinCLK);
     if (currentCLKState != lastCLKState) {
         lastCLKState = currentCLKState;
-        if (!currentCLKState && (now - lastEncoderMs >= 50)) {  // Falling edge + debounce
-            lastEncoderMs = now;
+        lastEncoderMs = now;  // reset timer on every edge so late bounces stay filtered
+
+        if (encoderWaitingForHigh) {
+            // Waiting for CLK to settle back HIGH after an event fired
+            if (currentCLKState == HIGH) encoderWaitingForHigh = false;
+        } else if (!currentCLKState) {
+            // Falling edge: read direction and fire
             bool dtState = digitalRead(pinDT);
+            encoderWaitingForHigh = true;
             if (dtState != currentCLKState) {
                 return INPUT_NEXT;  // Clockwise
             } else {
