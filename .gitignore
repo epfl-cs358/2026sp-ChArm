@@ -30,6 +30,9 @@ Thumbs.db
 *.swp
 .idea/
 
-# AI CLI / Assistant configs
+# AI CLI / Assistant configs and plans
 .claude/
 .antigravitycli/
+*.md
+!README.md
+!**/README.md
