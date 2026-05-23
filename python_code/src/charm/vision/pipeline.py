@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -18,20 +20,37 @@ from charm.vision.piece_color_detector import (
     draw_piece_color_debug,
 )
 
+_PYTHON_CODE_DIR = Path(__file__).resolve().parents[3]
+CV_TUNING_PATH = _PYTHON_CODE_DIR / "cv_tuning.json"
+
+_CV_TUNING_DEFAULTS = {
+    "occupancy_threshold": 4.0,
+    "occupancy_delta_threshold": 12.0,
+    "canny_low": 15,
+    "canny_high": 50,
+    "occupancy_std_weight": 0.4,
+    "white_threshold": 80.0,
+    "black_threshold": 80.0,
+    "white_delta_threshold": 5.0,
+    "black_delta_threshold": -30.0,
+}
+
+
+def load_cv_tuning() -> dict:
+    try:
+        return {**_CV_TUNING_DEFAULTS, **json.loads(CV_TUNING_PATH.read_text())}
+    except Exception:
+        return dict(_CV_TUNING_DEFAULTS)
+
 
 @dataclass
 class PipelineOptions:
-    """Compat shim — the pipeline is fully hardcoded after the cv-vision-updates
-    retune, so these fields are accepted but ignored. Kept so callers in
-    ``game_session`` / ``vision_integration`` / the webapp keep importing it.
-    """
-
-    occupancy_threshold: float = 12.0
-    occupancy_delta_threshold: float = 12.0
-    white_threshold: float = 90.0
-    black_threshold: float = 90.0
-    white_delta_threshold: float = 5.0
-    black_delta_threshold: float = -30.0
+    occupancy_threshold: Optional[float] = None
+    occupancy_delta_threshold: Optional[float] = None
+    white_threshold: Optional[float] = None
+    black_threshold: Optional[float] = None
+    white_delta_threshold: Optional[float] = None
+    black_delta_threshold: Optional[float] = None
     warp_size: int = 800
     reference_image_path: Optional[str] = None
 
@@ -72,33 +91,34 @@ def run_board_pipeline(
         4) piece color detection
         5) bitmap generation
 
-    The ``options`` argument is accepted for backward compatibility with callers
-    that still pass a ``PipelineOptions`` instance, but the pipeline is fully
-    hardcoded after the cv-vision-updates retune (occupancy_threshold=12.0,
-    white/black piece thresholds=90, warp size 800). The values inside
-    ``options`` are intentionally ignored.
+    When ``options`` is None (or a field is None), threshold values are loaded
+    from ``cv_tuning.json`` so the LCD controller and webapp always share the
+    same tuned defaults.
     """
-    del options  # compat-only, see docstring
+    tuning = load_cv_tuning()
+    if options is None:
+        options = PipelineOptions()
+
+    occupancy_threshold = options.occupancy_threshold if options.occupancy_threshold is not None else tuning["occupancy_threshold"]
+    white_threshold = options.white_threshold if options.white_threshold is not None else tuning["white_threshold"]
+    black_threshold = options.black_threshold if options.black_threshold is not None else tuning["black_threshold"]
+    warp_size = options.warp_size
+
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image from path: {image_path}")
 
-    # Keep compatibility with the current main.py / result structure.
-    # These are placeholder copies because the earlier ROI / corners stages
-    # are no longer used in this simplified pipeline.
     roi_debug_image = image.copy()
     cropped_board_image = image.copy()
     preprocessing_debug_image = image.copy()
     corners_debug_image = image.copy()
-
-    # Placeholder debug images to keep the result structure stable
     black_mask_debug_image = image.copy()
     color_mask_debug_image = image.copy()
 
     # Normalize to a fixed square size
     warped_board = cv2.resize(
         image,
-        (800, 800),
+        (warp_size, warp_size),
         interpolation=cv2.INTER_CUBIC,
     )
 
@@ -107,7 +127,7 @@ def run_board_pipeline(
     cells = extract_8x8_cells(warped_board)
 
     # Occupancy detection
-    occupancy_results = detect_occupancy(cells, threshold=12.0)
+    occupancy_results = detect_occupancy(cells, threshold=occupancy_threshold)
     occupancy_matrix = occupancy_to_matrix(occupancy_results)
     occupancy_debug_image = draw_occupancy_debug(
         warped_board,
@@ -119,8 +139,8 @@ def run_board_pipeline(
     color_results = detect_piece_colors(
         cells,
         occupancy_results,
-        white_threshold=90,
-        black_threshold=90,
+        white_threshold=white_threshold,
+        black_threshold=black_threshold,
     )
     piece_color_debug_image = draw_piece_color_debug(
         warped_board,

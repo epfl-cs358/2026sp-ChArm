@@ -20,7 +20,6 @@ import {
   ShieldCheck,
   Square,
   Swords,
-  Terminal,
   UserRound,
   XCircle,
   Zap,
@@ -31,9 +30,12 @@ import { imageSrc } from "@/lib/image";
 import {
   CalibrationData,
   DEFAULT_PARAMS,
+  GameEvaluation,
+  GameSessionResult,
   GameStepResult,
   RobotPoint3D,
   PipelineResult,
+  PlayerMoveRating,
   RobotStatus,
 } from "@/lib/types";
 import ChessBoard from "@/components/ChessBoard";
@@ -220,28 +222,70 @@ function BoardPiecesSvg({ game, visible, opacity }: { game: Chess; visible: bool
   );
 }
 
-function LogicalBoard({ game, lastMove }: { game: Chess; lastMove: string | null }) {
+function LogicalBoard({
+  game,
+  lastMove,
+  selectedSquare,
+  legalTargets,
+  onSquareClick,
+  disabled,
+}: {
+  game: Chess;
+  lastMove: string | null;
+  selectedSquare?: string | null;
+  legalTargets?: Set<string>;
+  onSquareClick?: (square: string) => void;
+  disabled?: boolean;
+}) {
   const board = useMemo(() => game.board(), [game]);
+  const interactive = Boolean(onSquareClick) && !disabled;
   return (
-    <div className="mx-auto w-full max-w-[300px]">
+    <div className="mx-auto w-full max-w-[320px]">
       <div className="relative grid aspect-square grid-cols-8 grid-rows-8 overflow-hidden rounded-md border border-border">
         {board.map((row, rowIndex) =>
           row.map((piece, colIndex) => {
             const square = `${FILES[colIndex]}${RANKS[rowIndex]}`;
             const light = (rowIndex + colIndex) % 2 === 0;
-            const highlighted = lastMove?.slice(0, 2) === square || lastMove?.slice(2, 4) === square;
+            const lastMoveHl = lastMove?.slice(0, 2) === square || lastMove?.slice(2, 4) === square;
+            const selected = selectedSquare === square;
+            const isTarget = legalTargets?.has(square);
             const pieceImage = piece ? PIECE_IMAGE_PATHS[`${piece.color}${piece.type}`] : null;
+            const background = selected
+              ? "oklch(0.82 0.16 145 / 0.55)"
+              : lastMoveHl
+                ? "oklch(0.78 0.14 210 / 0.55)"
+                : light ? "var(--charm-board-light)" : "var(--charm-board-dark)";
             return (
-              <div key={square} className="relative flex min-h-0 min-w-0 items-center justify-center"
+              <button
+                type="button"
+                key={square}
+                aria-label={`square ${square}`}
+                disabled={!interactive}
+                onClick={interactive ? () => onSquareClick?.(square) : undefined}
+                className="relative flex min-h-0 min-w-0 items-center justify-center p-0"
                 style={{
-                  background: highlighted ? "oklch(0.78 0.14 210 / 0.55)"
-                    : light ? "var(--charm-board-light)" : "var(--charm-board-dark)",
+                  background,
+                  cursor: interactive ? "pointer" : "default",
+                  border: "none",
                 }}>
                 {pieceImage && (
                   <span aria-hidden="true" className="block h-[92%] w-[92%] bg-contain bg-center bg-no-repeat"
                     style={{ backgroundImage: `url(${pieceImage})` }} />
                 )}
-              </div>
+                {isTarget && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute"
+                    style={{
+                      width: piece ? "82%" : "32%",
+                      height: piece ? "82%" : "32%",
+                      borderRadius: "9999px",
+                      background: piece ? "transparent" : "oklch(0.55 0.2 145 / 0.55)",
+                      border: piece ? "3px solid oklch(0.65 0.22 25 / 0.7)" : "none",
+                    }}
+                  />
+                )}
+              </button>
             );
           }),
         )}
@@ -296,6 +340,90 @@ function ImagePanel({ title, image, active }: { title: string; image?: string; a
         ? <img src={imageSrc(image)} alt={title} className="h-32 w-full object-contain" />
         : <div className="flex h-32 items-center justify-center font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>waiting</div>}
     </div>
+  );
+}
+
+const RATING_STYLE: Record<PlayerMoveRating, { color: string; emoji: string }> = {
+  Excellent: { color: "oklch(0.78 0.18 145)", emoji: "👑" },
+  Good: { color: "oklch(0.78 0.16 175)", emoji: "✅" },
+  Inaccuracy: { color: "oklch(0.78 0.14 95)", emoji: "⚠️" },
+  Mistake: { color: "oklch(0.72 0.18 65)", emoji: "❌" },
+  Blunder: { color: "oklch(0.65 0.22 25)", emoji: "🚨" },
+};
+
+function GameEvaluationCard({ evaluation }: { evaluation: GameEvaluation | null }) {
+  // Map win % to a horizontal split between white (top of bar) and black.
+  const winPct = evaluation?.win_percentage ?? 50;
+  const whiteShare = Math.max(2, Math.min(98, winPct));
+  const blackShare = 100 - whiteShare;
+  const ratingStyle = evaluation?.player_move_rating
+    ? RATING_STYLE[evaluation.player_move_rating]
+    : null;
+
+  let positionLine = "Position is equal (0.0)";
+  if (evaluation) {
+    if (evaluation.mate && evaluation.mate !== 0) {
+      const winner = evaluation.mate > 0 ? "White" : "Black";
+      positionLine = `${winner} has a forced mate in ${Math.abs(evaluation.mate)}`;
+    } else if (evaluation.winning_color === "white") {
+      positionLine = `White is winning (${evaluation.score})`;
+    } else if (evaluation.winning_color === "black") {
+      positionLine = `Black is winning (${evaluation.score})`;
+    } else {
+      positionLine = `Position is equal (${evaluation.score})`;
+    }
+  }
+
+  return (
+    <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+      <CardHeader className="px-4 pt-4 pb-2">
+        <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game Evaluation</h2>
+      </CardHeader>
+      <CardContent className="px-4 pb-4 space-y-3">
+        <div className="flex items-center gap-3">
+          {/* Vertical eval bar — white on top, black on bottom (Chess.com style). */}
+          <div
+            className="relative h-40 w-5 overflow-hidden rounded border"
+            style={{ borderColor: "var(--charm-border)" }}
+            aria-label="evaluation bar"
+          >
+            <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
+            <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
+            <div className="pointer-events-none absolute inset-x-0" style={{ top: "50%", borderTop: "1px dashed oklch(0 0 0 / 0.35)" }} />
+          </div>
+          <div className="flex-1 space-y-1">
+            <p className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>
+              {evaluation?.score ?? "0.0"}
+            </p>
+            <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>{positionLine}</p>
+            <p className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+              Win probability (white): <span style={{ color: "var(--charm-cyan)" }}>{winPct.toFixed(1)}%</span>
+            </p>
+          </div>
+        </div>
+        {evaluation?.player_move_rating && ratingStyle && (
+          <div
+            className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
+            style={{ borderColor: ratingStyle.color, background: "transparent" }}
+          >
+            <span style={{ color: ratingStyle.color }}>
+              {ratingStyle.emoji} {evaluation.player_move_rating}
+              {evaluation.player_cp_loss != null && evaluation.player_cp_loss > 0 && (
+                <span style={{ color: "var(--charm-muted)" }}>
+                  {" "}
+                  · -{(evaluation.player_cp_loss / 100).toFixed(2)} pawns
+                </span>
+              )}
+            </span>
+            {evaluation.best_move_suggestion && (
+              <span style={{ color: "var(--charm-muted)" }}>
+                best: <span style={{ color: "var(--charm-cyan)" }}>{evaluation.best_move_suggestion}</span>
+              </span>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -362,7 +490,6 @@ function HeaderSystemStatus({ robotStatus, calibration, activeModel }: {
 export default function Dashboard() {
   const [game, setGame] = useState(() => new Chess());
   const [turnState, setTurnState] = useState<TurnState>("arm_calibrate");
-  const [armCalibrated, setArmCalibrated] = useState(false);
   const [gameSessionStarted, setGameSessionStarted] = useState(false);
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [stepResult, setStepResult] = useState<GameStepResult | null>(null);
@@ -383,16 +510,32 @@ export default function Dashboard() {
   const [lastCapturePath, setLastCapturePath] = useState<string | null>(null);
   const [showManualCalibrationModal, setShowManualCalibrationModal] = useState(false);
   const [overlayOpen, setOverlayOpen] = useState(false);
-  const [robotStatus, setRobotStatus] = useState<RobotStatus | null>(null);
   // Render with deterministic defaults on the server; hydrate from
   // localStorage in an effect after mount so SSR and the first client
   // render agree (avoids React hydration mismatches).
   const [robotPort, setRobotPort] = useState<string>(DEFAULT_SERIAL_PORT);
-  const { calibration, refresh: refreshCalibration, setCalibration } = useCalibration();
+  const {
+    calibration,
+    refresh: refreshCalibration,
+    setCalibration,
+    armCalibrated,
+    setArmCalibrated,
+    robotStatus,
+    setRobotStatus,
+    refreshRobotStatus,
+  } = useCalibration();
   const [difficulty, setDifficulty] = useState<0 | 1 | 2>(1);
   const [skillLevel, setSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
   const [showSkillModal, setShowSkillModal] = useState(false);
   const [draftSkillLevel, setDraftSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
+
+  // Interactive play state.
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [legalTargets, setLegalTargets] = useState<Set<string>>(new Set());
+  const [evaluation, setEvaluation] = useState<GameEvaluation | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [robotArmPlay, setRobotArmPlay] = useState(false);
+  const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
 
   useEffect(() => {
     const storedPort = window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY);
@@ -408,11 +551,9 @@ export default function Dashboard() {
   }, []);
   const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
 
-  // ── play_game.py controller (LCD) ──────────────────────────────────────
+  // ── In-process LCD controller link ─────────────────────────────────────
   const [controllerRunning, setControllerRunning] = useState(false);
-  const [controllerLog, setControllerLog] = useState<string[]>([]);
   const [controllerBusy, setControllerBusy] = useState(false);
-  const [showControllerLog, setShowControllerLog] = useState(false);
   const [controllerPhase, setControllerPhase] = useState<ControllerPhase>("idle");
   const [controllerMoves, setControllerMoves] = useState<string[]>([]);
   const [controllerPlayerColor, setControllerPlayerColor] = useState<"white" | "black" | null>(null);
@@ -425,7 +566,6 @@ export default function Dashboard() {
         if (stopped) return;
         const running = !!s.running;
         setControllerRunning(running);
-        if (s.log_tail) setControllerLog(s.log_tail);
 
         if (!running) {
           setControllerPhase("idle");
@@ -564,7 +704,6 @@ export default function Dashboard() {
           engine_path: DEFAULT_ENGINE_PATH,
         });
         setControllerRunning(!!s.running);
-        setShowControllerLog(true);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Controller toggle failed");
@@ -610,11 +749,13 @@ export default function Dashboard() {
       setArmCalibrated(true);
       setGameSessionStarted(false);
       setTurnState("human_turn");
+      // Tell the LCD the arm finished homing so it returns to MENU (mode 1).
+      void api.lcdSetMode(1).catch(() => undefined);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Arm calibration failed");
       setTurnState("error");
     }
-  }, [robotPort, robotStatus, turnState]);
+  }, [robotPort, robotStatus, turnState, setArmCalibrated]);
 
   const runRecalibrate = useCallback(async () => {
     if (turnState === "arm_calibrating" || busy) return;
@@ -637,14 +778,145 @@ export default function Dashboard() {
       ));
       setArmCalibrated(true);
       setTurnState(resumeState === "arm_calibrate" ? "human_turn" : resumeState);
+      void api.lcdSetMode(1).catch(() => undefined);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Arm recalibration failed");
       setTurnState("error");
     }
-  }, [robotPort, robotStatus, turnState, busy]);
+  }, [robotPort, robotStatus, turnState, busy, setArmCalibrated]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const finishRobotMove = useCallback((_finishedMove: ArmMove) => {}, []);
+
+  const applySessionResponse = useCallback((session: GameSessionResult) => {
+    if (session.fen) {
+      try {
+        setGame(new Chess(session.fen));
+      } catch {
+        // ignore — let the next poll correct it
+      }
+    }
+    if (session.evaluation) setEvaluation(session.evaluation);
+    const lastUci = session.robot_move?.move_uci ?? session.human_move?.move_uci ?? null;
+    if (lastUci) setLastMove(lastUci);
+    if (session.human_move?.move_uci) {
+      armMoveId.current += 1;
+      setMoveLog((current) => [
+        ...current,
+        `You: ${session.human_move?.san ?? session.human_move?.move_uci}`,
+      ]);
+    }
+    if (session.robot_move?.move_uci) {
+      armMoveId.current += 1;
+      setMoveLog((current) => [
+        ...current,
+        `Robot: ${session.robot_move?.san ?? session.robot_move?.move_uci}`,
+      ]);
+    }
+  }, []);
+
+  const submitManualMove = useCallback(async (uci: string) => {
+    if (manualBusy) return;
+    setManualBusy(true);
+    setError(null);
+    try {
+      const session = await api.manualMove({
+        uci,
+        execute_robot: robotArmPlay,
+        port: resolveSerialPort(robotPort),
+        baud: 115200,
+        difficulty,
+        skill_level: skillLevel,
+      });
+      if (session.status === "robot_move_failed") {
+        setError(session.robot_move?.message ?? "Robot reply failed");
+      }
+      applySessionResponse(session);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Move failed");
+    } finally {
+      setManualBusy(false);
+      setSelectedSquare(null);
+      setLegalTargets(new Set());
+    }
+  }, [applySessionResponse, difficulty, manualBusy, robotArmPlay, robotPort, skillLevel]);
+
+  const startSimulationSession = useCallback(async () => {
+    if (manualBusy) return;
+    setManualBusy(true);
+    setError(null);
+    try {
+      const session = await api.manualStart({
+        player_color: "white",
+        difficulty,
+        skill_level: skillLevel,
+        execute_robot: robotArmPlay,
+        port: resolveSerialPort(robotPort),
+        baud: 115200,
+      });
+      if (session.status !== "ok") {
+        setError(session.started?.message ?? "Failed to start session");
+        return;
+      }
+      setGameSessionStarted(true);
+      setMoveLog((current) => [...current, session.started?.message ?? "Game started"]);
+      applySessionResponse(session);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to start session");
+    } finally {
+      setManualBusy(false);
+    }
+  }, [applySessionResponse, difficulty, manualBusy, robotArmPlay, robotPort, skillLevel]);
+
+  const handleSquareClick = useCallback((square: string) => {
+    if (manualBusy || pendingPromotion) return;
+    if (!gameSessionStarted) {
+      setError("Start the game before making a move (use the Start Game button).");
+      return;
+    }
+    if (game.isGameOver()) return;
+    if (game.turn() !== (game.turn() === "w" ? "w" : "b")) {
+      // Should never trigger — just narrowing types.
+    }
+    // Only allow moves for the side whose turn it is.
+    const sideToMove = game.turn();
+    const piece = game.get(square as never);
+    if (selectedSquare) {
+      if (square === selectedSquare) {
+        // Deselect on second click of the same square.
+        setSelectedSquare(null);
+        setLegalTargets(new Set());
+        return;
+      }
+      if (legalTargets.has(square)) {
+        const fromPiece = game.get(selectedSquare as never);
+        const isPawn = fromPiece?.type === "p";
+        const promotionRank = sideToMove === "w" ? "8" : "1";
+        if (isPawn && square[1] === promotionRank) {
+          setPendingPromotion({ from: selectedSquare, to: square });
+          return;
+        }
+        void submitManualMove(`${selectedSquare}${square}`);
+        return;
+      }
+      // Clicked an illegal square — fall through to selection logic.
+    }
+    if (piece && piece.color === sideToMove) {
+      const moves = game.moves({ square: square as never, verbose: true }) as Array<{ to: string }>;
+      setSelectedSquare(square);
+      setLegalTargets(new Set(moves.map((m) => m.to)));
+    } else {
+      setSelectedSquare(null);
+      setLegalTargets(new Set());
+    }
+  }, [game, gameSessionStarted, legalTargets, manualBusy, pendingPromotion, selectedSquare, submitManualMove]);
+
+  const confirmPromotion = useCallback((piece: "q" | "r" | "b" | "n") => {
+    if (!pendingPromotion) return;
+    const { from, to } = pendingPromotion;
+    setPendingPromotion(null);
+    void submitManualMove(`${from}${to}${piece}`);
+  }, [pendingPromotion, submitManualMove]);
 
   const processHumanTurn = useCallback(async () => {
     if (!armCalibrated) {
@@ -816,8 +1088,8 @@ export default function Dashboard() {
             onClick={toggleController}
             disabled={controllerBusy}
             title={controllerRunning
-              ? "Stop play_game.py (LCD controller flow)"
-              : "Launch play_game.py — drives the LCD/rotary controller flow"}
+              ? "Stop the in-process LCD controller"
+              : "Start the in-process LCD controller (rotary box + display)"}
             className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors disabled:opacity-50"
             style={controllerRunning ? {
               borderColor: "oklch(0.65 0.22 25 / 0.6)",
@@ -839,29 +1111,25 @@ export default function Dashboard() {
               {controllerRunning ? "Stop LCD" : "Run LCD"}
             </span>
           </button>
-          {controllerRunning ? (
-            <Badge
-              variant="outline"
-              title={
-                controllerPlayerColor
-                  ? `LCD game in progress · player=${controllerPlayerColor} · ${controllerMoves.length} moves played`
-                  : "LCD controller active — webapp controls are read-only"
-              }
-              style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", color: "var(--charm-cyan)" }}>
-              LCD: {controllerPhaseLabel(controllerPhase)}
-            </Badge>
-          ) : null}
-          {controllerLog.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => setShowControllerLog((v) => !v)}
-              title="Toggle play_game.py log tail"
-              className="flex items-center gap-1.5 rounded-md border px-2 py-1.5 font-jetbrains text-xs"
-              style={{ borderColor: "var(--charm-border)", color: "var(--charm-muted)" }}>
-              <Terminal className="size-3.5" />
-              <span>{showControllerLog ? "Hide log" : "Show log"}</span>
-            </button>
-          ) : null}
+          <Badge
+            variant="outline"
+            title={
+              controllerRunning
+                ? (controllerPlayerColor
+                  ? `LCD link active · player=${controllerPlayerColor} · ${controllerMoves.length} moves`
+                  : "LCD link active — buttons on the box drive the game")
+                : "LCD controller is not running"
+            }
+            style={{
+              borderColor: controllerRunning
+                ? "oklch(from var(--charm-cyan) l c h / 0.5)"
+                : "var(--charm-border)",
+              color: controllerRunning ? "var(--charm-cyan)" : "var(--charm-muted)",
+            }}>
+            {controllerRunning
+              ? `LCD Connected (${controllerPhaseLabel(controllerPhase)})`
+              : "LCD Disconnected"}
+          </Badge>
           <button
             type="button"
             onClick={() => { setDraftSkillLevel(skillLevel); setShowSkillModal(true); }}
@@ -920,28 +1188,6 @@ export default function Dashboard() {
       </div>
 
       <FlowRail state={turnState} armCalibrated={armCalibrated} />
-
-      {showControllerLog && (
-        <div className="rounded-md border p-3 font-jetbrains text-xs"
-          style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-          <div className="flex items-center justify-between mb-2">
-            <span style={{ color: "var(--charm-muted)" }}>
-              play_game.py · {controllerRunning ? "running" : "stopped"}
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowControllerLog(false)}
-              className="text-xs"
-              style={{ color: "var(--charm-muted)" }}>
-              close
-            </button>
-          </div>
-          <pre className="max-h-48 overflow-auto text-[11px] leading-relaxed whitespace-pre-wrap"
-            style={{ color: "var(--charm-text)" }}>
-            {controllerLog.length === 0 ? "(no output yet)" : controllerLog.join("\n")}
-          </pre>
-        </div>
-      )}
 
       {error && (
         <div className="rounded-md border px-4 py-3 text-sm font-jetbrains flex items-center gap-2"
@@ -1196,25 +1442,73 @@ export default function Dashboard() {
 
           {/* Game State card */}
           <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-            <CardHeader className="px-4 pt-4 pb-2">
+            <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
               <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game State</h2>
+              <label className="flex items-center gap-2 font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                <input
+                  type="checkbox"
+                  checked={robotArmPlay}
+                  onChange={(e) => setRobotArmPlay(e.target.checked)}
+                />
+                Robot Arm Play
+              </label>
             </CardHeader>
             <CardContent className="px-4 pb-4 space-y-3">
-              <LogicalBoard game={game} lastMove={lastMove} />
+              <LogicalBoard
+                game={game}
+                lastMove={lastMove}
+                selectedSquare={selectedSquare}
+                legalTargets={legalTargets}
+                onSquareClick={handleSquareClick}
+                disabled={!gameSessionStarted || manualBusy || game.isGameOver()}
+              />
+              {!gameSessionStarted && (
+                <Button
+                  className="w-full font-jetbrains"
+                  variant="outline"
+                  onClick={startSimulationSession}
+                  disabled={manualBusy}
+                >
+                  {manualBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                  Start Game (click-to-move)
+                </Button>
+              )}
               <div className="grid grid-cols-1 gap-2">
                 <div className="rounded-md border border-border p-2">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Last inferred move</p>
-                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>{stepResult?.inference.move_uci ?? "none"}</p>
+                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Turn</p>
+                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>
+                    {game.isGameOver() ? "Game over" : game.turn() === "w" ? "White to move" : "Black to move"}
+                  </p>
                 </div>
                 <div className="rounded-md border border-border p-2">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Mismatch count</p>
-                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{stepResult?.inference.mismatch_count ?? 0}</p>
+                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Last inferred move</p>
+                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>{stepResult?.inference.move_uci ?? lastMove ?? "none"}</p>
                 </div>
               </div>
             </CardContent>
           </Card>
+
+          {/* Game Evaluation card */}
+          <GameEvaluationCard evaluation={evaluation} />
         </div>
       </div>
+
+      {pendingPromotion && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm" style={{ background: "oklch(0 0 0 / 0.6)" }}>
+          <div className="rounded-md border p-4 shadow-2xl" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+            <p className="mb-3 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+              Promote to:
+            </p>
+            <div className="flex gap-2">
+              {(["q", "r", "b", "n"] as const).map((p) => (
+                <Button key={p} variant="outline" className="font-jetbrains uppercase" onClick={() => confirmPromotion(p)}>
+                  {p === "q" ? "Queen" : p === "r" ? "Rook" : p === "b" ? "Bishop" : "Knight"}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CNN model picker modal */}
       {showCnnModelModal && (
@@ -1321,7 +1615,13 @@ export default function Dashboard() {
                   Cancel
                 </button>
                 <button type="button"
-                  onClick={() => { setSkillLevel(draftSkillLevel); setSkillApplyToast({ level: draftSkillLevel, at: Date.now() }); setShowSkillModal(false); }}
+                  onClick={() => {
+                    setSkillLevel(draftSkillLevel);
+                    setSkillApplyToast({ level: draftSkillLevel, at: Date.now() });
+                    setShowSkillModal(false);
+                    // Push the change to the LCD when the in-process controller is active.
+                    void api.lcdSetDifficulty(draftSkillLevel).catch(() => undefined);
+                  }}
                   disabled={draftSkillLevel === skillLevel}
                   className="rounded-md border px-3 py-1.5 font-jetbrains text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "oklch(from var(--charm-cyan) l c h / 0.15)", color: "var(--charm-cyan)" }}>

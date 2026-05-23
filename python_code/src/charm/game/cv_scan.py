@@ -20,8 +20,12 @@ the combined data.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from charm.vision.cnn_classifier import CnnBoardClassifier
 
 import cv2
 
@@ -53,6 +57,11 @@ LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
 # Matches webapp_backend.api_server.CNN_MODELS_DIR / CNN_ACTIVE_POINTER.
 CNN_MODELS_DIR = PYTHON_CODE_DIR / "models"
 CNN_ACTIVE_POINTER = CNN_MODELS_DIR / "active.json"
+
+# Cached classifier — re-used across scans, invalidated when active.json changes.
+_ACTIVE_CLASSIFIER: Optional["CnnBoardClassifier"] = None
+_ACTIVE_RUN_ID: Optional[str] = None
+_model_lock = threading.Lock()
 
 
 def _flip_bitmap_180(b: list[list[int]]) -> list[list[int]]:
@@ -89,17 +98,23 @@ def _read_active_cnn_run_id() -> Optional[str]:
         return None
 
 
-def _load_active_cnn_classifier():
+def _load_active_cnn_classifier() -> Optional["CnnBoardClassifier"]:
+    global _ACTIVE_CLASSIFIER, _ACTIVE_RUN_ID
     run_id = _read_active_cnn_run_id()
     if not run_id:
         return None
-    model_dir = CNN_MODELS_DIR / run_id
-    model_path = model_dir / "chess_cnn.keras"
-    indices_path = model_dir / "class_indices.json"
-    if not model_path.exists() or not indices_path.exists():
-        return None
-    from charm.vision.cnn_classifier import CnnBoardClassifier
-    return CnnBoardClassifier(str(model_path), str(indices_path))
+    with _model_lock:
+        if run_id == _ACTIVE_RUN_ID and _ACTIVE_CLASSIFIER is not None:
+            return _ACTIVE_CLASSIFIER
+        model_dir = CNN_MODELS_DIR / run_id
+        model_path = model_dir / "chess_cnn.keras"
+        indices_path = model_dir / "class_indices.json"
+        if not model_path.exists() or not indices_path.exists():
+            return None
+        from charm.vision.cnn_classifier import CnnBoardClassifier
+        _ACTIVE_CLASSIFIER = CnnBoardClassifier(str(model_path), str(indices_path))
+        _ACTIVE_RUN_ID = run_id
+        return _ACTIVE_CLASSIFIER
 
 
 def make_scan_vision() -> Callable[[], CaptureOutcome]:
@@ -131,7 +146,8 @@ def make_scan_cnn() -> Callable[[], CaptureOutcome]:
         if classifier is None:
             raise RuntimeError("Active CNN model files missing")
         cells = extract_8x8_cells(refined)
-        result = classifier.classify_cells(cells)
+        with _model_lock:
+            result = classifier.classify_cells(cells)
         wb = [[0] * 8 for _ in range(8)]
         bb = [[0] * 8 for _ in range(8)]
         for pred in result.predictions:

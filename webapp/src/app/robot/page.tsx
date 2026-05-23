@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Cable, Check, Crosshair, Database, Gamepad2, Home, MapPin, Play, RotateCcw, Save, SquareArrowOutUpRight, StepBack, StepForward, Trash2, Unplug, X } from "lucide-react";
 import { api } from "@/lib/api";
+import { useCalibration } from "@/lib/calibration-context";
 import { RobotCalibration, RobotCalibrationWrite, RobotCommandResult, RobotStatus } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -226,7 +227,14 @@ function OutputLog({ result, error }: { result: RobotCommandResult | null; error
 }
 
 export default function RobotPage() {
-  const [status, setStatus] = useState<RobotStatus | null>(null);
+  // status / armCalibrated live in CalibrationContext so they survive
+  // SPA navigation between the dashboard and this page.
+  const {
+    robotStatus: status,
+    setRobotStatus: setStatus,
+    armCalibrated,
+    setArmCalibrated,
+  } = useCalibration();
   const [form, setForm] = useState<RobotCalibrationWrite>(DEFAULT_FORM);
   const [port, setPort] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_SERIAL_PORT;
@@ -641,6 +649,7 @@ export default function RobotPage() {
       if (response.position) setLivePosition(response.position);
       const loadedBoardInfo = command === "board-info" ? applyBoardInfo(response) : false;
       if (!loadedBoardInfo) await refresh();
+      if (command === "arm-calibrate") setArmCalibrated(true);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Command failed");
     } finally {
@@ -690,6 +699,9 @@ export default function RobotPage() {
         <div className="flex items-center gap-2">
           <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: status?.robot_calibration.exists ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }}>
             {status?.robot_calibration.exists ? "calibrated" : "needs calibration"}
+          </Badge>
+          <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: armCalibrated ? "var(--charm-cyan)" : "oklch(0.72 0.18 65)" }}>
+            Arm {armCalibrated ? "homed" : "needs homing"}
           </Badge>
           <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: status?.serial_connected ? "var(--charm-cyan)" : "var(--charm-muted)" }}>
             {status?.serial_connected ? `connected ${status.active_port}` : "serial idle"}

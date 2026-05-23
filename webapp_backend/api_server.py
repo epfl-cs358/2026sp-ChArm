@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import base64
-import collections
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -26,6 +24,16 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_PATH))
 
 from webapp_backend import robot_adapter
+from charm.arduino.uiController_bridge import ArduinoUIControllerLink
+from charm.chess_engine import (
+    Evaluation,
+    classify_move_rating,
+    evaluate_position,
+    format_score,
+    win_percentage_from_cp,
+    winning_color,
+)
+from charm.game.game_controller import GameController, GameControllerConfig
 from charm.game.game_session import GameSession, SessionResult
 from charm.vision.pipeline import PipelineOptions, run_board_pipeline
 from charm.vision.cv_router import (
@@ -156,10 +164,46 @@ ANNOTATIONS_PATH = REPO_ROOT / "color_annotations.json"
 CLASSIFIER_STATUS_PATH = REPO_ROOT / "models" / "classifier_last_result.json"
 LATEST_CALIBRATED_PATH = PYTHON_CODE_DIR / "latest_calibrated.jpg"
 CV_ROUTER_CONFIG_PATH = PYTHON_CODE_DIR / "cv_router_config.json"
-# Shared with python_code/src/charm/game/game_controller.py
-CONTROLLER_GAME_STATE_FILE = PYTHON_CODE_DIR / "controller_game_state.json"
+CV_TUNING_PATH = PYTHON_CODE_DIR / "cv_tuning.json"
+
+_CV_TUNING_DEFAULTS = {
+    "occupancy_threshold": 4.0,
+    "occupancy_delta_threshold": 12.0,
+    "canny_low": 15,
+    "canny_high": 50,
+    "occupancy_std_weight": 0.4,
+    "white_threshold": 80.0,
+    "black_threshold": 80.0,
+    "white_delta_threshold": 5.0,
+    "black_delta_threshold": -30.0,
+}
+
+
+def _load_cv_tuning() -> dict:
+    try:
+        return {**_CV_TUNING_DEFAULTS, **json.loads(CV_TUNING_PATH.read_text())}
+    except Exception:
+        return dict(_CV_TUNING_DEFAULTS)
+
+
+def _save_cv_tuning(updates: dict) -> dict:
+    current = _load_cv_tuning()
+    current.update({k: v for k, v in updates.items() if k in _CV_TUNING_DEFAULTS})
+    CV_TUNING_PATH.write_text(json.dumps(current, indent=2))
+    return current
 DIFFICULTY_SKILL_LEVEL = {0: 5, 1: 12, 2: 20}
 ROBOT_BAUD_DEFAULT = 115200
+_STOCKFISH_FALLBACKS = ["/usr/games/stockfish", "/usr/bin/stockfish", "/usr/local/bin/stockfish"]
+
+
+def _resolve_stockfish_path(path: str) -> str:
+    import shutil
+    if shutil.which(path):
+        return path
+    for fb in _STOCKFISH_FALLBACKS:
+        if Path(fb).exists():
+            return fb
+    return path
 
 
 def _resolve_skill_level(skill_level: Optional[int], difficulty: int) -> int:
@@ -592,8 +636,6 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
         occupancy_results = detect_occupancy(
             occupancy_cells,
             threshold=p.occupancy_threshold,
-            reference_cells=reference_cells,
-            delta_threshold=p.occupancy_delta_threshold,
         )
         color_results = None  # filled in below via threshold path
         results["classifier"] = {"active": False, "name": None, "kind": "threshold"}
@@ -622,9 +664,6 @@ def run_pipeline(image: np.ndarray, p: PipelineParams) -> dict:
             occupancy_results,
             white_threshold=p.white_threshold,
             black_threshold=p.black_threshold,
-            reference_cells=reference_cells,
-            white_delta_threshold=p.white_delta_threshold,
-            black_delta_threshold=p.black_delta_threshold,
         )
 
     for r in color_results:
@@ -732,6 +771,8 @@ def _game_session_payload(
     robot_move: Optional[SessionResult] = None,
     robot_board_before: Optional[chess.Board] = None,
     robot_command: Optional[dict] = None,
+    player_command: Optional[dict] = None,
+    evaluation: Optional[dict] = None,
 ) -> dict:
     board = _GAME_SESSION.get_current_board()
     return {
@@ -745,6 +786,8 @@ def _game_session_payload(
         "human_move": _session_result_payload(human_move, human_board_before),
         "robot_move": _session_result_payload(robot_move, robot_board_before),
         "robot_command": robot_command,
+        "player_command": player_command,
+        "evaluation": evaluation,
         "timestamp": time.time(),
     }
 
@@ -772,6 +815,74 @@ def _execute_robot_session_move(move_uci: str, board: chess.Board, port: Optiona
     commands = robot_adapter.commands_for_request(payload)
     responses = robot_adapter.send_commands(commands, port, baud)
     return robot_adapter.response(responses, ROBOT_CAL_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Stockfish evaluation glue
+# ---------------------------------------------------------------------------
+
+
+_RATING_LCD_LABEL = {
+    "Blunder": "BLUNDER!",
+    "Mistake": "MISTAKE!",
+    "Inaccuracy": "INACCURACY",
+    "Good": "GOOD",
+    "Excellent": "EXCELLENT!",
+}
+
+
+def _evaluation_payload(evaluation: Evaluation) -> dict:
+    """Shape an Evaluation for the dashboard's Game Evaluation panel."""
+    return {
+        "score": format_score(evaluation.score_cp, evaluation.mate),
+        "score_cp": evaluation.score_cp,
+        "mate": evaluation.mate,
+        "winning_color": winning_color(evaluation.score_cp, evaluation.mate),
+        "win_percentage": round(win_percentage_from_cp(evaluation.score_cp, evaluation.mate), 1),
+        "best_move_uci": evaluation.best_move_uci,
+        "best_move_suggestion": evaluation.best_move_san,
+    }
+
+
+def _classify_player_move(
+    eval_before: Evaluation,
+    eval_after: Evaluation,
+    player_turn_white: bool,
+) -> dict:
+    """Translate before/after Stockfish evals into the player rating block."""
+    # Convert White-POV scores to the moving player's POV so a "loss" is
+    # always a drop in the moving side's eval.
+    sign = 1 if player_turn_white else -1
+    cp_before = (eval_before.score_cp or 0) * sign
+    cp_after = (eval_after.score_cp or 0) * sign
+
+    mate_before = eval_before.mate
+    mate_after = eval_after.mate
+    if not player_turn_white:
+        mate_before = -mate_before if mate_before is not None else None
+        mate_after = -mate_after if mate_after is not None else None
+
+    rating, cp_loss = classify_move_rating(cp_before, cp_after, mate_before, mate_after)
+    return {
+        "rating": rating,
+        "cp_loss": cp_loss,
+        "best_move_suggestion": eval_before.best_move_san,
+        "best_move_uci": eval_before.best_move_uci,
+    }
+
+
+def _flash_lcd_rating(rating: str) -> None:
+    """Best-effort flash of the move-quality term on the LCD."""
+    ui_link: Optional[ArduinoUIControllerLink] = _CONTROLLER_STATE.get("ui_link")
+    if ui_link is None:
+        return
+    label = _RATING_LCD_LABEL.get(rating)
+    if label is None:
+        return
+    try:
+        ui_link.error_msg(label)
+    except Exception as exc:
+        print(f"[lcd] flash failed: {exc!r}", flush=True)
 
 
 @app.get("/health")
@@ -819,8 +930,6 @@ def disconnect_robot():
 
 @app.get("/api/robot/position")
 def robot_position(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
-    if _controller_subprocess_running():
-        raise HTTPException(409, "LCD controller is running — arm commands blocked.")
     try:
         responses = robot_adapter.send_commands(["pos"], port, baud)
         return robot_adapter.response(responses, ROBOT_CAL_PATH)
@@ -829,19 +938,8 @@ def robot_position(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
         raise HTTPException(500, str(e))
 
 
-def _controller_subprocess_running() -> bool:
-    proc = _CONTROLLER_STATE["process"]
-    return proc is not None and proc.poll() is None
-
-
 @app.post("/api/robot/command")
 def robot_command(payload: RobotCommandPayload):
-    if _controller_subprocess_running():
-        raise HTTPException(
-            409,
-            "LCD controller is running — webapp arm commands are blocked "
-            "to avoid serial-port conflicts. Stop the LCD first.",
-        )
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         commands = robot_adapter.commands_for_request(payload_data)
@@ -877,17 +975,19 @@ def robot_command(payload: RobotCommandPayload):
         robot_adapter.close()
         raise HTTPException(500, str(e))
 
+    if payload.command == "arm-calibrate" and _controller_is_running():
+        try:
+            ui_link: Optional[ArduinoUIControllerLink] = _CONTROLLER_STATE.get("ui_link")
+            if ui_link is not None:
+                ui_link.set_mode(1)
+        except Exception as exc:
+            print(f"[lcd] SET_MODE 1 after calibration failed: {exc!r}", flush=True)
+
     return robot_adapter.response(responses, ROBOT_CAL_PATH)
 
 
 @app.post("/api/robot/inject-cal")
 def inject_board_cal(payload: RobotCommandPayload):
-    if _controller_subprocess_running():
-        raise HTTPException(
-            409,
-            "LCD controller is running — webapp arm commands are blocked "
-            "to avoid serial-port conflicts. Stop the LCD first.",
-        )
     try:
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         payload_data["command"] = "inject-cal"
@@ -903,8 +1003,6 @@ def inject_board_cal(payload: RobotCommandPayload):
 
 @app.get("/api/robot/eeprom")
 def robot_eeprom(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
-    if _controller_subprocess_running():
-        raise HTTPException(409, "LCD controller is running — arm commands blocked.")
     try:
         responses = robot_adapter.send_commands(["boardInfo"], port, baud)
         return robot_adapter.response(responses, ROBOT_CAL_PATH)
@@ -1288,12 +1386,14 @@ def _router_attempts_summary(result) -> dict:
 @app.get("/api/cv-config")
 def get_cv_config():
     cfg = _load_router_config()
+    tuning = _load_cv_tuning()
     return {
         "primary": cfg.primary,
         "attempts_each": cfg.attempts_each,
         "auto_save_validated": cfg.auto_save_validated,
         "dataset_name": cfg.dataset_name,
         "cnn_active": bool(_read_active_cnn_run_id()),
+        **tuning,
     }
 
 
@@ -1302,6 +1402,15 @@ class CvConfigPayload(BaseModel):
     attempts_each: Optional[int] = None
     auto_save_validated: Optional[bool] = None
     dataset_name: Optional[str] = None
+    occupancy_threshold: Optional[float] = None
+    occupancy_delta_threshold: Optional[float] = None
+    canny_low: Optional[int] = None
+    canny_high: Optional[int] = None
+    occupancy_std_weight: Optional[float] = None
+    white_threshold: Optional[float] = None
+    black_threshold: Optional[float] = None
+    white_delta_threshold: Optional[float] = None
+    black_delta_threshold: Optional[float] = None
 
 
 @app.post("/api/cv-config")
@@ -1323,6 +1432,12 @@ def post_cv_config(payload: CvConfigPayload):
             raise HTTPException(400, "dataset_name cannot be empty")
         cfg.dataset_name = name
     _save_router_config(cfg)
+    tuning_updates = {
+        k: v for k, v in payload.model_dump().items()
+        if k in _CV_TUNING_DEFAULTS and v is not None
+    }
+    if tuning_updates:
+        _save_cv_tuning(tuning_updates)
     return get_cv_config()
 
 
@@ -1370,12 +1485,6 @@ def game_session_reset():
 
 @app.post("/api/game/session/start")
 def game_session_start(payload: GameSessionPayload):
-    if _controller_subprocess_running():
-        raise HTTPException(
-            409,
-            "LCD controller is running — webapp game session is disabled. "
-            "Stop the LCD first or use the LCD buttons to play.",
-        )
     if payload.player_color not in {"white", "black"}:
         raise HTTPException(400, "player_color must be 'white' or 'black'")
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
@@ -1472,12 +1581,6 @@ def game_session_start(payload: GameSessionPayload):
 
 @app.post("/api/game/session/player-done")
 def game_session_player_done(payload: GameSessionTurnPayload):
-    if _controller_subprocess_running():
-        raise HTTPException(
-            409,
-            "LCD controller is running — webapp game session is disabled. "
-            "Stop the LCD first or use the LCD buttons to play.",
-        )
     if not _GAME_SESSION.is_game_started():
         raise HTTPException(400, "Game session has not started. Run /api/game/session/start first.")
     if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
@@ -1573,6 +1676,17 @@ def game_session_player_done(payload: GameSessionTurnPayload):
     if not commit_result.success:
         robot_result = commit_result
 
+    evaluation = _build_session_evaluation(
+        prev_eval=_evaluate_safe(human_board_copy, payload.engine_path, payload.think_time),
+        post_player_board=robot_board_copy,
+        final_board=_GAME_SESSION.get_current_board(),
+        engine_path=payload.engine_path,
+        think_time=payload.think_time,
+        player_turn_white=human_board_copy is not None and human_board_copy.turn == chess.WHITE,
+    )
+    if evaluation and evaluation.get("player_move_rating"):
+        _flash_lcd_rating(evaluation["player_move_rating"])
+
     return _game_session_payload(
         "ok",
         pipeline_result=pipeline_result,
@@ -1581,6 +1695,297 @@ def game_session_player_done(payload: GameSessionTurnPayload):
         robot_move=robot_result,
         robot_board_before=robot_board_copy,
         robot_command=robot_command,
+        evaluation=evaluation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manual click-to-move endpoint (Simulation + Remote Physical play modes)
+# ---------------------------------------------------------------------------
+
+
+class ManualStartPayload(BaseModel):
+    player_color: Literal["white", "black"] = "white"
+    difficulty: int = 1
+    skill_level: Optional[int] = None
+    engine_path: str = "stockfish"
+    think_time: float = 0.1
+    execute_robot: bool = False
+    port: Optional[str] = None
+    baud: int = ROBOT_BAUD_DEFAULT
+
+
+@app.post("/api/game/session/manual-start")
+def game_session_manual_start(payload: ManualStartPayload):
+    """Start a session from the standard chess position without using the camera.
+
+    Used by the dashboard's Simulation / Remote-Physical click-to-play modes
+    where the player isn't bringing the CV pipeline online. The session is
+    seeded with a fresh ``chess.Board()`` and ``start_game`` runs as usual,
+    so the rest of the pipeline (manual-move, evaluation, robot reply)
+    behaves identically.
+    """
+    if payload.player_color not in {"white", "black"}:
+        raise HTTPException(400, "player_color must be 'white' or 'black'")
+    if payload.difficulty not in DIFFICULTY_SKILL_LEVEL:
+        raise HTTPException(400, "difficulty must be 0, 1, or 2")
+
+    from charm.game.state_tracker import BoardStateTracker
+
+    _GAME_SESSION.reset()
+    _GAME_SESSION.tracker = BoardStateTracker(chess.Board())
+    _GAME_SESSION.initialized = True
+    _GAME_SESSION.flip_180 = False
+    started = _GAME_SESSION.start_game(payload.player_color)
+    if not started.success:
+        return _game_session_payload("start_failed", started=started)
+
+    # If the player chose black, the robot moves first — run that turn so
+    # the dashboard reflects an in-progress game immediately.
+    robot_result = None
+    robot_board_before = None
+    robot_command = None
+    if _GAME_SESSION.robot_moves_first():
+        robot_board_before = _GAME_SESSION.get_current_board()
+        robot_board_copy = robot_board_before.copy(stack=True) if robot_board_before is not None else None
+        skill_level = _resolve_skill_level(payload.skill_level, payload.difficulty)
+        robot_result = _GAME_SESSION.compute_robot_move(
+            engine_path=payload.engine_path,
+            think_time=payload.think_time,
+            skill_level=skill_level,
+        )
+        if robot_result.success and robot_result.move_uci and robot_board_copy is not None:
+            if payload.execute_robot:
+                try:
+                    robot_command = _execute_robot_session_move(
+                        robot_result.move_uci,
+                        robot_board_copy,
+                        payload.port,
+                        payload.baud,
+                    )
+                except Exception as exc:
+                    robot_adapter.close()
+                    raise HTTPException(500, f"Robot command failed: {exc}") from exc
+            commit_result = _GAME_SESSION.commit_robot_move(robot_result.move_uci)
+            if not commit_result.success:
+                robot_result = commit_result
+
+    panel = _build_session_evaluation(
+        prev_eval=_evaluate_safe(chess.Board(), payload.engine_path, payload.think_time),
+        post_player_board=_GAME_SESSION.get_current_board(),
+        final_board=_GAME_SESSION.get_current_board(),
+        engine_path=payload.engine_path,
+        think_time=payload.think_time,
+        player_turn_white=True,
+    )
+    if panel is not None:
+        # No player move yet — clear the rating so the UI doesn't show one.
+        panel["player_move_rating"] = None
+        panel["player_cp_loss"] = None
+
+    return _game_session_payload(
+        "ok",
+        started=started,
+        robot_move=robot_result,
+        robot_board_before=robot_board_before,
+        robot_command=robot_command,
+        evaluation=panel,
+    )
+
+
+class ManualMovePayload(BaseModel):
+    uci: str
+    execute_robot: bool = False
+    port: Optional[str] = None
+    baud: int = ROBOT_BAUD_DEFAULT
+    engine_path: str = "stockfish"
+    think_time: float = 0.1
+    difficulty: int = 1
+    skill_level: Optional[int] = None
+
+
+def _evaluate_safe(
+    board: Optional[chess.Board],
+    engine_path: str,
+    think_time: float,
+) -> Optional[Evaluation]:
+    if board is None:
+        return None
+    try:
+        return evaluate_position(board, engine_path=engine_path, think_time=think_time)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        print(f"[eval] evaluate_position failed: {exc!r}", flush=True)
+        return None
+
+
+def _build_session_evaluation(
+    prev_eval: Optional[Evaluation],
+    post_player_board: Optional[chess.Board],
+    final_board: Optional[chess.Board],
+    engine_path: str,
+    think_time: float,
+    player_turn_white: bool,
+) -> Optional[dict]:
+    """Bundle pre-move / post-move / final evaluations into the UI payload."""
+    if prev_eval is None:
+        return None
+
+    post_player_eval = _evaluate_safe(post_player_board, engine_path, think_time)
+    final_eval = _evaluate_safe(final_board, engine_path, think_time)
+
+    classification: Optional[dict] = None
+    if post_player_eval is not None:
+        classification = _classify_player_move(prev_eval, post_player_eval, player_turn_white)
+
+    eval_for_panel = final_eval or post_player_eval or prev_eval
+    panel = _evaluation_payload(eval_for_panel)
+    panel.update({
+        "player_move_rating": classification["rating"] if classification else None,
+        "player_cp_loss": classification["cp_loss"] if classification else None,
+        # best_move_suggestion = the move Stockfish wanted *before* the
+        # player moved, so the UI can say "try X instead".
+        "best_move_suggestion": classification["best_move_suggestion"] if classification else panel.get("best_move_suggestion"),
+        "best_move_uci": classification["best_move_uci"] if classification else panel.get("best_move_uci"),
+    })
+    return panel
+
+
+@app.post("/api/game/session/manual-move")
+def game_session_manual_move(payload: ManualMovePayload):
+    if not _GAME_SESSION.is_game_started():
+        raise HTTPException(400, "Game session has not started. Run /api/game/session/start first.")
+
+    player_board_before = _GAME_SESSION.get_current_board()
+    if player_board_before is None:
+        raise HTTPException(400, "Game session has no board state.")
+
+    try:
+        move = chess.Move.from_uci(payload.uci)
+    except ValueError as exc:
+        raise HTTPException(400, f"Invalid UCI move: {payload.uci}") from exc
+
+    if move not in player_board_before.legal_moves:
+        raise HTTPException(400, f"Move {payload.uci} is not legal in the current position.")
+
+    player_turn_white = player_board_before.turn == chess.WHITE
+    player_board_copy = player_board_before.copy(stack=True)
+
+    # 1. Evaluate the position the player faced before moving.
+    prev_eval = _evaluate_safe(player_board_before, payload.engine_path, payload.think_time)
+
+    # 2. Optionally execute the player's move on the physical arm.
+    player_command: Optional[dict] = None
+    if payload.execute_robot:
+        try:
+            player_command = _execute_robot_session_move(
+                payload.uci,
+                player_board_copy,
+                payload.port,
+                payload.baud,
+            )
+        except Exception as exc:
+            robot_adapter.close()
+            raise HTTPException(500, f"Player arm move failed: {exc}") from exc
+
+    # 3. Commit the player's move to the shared session.
+    commit_player = _GAME_SESSION.commit_robot_move(payload.uci)
+    if not commit_player.success:
+        raise HTTPException(400, commit_player.message)
+
+    # 4. Evaluate the resulting position (now the bot's turn).
+    post_player_board = _GAME_SESSION.get_current_board()
+    post_player_eval = _evaluate_safe(post_player_board, payload.engine_path, payload.think_time)
+
+    # 5. Classify the player's move and flash the LCD when appropriate.
+    classification = None
+    if prev_eval is not None and post_player_eval is not None:
+        classification = _classify_player_move(prev_eval, post_player_eval, player_turn_white)
+        _flash_lcd_rating(classification["rating"])
+
+    # 6. Bail early if the player's move ended the game.
+    if post_player_board is not None and post_player_board.is_game_over():
+        panel = _build_session_evaluation(
+            prev_eval=prev_eval,
+            post_player_board=post_player_board,
+            final_board=post_player_board,
+            engine_path=payload.engine_path,
+            think_time=payload.think_time,
+            player_turn_white=player_turn_white,
+        )
+        return _game_session_payload(
+            "game_over",
+            human_move=commit_player,
+            human_board_before=player_board_copy,
+            player_command=player_command,
+            evaluation=panel,
+        )
+
+    # 7. Compute and (optionally) execute the bot's reply.
+    robot_board_before = _GAME_SESSION.get_current_board()
+    robot_board_copy = robot_board_before.copy(stack=True) if robot_board_before is not None else None
+    skill_level = _resolve_skill_level(payload.skill_level, payload.difficulty)
+    robot_result = _GAME_SESSION.compute_robot_move(
+        engine_path=payload.engine_path,
+        think_time=payload.think_time,
+        skill_level=skill_level,
+    )
+    robot_command: Optional[dict] = None
+
+    if not robot_result.success or not robot_result.move_uci or robot_board_copy is None:
+        panel = _build_session_evaluation(
+            prev_eval=prev_eval,
+            post_player_board=post_player_board,
+            final_board=post_player_board,
+            engine_path=payload.engine_path,
+            think_time=payload.think_time,
+            player_turn_white=player_turn_white,
+        )
+        return _game_session_payload(
+            "robot_move_failed",
+            human_move=commit_player,
+            human_board_before=player_board_copy,
+            robot_move=robot_result,
+            robot_board_before=robot_board_copy,
+            player_command=player_command,
+            evaluation=panel,
+        )
+
+    if payload.execute_robot:
+        try:
+            robot_command = _execute_robot_session_move(
+                robot_result.move_uci,
+                robot_board_copy,
+                payload.port,
+                payload.baud,
+            )
+        except Exception as exc:
+            robot_adapter.close()
+            raise HTTPException(500, f"Robot command failed: {exc}") from exc
+
+    commit_robot = _GAME_SESSION.commit_robot_move(robot_result.move_uci)
+    if not commit_robot.success:
+        robot_result = commit_robot
+
+    panel = _build_session_evaluation(
+        prev_eval=prev_eval,
+        post_player_board=post_player_board,
+        final_board=_GAME_SESSION.get_current_board(),
+        engine_path=payload.engine_path,
+        think_time=payload.think_time,
+        player_turn_white=player_turn_white,
+    )
+
+    return _game_session_payload(
+        "ok",
+        human_move=commit_player,
+        human_board_before=player_board_copy,
+        robot_move=robot_result,
+        robot_board_before=robot_board_copy,
+        robot_command=robot_command,
+        player_command=player_command,
+        evaluation=panel,
     )
 
 
@@ -3335,33 +3740,42 @@ def cnn_feedback(payload: CnnFeedbackPayload):
 
 
 # ───────────────────────────────────────────────────────────────────────────
-# Controller subprocess (play_game.py)
+# In-process LCD controller
 # ───────────────────────────────────────────────────────────────────────────
-# A single subprocess at a time. The webapp button POSTs to /api/controller/start;
-# the page polls /api/controller/status to render the run state and tail logs.
+# The webapp button POSTs to /api/controller/start which spins up an
+# ArduinoUIControllerLink + GameController inside this server. They share
+# the global _GAME_SESSION and the robot_adapter serial connection/lock,
+# so the LCD and the webapp can drive the game without serial collisions.
 
 _CONTROLLER_LOCK = threading.Lock()
 _CONTROLLER_STATE: dict = {
-    "process": None,         # subprocess.Popen | None
-    "pid": None,
+    "controller": None,      # GameController | None
+    "ui_link": None,         # ArduinoUIControllerLink | None
     "started_at": None,      # epoch seconds
-    "cmd": None,             # list[str]
-    "log": collections.deque(maxlen=400),
+    "esp32": None,           # {host, port}
+    "arm_port": None,        # str | None
+    "last_error": None,      # str | None — set if start failed
+    "phase": "idle",
+    "phase_error": None,
+    "bot_move": None,
+    "phase_updated_at": None,
 }
 
 
-def _stream_subprocess_to_log(stream) -> None:
-    for raw in iter(stream.readline, b""):
-        try:
-            text = raw.decode(errors="replace").rstrip()
-        except Exception:
-            break
-        if text:
-            _CONTROLLER_STATE["log"].append(text)
-    try:
-        stream.close()
-    except Exception:
-        pass
+def _controller_is_running() -> bool:
+    return _CONTROLLER_STATE["controller"] is not None
+
+
+# Kept for backwards compatibility with old call sites.
+def _controller_subprocess_running() -> bool:
+    return _controller_is_running()
+
+
+def _on_phase_change(phase: str, error_message: Optional[str], bot_move: Optional[str]) -> None:
+    _CONTROLLER_STATE["phase"] = phase
+    _CONTROLLER_STATE["phase_error"] = error_message
+    _CONTROLLER_STATE["bot_move"] = bot_move
+    _CONTROLLER_STATE["phase_updated_at"] = time.time()
 
 
 class ControllerStartPayload(BaseModel):
@@ -3371,157 +3785,198 @@ class ControllerStartPayload(BaseModel):
     player_color: Literal["white", "black"] = "white"
     difficulty: int = Field(10, ge=1, le=20)
     flip_180: bool = False
-    engine_path: str = "/usr/games/stockfish"
+    engine_path: str = "stockfish"
     think_time: float = 0.5
+    baud: int = ROBOT_BAUD_DEFAULT
 
 
 @app.post("/api/controller/start")
 def controller_start(payload: ControllerStartPayload):
     with _CONTROLLER_LOCK:
-        proc = _CONTROLLER_STATE["process"]
-        if proc is not None and proc.poll() is None:
-            raise HTTPException(409, f"Controller already running (pid {_CONTROLLER_STATE['pid']})")
+        if _controller_is_running():
+            started_at = _CONTROLLER_STATE["started_at"]
+            raise HTTPException(409, f"Controller already running (started at {started_at})")
 
-        play_game_path = PYTHON_CODE_DIR / "play_game.py"
-        if not play_game_path.exists():
-            raise HTTPException(500, f"play_game.py not found at {play_game_path}")
-
-        cmd = [
-            sys.executable,
-            str(play_game_path),
-            "--esp32-host", payload.esp32_host,
-            "--esp32-port", str(payload.esp32_port),
-            "--player-color", payload.player_color,
-            "--difficulty", str(payload.difficulty),
-            "--engine-path", payload.engine_path,
-            "--think-time", str(payload.think_time),
-        ]
         resolved_arm_port = payload.arm_port
         if resolved_arm_port and not Path(resolved_arm_port).exists():
             resolved_arm_port = None
         if resolved_arm_port is None:
             resolved_arm_port = robot_adapter.connected_port() or robot_adapter.find_port()
-        if resolved_arm_port:
-            cmd += ["--arm-port", resolved_arm_port]
-        if payload.flip_180:
-            cmd += ["--flip-180"]
 
-        _CONTROLLER_STATE["log"].clear()
-        # Drop any state file left over from a previous run so the webapp
-        # doesn't briefly render stale moves before the controller writes fresh state.
-        _cleanup_controller_state_file()
-        # Release any serial handle the webapp may still be holding, otherwise
-        # play_game.py will fail to open the port (Resource busy).
+        # Acquire shared serial+lock from robot_adapter so the LCD-driven
+        # arm commands and webapp arm commands serialize on the same lock.
         try:
-            robot_adapter.close()
-        except Exception:
-            pass
+            arm_ser, arm_lock = robot_adapter.acquire_arm(resolved_arm_port, payload.baud)
+        except Exception as exc:
+            _CONTROLLER_STATE["last_error"] = f"Arm serial open failed: {exc}"
+            raise HTTPException(500, _CONTROLLER_STATE["last_error"]) from exc
+
         try:
-            new_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=str(PYTHON_CODE_DIR),
-                bufsize=1,
+            ui_link = ArduinoUIControllerLink(
+                host=payload.esp32_host,
+                port=payload.esp32_port,
+                on_line=lambda line: print(f"[ESP32] {line}", flush=True),
             )
         except Exception as exc:
-            raise HTTPException(500, f"Failed to start play_game.py: {exc}") from exc
+            _CONTROLLER_STATE["last_error"] = f"ESP32 TCP connect failed: {exc}"
+            raise HTTPException(502, _CONTROLLER_STATE["last_error"]) from exc
 
-        _CONTROLLER_STATE["process"] = new_proc
-        _CONTROLLER_STATE["pid"] = new_proc.pid
+        config = GameControllerConfig(
+            board_image_provider=lambda: str(LATEST_CALIBRATED_PATH),
+            arm_ser=arm_ser,
+            arm_lock=arm_lock,
+            player_color=payload.player_color,
+            flip_180=payload.flip_180,
+            engine_path=_resolve_stockfish_path(payload.engine_path),
+            think_time=payload.think_time,
+            on_phase_change=_on_phase_change,
+            write_state_file=False,
+        )
+
+        controller = GameController(ui_link=ui_link, session=_GAME_SESSION, config=config)
+        controller.set_difficulty(payload.difficulty)
+        try:
+            controller.start()
+        except Exception as exc:
+            try:
+                ui_link.close()
+            except Exception:
+                pass
+            _CONTROLLER_STATE["last_error"] = f"Controller start failed: {exc}"
+            raise HTTPException(500, _CONTROLLER_STATE["last_error"]) from exc
+
+        _CONTROLLER_STATE["controller"] = controller
+        _CONTROLLER_STATE["ui_link"] = ui_link
         _CONTROLLER_STATE["started_at"] = time.time()
-        _CONTROLLER_STATE["cmd"] = cmd
-
-        threading.Thread(
-            target=_stream_subprocess_to_log,
-            args=(new_proc.stdout,),
-            daemon=True,
-            name="controller-stdout-pump",
-        ).start()
-
+        _CONTROLLER_STATE["esp32"] = {"host": payload.esp32_host, "port": payload.esp32_port}
+        _CONTROLLER_STATE["arm_port"] = resolved_arm_port
+        _CONTROLLER_STATE["last_error"] = None
+        # GameController.start() already wrote "waiting" via _write_state.
         return {
             "running": True,
-            "pid": new_proc.pid,
             "started_at": _CONTROLLER_STATE["started_at"],
-            "cmd": cmd,
+            "esp32_host": payload.esp32_host,
+            "esp32_port": payload.esp32_port,
+            "arm_port": resolved_arm_port,
         }
 
 
 @app.get("/api/controller/status")
 def controller_status():
-    proc = _CONTROLLER_STATE["process"]
-    running = proc is not None and proc.poll() is None
-    exit_code = None
-    if proc is not None and not running:
-        exit_code = proc.returncode
+    running = _controller_is_running()
     return {
         "running": running,
-        "pid": _CONTROLLER_STATE["pid"] if running else None,
         "started_at": _CONTROLLER_STATE["started_at"] if running else None,
-        "cmd": _CONTROLLER_STATE["cmd"] if running else None,
-        "exit_code": exit_code,
-        "log_tail": list(_CONTROLLER_STATE["log"])[-80:],
+        "esp32_host": (_CONTROLLER_STATE["esp32"] or {}).get("host") if running else None,
+        "esp32_port": (_CONTROLLER_STATE["esp32"] or {}).get("port") if running else None,
+        "arm_port": _CONTROLLER_STATE["arm_port"] if running else None,
+        "phase": _CONTROLLER_STATE["phase"] if running else "idle",
+        "phase_updated_at": _CONTROLLER_STATE["phase_updated_at"] if running else None,
+        "last_error": _CONTROLLER_STATE["last_error"],
+        # Field kept for client compatibility — empty since we no longer
+        # tail a subprocess.
+        "log_tail": [],
     }
 
 
 @app.get("/api/controller/game-state")
 def controller_game_state():
-    """Game state published by play_game.py's GameController.
+    """Live game state surfaced by the in-process GameController.
 
-    The controller writes controller_game_state.json after every transition.
-    We treat the file as authoritative *only while the subprocess is alive*;
-    otherwise the state is stale and we return idle.
+    Reads from the shared _GAME_SESSION + GameController phase, so the LCD
+    and webapp always agree on what the current board, moves, and phase are.
     """
-    proc = _CONTROLLER_STATE["process"]
-    running = proc is not None and proc.poll() is None
-    empty = {
-        "phase": "idle",
-        "fen": None,
-        "moves": [],
-        "player_color": None,
-        "robot_color": None,
-        "difficulty": None,
-        "updated_at": None,
+    running = _controller_is_running()
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    board = _GAME_SESSION.get_current_board()
+    base = {
+        "phase": _CONTROLLER_STATE["phase"] if running else "idle",
+        "fen": board.fen() if board is not None else None,
+        "moves": _GAME_SESSION.get_move_history(),
+        "player_color": _GAME_SESSION.get_player_color(),
+        "robot_color": _GAME_SESSION.get_robot_color(),
+        "difficulty": controller.current_difficulty if controller is not None else None,
+        "error_message": _CONTROLLER_STATE["phase_error"],
+        "bot_move": _CONTROLLER_STATE["bot_move"],
+        "updated_at": _CONTROLLER_STATE["phase_updated_at"],
     }
     if not running:
-        return empty
-    try:
-        return json.loads(CONTROLLER_GAME_STATE_FILE.read_text())
-    except FileNotFoundError:
-        return {**empty, "phase": "starting"}
-    except Exception:
-        return {**empty, "phase": "unknown"}
+        # Surface an idle snapshot but keep the shared session state
+        # visible so the dashboard board stays in sync after a stop.
+        base["phase"] = "idle"
+    return base
 
 
 @app.post("/api/controller/stop")
 def controller_stop():
     with _CONTROLLER_LOCK:
-        proc = _CONTROLLER_STATE["process"]
-        if proc is None or proc.poll() is not None:
-            _cleanup_controller_state_file()
-            return {
-                "running": False,
-                "exit_code": proc.returncode if proc is not None else None,
-            }
-        proc.terminate()
+        controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+        ui_link: Optional[ArduinoUIControllerLink] = _CONTROLLER_STATE["ui_link"]
+        if controller is None:
+            _CONTROLLER_STATE["phase"] = "idle"
+            return {"running": False}
+
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            controller.stop()
+        except Exception as exc:
+            print(f"[controller] stop raised: {exc!r}", flush=True)
+        finally:
             try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
+                if ui_link is not None:
+                    ui_link.close()
+            except Exception:
                 pass
-        _cleanup_controller_state_file()
-        return {"running": False, "exit_code": proc.returncode}
+
+        _CONTROLLER_STATE["controller"] = None
+        _CONTROLLER_STATE["ui_link"] = None
+        _CONTROLLER_STATE["started_at"] = None
+        _CONTROLLER_STATE["esp32"] = None
+        _CONTROLLER_STATE["arm_port"] = None
+        _CONTROLLER_STATE["phase"] = "idle"
+        _CONTROLLER_STATE["phase_error"] = None
+        _CONTROLLER_STATE["bot_move"] = None
+        _CONTROLLER_STATE["phase_updated_at"] = time.time()
+        return {"running": False}
 
 
-def _cleanup_controller_state_file() -> None:
-    for path in (CONTROLLER_GAME_STATE_FILE, CONTROLLER_GAME_STATE_FILE.with_suffix(".tmp")):
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
+# ───────────────────────────────────────────────────────────────────────────
+# Webapp → LCD push messages
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class LcdSetModePayload(BaseModel):
+    mode: int = Field(..., ge=0, le=15)
+
+
+class LcdSetDifficultyPayload(BaseModel):
+    difficulty: int = Field(..., ge=1, le=20)
+
+
+@app.post("/api/controller/lcd/set-mode")
+def lcd_set_mode(payload: LcdSetModePayload):
+    ui_link: Optional[ArduinoUIControllerLink] = _CONTROLLER_STATE["ui_link"]
+    if ui_link is None:
+        return {"sent": False, "reason": "controller_not_running"}
+    try:
+        ui_link.set_mode(payload.mode)
+    except Exception as exc:
+        raise HTTPException(502, f"LCD send failed: {exc}") from exc
+    return {"sent": True, "mode": payload.mode}
+
+
+@app.post("/api/controller/lcd/set-difficulty")
+def lcd_set_difficulty(payload: LcdSetDifficultyPayload):
+    ui_link: Optional[ArduinoUIControllerLink] = _CONTROLLER_STATE["ui_link"]
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    if ui_link is None:
+        return {"sent": False, "reason": "controller_not_running"}
+    try:
+        ui_link.set_difficulty(payload.difficulty)
+        if controller is not None:
+            controller.set_difficulty(payload.difficulty)
+    except Exception as exc:
+        raise HTTPException(502, f"LCD send failed: {exc}") from exc
+    return {"sent": True, "difficulty": payload.difficulty}
 
 
 if __name__ == "__main__":

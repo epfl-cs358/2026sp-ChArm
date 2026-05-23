@@ -238,6 +238,20 @@ export interface GameSessionRobotCommand {
   timestamp: number;
 } 
 
+export type PlayerMoveRating = "Excellent" | "Good" | "Inaccuracy" | "Mistake" | "Blunder";
+
+export interface GameEvaluation {
+  score: string;
+  score_cp: number | null;
+  mate: number | null;
+  winning_color: "white" | "black" | "even";
+  win_percentage: number;
+  best_move_suggestion: string | null;
+  best_move_uci: string | null;
+  player_move_rating: PlayerMoveRating | null;
+  player_cp_loss: number | null;
+}
+
 export interface GameSessionResult {
   status: string;
   player_color: "white" | "black" | null;
@@ -249,6 +263,8 @@ export interface GameSessionResult {
   human_move?: GameSessionMove;
   robot_move?: GameSessionMove;
   robot_command?: GameSessionRobotCommand | null;
+  player_command?: GameSessionRobotCommand | null;
+  evaluation?: GameEvaluation | null;
   timestamp: number;
 }
 

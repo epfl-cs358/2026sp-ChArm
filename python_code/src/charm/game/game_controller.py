@@ -28,6 +28,7 @@ _CONTROLLER_STATE_FILE = (
 BoardImageProvider = Callable[[], str]
 MoveExecutor = Callable[[], None]
 DifficultyHandler = Callable[[int], None]
+PhaseListener = Callable[[str, Optional[str], Optional[str]], None]
 
 
 @dataclass
@@ -50,6 +51,11 @@ class GameControllerConfig:
     flip_180: bool = False
     on_player_done: Optional[MoveExecutor] = None
     on_set_difficulty: Optional[DifficultyHandler] = None
+    # Called on every phase transition. Receives (phase, error_message, bot_move).
+    # Used by the in-process api_server to surface phase to the webapp.
+    on_phase_change: Optional[PhaseListener] = None
+    # When True, also persist phase to controller_game_state.json (legacy file-based path).
+    write_state_file: bool = False
     engine_path: str = "stockfish"
     think_time: float = 0.1
 
@@ -66,6 +72,9 @@ class GameController:
         self.config = config
         self.current_difficulty = 10  # Default level 10 out of 20
         self.current_skill_level = 9  # Stockfish skill = difficulty - 1
+        self.current_phase: str = "idle"
+        self.last_error: Optional[str] = None
+        self.last_bot_move: Optional[str] = None
         self._promotion_event = threading.Event()
         self._promotion_piece: str = "q"
         self.ui_link.set_handlers(
@@ -86,7 +95,25 @@ class GameController:
         self.ui_link.close()
 
     def _write_state(self, phase: str, error_message: str = None, bot_move: str = None) -> None:
-        """Atomically publish current game state for the webapp to poll."""
+        """Publish a phase transition.
+
+        In-process callers (webapp) receive the update via the
+        ``on_phase_change`` callback; the file write is only kept for
+        legacy callers that opt in via ``config.write_state_file``.
+        """
+        self.current_phase = phase
+        self.last_error = error_message
+        self.last_bot_move = bot_move
+
+        if self.config.on_phase_change is not None:
+            try:
+                self.config.on_phase_change(phase, error_message, bot_move)
+            except Exception as exc:
+                print(f"[GAME] on_phase_change raised: {exc!r}", flush=True)
+
+        if not self.config.write_state_file:
+            return
+
         board = self.session.get_current_board()
         state = {
             "phase": phase,

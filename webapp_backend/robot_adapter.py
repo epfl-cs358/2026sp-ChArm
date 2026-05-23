@@ -140,6 +140,19 @@ def connected_port() -> Optional[str]:
     return None
 
 
+def acquire_arm(port: Optional[str], baud: int):
+    """Return the shared (serial, lock) pair for in-process arm callers.
+
+    The in-process LCD GameController writes directly to the Mega via
+    `arduino_bridge.send_command`, which expects (ser, lock). Sharing the
+    same lock with `send_commands` (used by the webapp) is what keeps the
+    two callers from racing on the serial port.
+    """
+    with _serial_lock:
+        ser = _get_serial(port, baud)
+        return ser, _serial_lock
+
+
 def close() -> None:
     global _serial, _serial_key
     with _serial_lock:

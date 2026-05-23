@@ -56,32 +56,34 @@ def compare_board_to_bitmaps(
     board: chess.Board,
     observed_white_bitmap: Bitmap,
     observed_black_bitmap: Bitmap,
+    print_mismatches: bool = True,
 ) -> int:
     # Per-square loop only for diagnostic [MISMATCH] prints. The returned count
     # uses the per-channel sum (webapp's original convention) so that callers
     # passing a non-zero max_mismatches see the same threshold semantics as
     # before the prints were restored.
-    for row in range(8):
-        for col in range(8):
-            rank = 7 - row
-            file = col
-            square = chess.square(file, rank)
+    if print_mismatches:
+        for row in range(8):
+            for col in range(8):
+                rank = 7 - row
+                file = col
+                square = chess.square(file, rank)
 
-            piece = board.piece_at(square)
-            expected_white = piece is not None and piece.color == chess.WHITE
-            expected_black = piece is not None and piece.color == chess.BLACK
+                piece = board.piece_at(square)
+                expected_white = piece is not None and piece.color == chess.WHITE
+                expected_black = piece is not None and piece.color == chess.BLACK
 
-            detected_white = bool(observed_white_bitmap[row][col])
-            detected_black = bool(observed_black_bitmap[row][col])
+                detected_white = bool(observed_white_bitmap[row][col])
+                detected_black = bool(observed_black_bitmap[row][col])
 
-            if expected_white != detected_white or expected_black != detected_black:
-                print(
-                    f"[MISMATCH] {chess.square_name(square)} "
-                    f"expected_white={expected_white}, "
-                    f"expected_black={expected_black}, "
-                    f"detected_white={detected_white}, "
-                    f"detected_black={detected_black}"
-                )
+                if expected_white != detected_white or expected_black != detected_black:
+                    print(
+                        f"[MISMATCH] {chess.square_name(square)} "
+                        f"expected_white={expected_white}, "
+                        f"expected_black={expected_black}, "
+                        f"detected_white={detected_white}, "
+                        f"detected_black={detected_black}"
+                    )
 
     candidate_white_bitmap, candidate_black_bitmap = board_to_bitmaps(board)
     mismatch_count = count_bitmap_mismatches(
@@ -90,7 +92,8 @@ def compare_board_to_bitmaps(
         candidate_black_bitmap, observed_black_bitmap
     )
 
-    print("[DEBUG] total mismatch_count =", mismatch_count)
+    if print_mismatches:
+        print("[DEBUG] total mismatch_count =", mismatch_count)
     return mismatch_count
 
 
@@ -116,6 +119,7 @@ def infer_move_from_bitmaps(
         board,
         observed_white_bitmap,
         observed_black_bitmap,
+        print_mismatches=True,
     )
 
     if current_mismatch_count == 0:
@@ -147,6 +151,7 @@ def infer_move_from_bitmaps(
             candidate_board,
             observed_white_bitmap,
             observed_black_bitmap,
+            print_mismatches=False,
         )
 
         if mismatch_count < best_result.mismatch_count:
@@ -158,6 +163,15 @@ def infer_move_from_bitmaps(
             )
         elif mismatch_count == best_result.mismatch_count and best_result.move is not None:
             best_result.matching_move_count += 1
+
+    # Print summary diagnostics for the best match found
+    if best_result.move is not None:
+        if best_result.matching_move_count > 1:
+            print(f"[DEBUG] Ambiguous result: {best_result.matching_move_count} moves found matching the minimal mismatch count of {best_result.mismatch_count}", flush=True)
+        else:
+            print(f"[DEBUG] Best inferred move: {best_result.move.uci()} (mismatch count: {best_result.mismatch_count})", flush=True)
+    else:
+        print(f"[DEBUG] No legal move found to improve mismatch count of {best_result.mismatch_count}", flush=True)
 
     return best_result
 

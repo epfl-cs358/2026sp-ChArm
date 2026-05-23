@@ -107,6 +107,28 @@ export const api = {
     execute_robot?: boolean;
   }) => post<GameSessionResult>("/api/game/session/player-done", payload),
 
+  manualMove: (payload: {
+    uci: string;
+    execute_robot?: boolean;
+    port?: string;
+    baud?: number;
+    engine_path?: string;
+    think_time?: number;
+    difficulty?: 0 | 1 | 2;
+    skill_level?: number;
+  }) => post<GameSessionResult>("/api/game/session/manual-move", payload),
+
+  manualStart: (payload: {
+    player_color?: "white" | "black";
+    difficulty?: 0 | 1 | 2;
+    skill_level?: number;
+    engine_path?: string;
+    think_time?: number;
+    execute_robot?: boolean;
+    port?: string;
+    baud?: number;
+  }) => post<GameSessionResult>("/api/game/session/manual-start", payload),
+
   resetGameSession: () => post<GameSessionResult>("/api/game/session/reset", {}),
 
   getGameSession: () => get<GameSessionResult>("/api/game/session"),
@@ -190,14 +212,14 @@ export const api = {
     promotion?: boolean;
   }) => post<RobotCommandResult>("/api/robot/command", payload),
 
-  getRobotPosition: (port?: string, baud = 9600) => {
+  getRobotPosition: (port?: string, baud = 115200) => {
     const params = new URLSearchParams();
     if (port) params.set("port", port);
     params.set("baud", String(baud));
     return get<RobotCommandResult>(`/api/robot/position?${params.toString()}`);
   },
 
-  readRobotEeprom: (port?: string, baud = 9600) => {
+  readRobotEeprom: (port?: string, baud = 115200) => {
     const params = new URLSearchParams();
     if (port) params.set("port", port);
     params.set("baud", String(baud));
@@ -417,6 +439,16 @@ export const api = {
   controllerStop: () => post<ControllerStatus>("/api/controller/stop", {}),
   controllerStatus: () => get<ControllerStatus>("/api/controller/status"),
   controllerGameState: () => get<ControllerGameState>("/api/controller/game-state"),
+  lcdSetMode: (mode: number) =>
+    post<{ sent: boolean; mode?: number; reason?: string }>(
+      "/api/controller/lcd/set-mode",
+      { mode },
+    ),
+  lcdSetDifficulty: (difficulty: number) =>
+    post<{ sent: boolean; difficulty?: number; reason?: string }>(
+      "/api/controller/lcd/set-difficulty",
+      { difficulty },
+    ),
 };
 
 export interface ControllerStartPayload {
@@ -432,10 +464,14 @@ export interface ControllerStartPayload {
 
 export interface ControllerStatus {
   running: boolean;
-  pid?: number | null;
   started_at?: number | null;
-  cmd?: string[] | null;
-  exit_code?: number | null;
+  esp32_host?: string | null;
+  esp32_port?: number | null;
+  arm_port?: string | null;
+  phase?: ControllerPhase;
+  phase_updated_at?: number | null;
+  last_error?: string | null;
+  // Kept for backwards compatibility — empty in in-process mode.
   log_tail?: string[];
 }
 
