@@ -29,3 +29,7 @@ __pycache__/
 Thumbs.db
 *.swp
 .idea/
+
+# AI CLI / Assistant configs
+.claude/
+.antigravitycli/
