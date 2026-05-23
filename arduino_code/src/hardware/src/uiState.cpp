@@ -297,6 +297,14 @@ String UIState::getLine1() const {
             return currentTurn == WHITE ? "White Turn" : "Black Turn";
 
         case ERROR:
+            // Move-rating flashes reuse ERROR mode to show the evaluation term
+            // on line 2. Relabel line 1 so a legal, evaluated move doesn't read
+            // as "Illegal move !".
+            if (errorMessage == "EXCELLENT!" || errorMessage == "GOOD" ||
+                errorMessage == "INACCURACY" || errorMessage == "MISTAKE!" ||
+                errorMessage == "BLUNDER!") {
+                return "Stockfish Eval:";
+            }
             return errorMessage.length() > 0 ? "Illegal move !" : "Set up ERROR";
 
         case GAME_OVER:

@@ -46,6 +46,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
 
@@ -351,7 +352,56 @@ const RATING_STYLE: Record<PlayerMoveRating, { color: string; emoji: string }> =
   Blunder: { color: "oklch(0.65 0.22 25)", emoji: "🚨" },
 };
 
-function GameEvaluationCard({ evaluation }: { evaluation: GameEvaluation | null }) {
+// Small hover-explanation affordance. Wraps a metric so hovering it shows a
+// plain-language description of what the number means.
+function InfoTip({
+  text,
+  children,
+  side = "top",
+}: {
+  text: string;
+  children: React.ReactElement;
+  side?: "top" | "bottom" | "left" | "right";
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={children} />
+      <TooltipContent side={side} className="max-w-xs font-jetbrains">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+// Reconstruct SAN move pairs from the UCI move list. We cannot use
+// game.history() because new Chess(fen) discards history on every poll —
+// instead we replay controllerMoves in a throwaway board (see improvement.md).
+function getHistoryRows(uciMoves: string[]): { num: number; w: string; b?: string }[] {
+  const chess = new Chess();
+  const rows: { num: number; w: string; b?: string }[] = [];
+  for (let i = 0; i < uciMoves.length; i++) {
+    const index = Math.floor(i / 2);
+    let san = uciMoves[i];
+    try {
+      const move = chess.move(uciMoves[i]);
+      san = move.san;
+    } catch {
+      // Fall back to the raw UCI string if it can't be parsed/played.
+    }
+    if (i % 2 === 0) {
+      rows.push({ num: index + 1, w: san });
+    } else if (rows[index]) {
+      rows[index].b = san;
+    }
+  }
+  return rows;
+}
+
+function GameEvaluationCard({
+  evaluation,
+  moves = [],
+}: {
+  evaluation: GameEvaluation | null;
+  moves?: string[];
+}) {
   // Map win % to a horizontal split between white (top of bar) and black.
   const winPct = evaluation?.win_percentage ?? 50;
   const whiteShare = Math.max(2, Math.min(98, winPct));
@@ -359,6 +409,7 @@ function GameEvaluationCard({ evaluation }: { evaluation: GameEvaluation | null 
   const ratingStyle = evaluation?.player_move_rating
     ? RATING_STYLE[evaluation.player_move_rating]
     : null;
+  const historyRows = useMemo(() => getHistoryRows(moves), [moves]);
 
   let positionLine = "Position is equal (0.0)";
   if (evaluation) {
@@ -377,52 +428,89 @@ function GameEvaluationCard({ evaluation }: { evaluation: GameEvaluation | null 
   return (
     <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
       <CardHeader className="px-4 pt-4 pb-2">
-        <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game Evaluation</h2>
+        <h2 className="font-jetbrains text-base font-semibold" style={{ color: "var(--charm-text)" }}>Game Evaluation</h2>
       </CardHeader>
-      <CardContent className="px-4 pb-4 space-y-3">
-        <div className="flex items-center gap-3">
-          {/* Vertical eval bar — white on top, black on bottom (Chess.com style). */}
-          <div
-            className="relative h-40 w-5 overflow-hidden rounded border"
-            style={{ borderColor: "var(--charm-border)" }}
-            aria-label="evaluation bar"
-          >
-            <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
-            <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
-            <div className="pointer-events-none absolute inset-x-0" style={{ top: "50%", borderTop: "1px dashed oklch(0 0 0 / 0.35)" }} />
+      <TooltipProvider delay={150}>
+        <CardContent className="px-4 pb-4 space-y-4">
+          <div className="flex items-center gap-4">
+            {/* Vertical eval bar — white on top, black on bottom (Chess.com style). */}
+            <InfoTip
+              side="right"
+              text="Visual gauge of the position balance. Larger White share means White advantage; larger Black share means Black advantage."
+            >
+              <div
+                className="relative h-48 w-7 cursor-help overflow-hidden rounded border"
+                style={{ borderColor: "var(--charm-border)" }}
+                aria-label="evaluation bar"
+              >
+                <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
+                <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
+                <div className="pointer-events-none absolute inset-x-0" style={{ top: "50%", borderTop: "1px dashed oklch(0 0 0 / 0.35)" }} />
+              </div>
+            </InfoTip>
+            <div className="flex-1 space-y-1.5">
+              <InfoTip text="Stockfish centipawn score. Positive numbers favor White, negative numbers favor Black. 'M' represents checkmate in X moves.">
+                <p className="w-fit cursor-help font-jetbrains text-4xl font-semibold" style={{ color: "var(--charm-text)" }}>
+                  {evaluation?.score ?? "0.0"}
+                </p>
+              </InfoTip>
+              <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>{positionLine}</p>
+              <InfoTip text="The mathematical win probability for White based on current engine evaluation.">
+                <p className="w-fit cursor-help font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                  Win probability (white): <span style={{ color: "var(--charm-cyan)" }}>{winPct.toFixed(1)}%</span>
+                </p>
+              </InfoTip>
+            </div>
           </div>
-          <div className="flex-1 space-y-1">
-            <p className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>
-              {evaluation?.score ?? "0.0"}
-            </p>
-            <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>{positionLine}</p>
-            <p className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
-              Win probability (white): <span style={{ color: "var(--charm-cyan)" }}>{winPct.toFixed(1)}%</span>
-            </p>
-          </div>
-        </div>
-        {evaluation?.player_move_rating && ratingStyle && (
-          <div
-            className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
-            style={{ borderColor: ratingStyle.color, background: "transparent" }}
-          >
-            <span style={{ color: ratingStyle.color }}>
-              {ratingStyle.emoji} {evaluation.player_move_rating}
-              {evaluation.player_cp_loss != null && evaluation.player_cp_loss > 0 && (
-                <span style={{ color: "var(--charm-muted)" }}>
-                  {" "}
-                  · -{(evaluation.player_cp_loss / 100).toFixed(2)} pawns
+          {evaluation?.player_move_rating && ratingStyle && (
+            <div
+              className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
+              style={{ borderColor: ratingStyle.color, background: "transparent" }}
+            >
+              <InfoTip text="Stockfish classification of the move quality, ranging from Excellent to Blunder.">
+                <span className="cursor-help" style={{ color: ratingStyle.color }}>
+                  {ratingStyle.emoji} {evaluation.player_move_rating}
                 </span>
+              </InfoTip>
+              {evaluation.player_cp_loss != null && evaluation.player_cp_loss > 0 && (
+                <InfoTip text="The reduction in evaluation advantage caused by the move. Measured in 1/100ths of a pawn. Lower is better.">
+                  <span className="cursor-help" style={{ color: "var(--charm-muted)" }}>
+                    -{(evaluation.player_cp_loss / 100).toFixed(2)} pawns
+                  </span>
+                </InfoTip>
               )}
-            </span>
-            {evaluation.best_move_suggestion && (
-              <span style={{ color: "var(--charm-muted)" }}>
-                best: <span style={{ color: "var(--charm-cyan)" }}>{evaluation.best_move_suggestion}</span>
-              </span>
-            )}
+              {evaluation.best_move_suggestion && (
+                <InfoTip text="The optimal continuation move recommended by the engine in the previous position.">
+                  <span className="cursor-help" style={{ color: "var(--charm-muted)" }}>
+                    best: <span style={{ color: "var(--charm-cyan)" }}>{evaluation.best_move_suggestion}</span>
+                  </span>
+                </InfoTip>
+              )}
+            </div>
+          )}
+          {/* Black & white move history */}
+          <div>
+            <p className="mb-1 font-jetbrains text-[10px] uppercase tracking-wide" style={{ color: "var(--charm-muted)" }}>Move history</p>
+            <div className="max-h-40 overflow-auto rounded-md border" style={{ borderColor: "var(--charm-border)" }}>
+              {historyRows.length === 0 ? (
+                <p className="px-3 py-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>No moves yet.</p>
+              ) : (
+                <table className="w-full font-jetbrains text-xs">
+                  <tbody>
+                    {historyRows.map((row, i) => (
+                      <tr key={row.num} style={{ background: i % 2 === 0 ? "transparent" : "oklch(from var(--charm-muted) l c h / 0.06)" }}>
+                        <td className="w-8 px-2 py-1 text-right" style={{ color: "var(--charm-muted)" }}>{row.num}.</td>
+                        <td className="px-2 py-1 font-semibold" style={{ color: "var(--charm-text)" }}>{row.w}</td>
+                        <td className="px-2 py-1" style={{ color: "var(--charm-muted)" }}>{row.b ?? ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
-        )}
-      </CardContent>
+        </CardContent>
+      </TooltipProvider>
     </Card>
   );
 }
@@ -533,6 +621,10 @@ export default function Dashboard() {
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [legalTargets, setLegalTargets] = useState<Set<string>>(new Set());
   const [evaluation, setEvaluation] = useState<GameEvaluation | null>(null);
+  // Full UCI move history for the Game Evaluation panel's black/white table.
+  // Fed from the LCD controller poll AND webapp-driven session responses so it
+  // populates in both play modes.
+  const [moveHistory, setMoveHistory] = useState<string[]>([]);
   const [manualBusy, setManualBusy] = useState(false);
   const [robotArmPlay, setRobotArmPlay] = useState(false);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
@@ -578,6 +670,7 @@ export default function Dashboard() {
         if (stopped) return;
         setControllerPhase(gs.phase);
         setControllerMoves(gs.moves ?? []);
+        setMoveHistory(gs.moves ?? []);
         setControllerPlayerColor(gs.player_color);
         if (gs.fen) {
           try {
@@ -763,6 +856,7 @@ export default function Dashboard() {
       ));
       setArmCalibrated(true);
       setGameSessionStarted(false);
+      setMoveHistory([]);
       setTurnState("human_turn");
       // Tell the LCD the arm finished homing so it returns to MENU (mode 1).
       void api.lcdSetMode(1).catch(() => undefined);
@@ -812,6 +906,7 @@ export default function Dashboard() {
       }
     }
     if (session.evaluation) setEvaluation(session.evaluation);
+    if (session.moves) setMoveHistory(session.moves);
     const lastUci = session.robot_move?.move_uci ?? session.human_move?.move_uci ?? null;
     if (lastUci) setLastMove(lastUci);
     if (session.human_move?.move_uci) {
@@ -974,6 +1069,7 @@ export default function Dashboard() {
           return;
         }
         if (session.fen) setGame(new Chess(session.fen));
+        if (session.moves) setMoveHistory(session.moves);
         setGameSessionStarted(true);
         setMoveLog((current) => [
           ...current,
@@ -1018,6 +1114,7 @@ export default function Dashboard() {
       }
 
       if (response.fen) setGame(new Chess(response.fen));
+      if (response.moves) setMoveHistory(response.moves);
       if (response.human_move?.move_uci) {
         setMoveLog((current) => [...current, `You: ${response.human_move?.san ?? response.human_move?.move_uci}`]);
         setLastMove(response.human_move.move_uci);
@@ -1245,7 +1342,9 @@ export default function Dashboard() {
       )}
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(330px,0.65fr)]">
-        {/* SCARA Arm card — unchanged */}
+        {/* Column 1: Game Evaluation (wide, top) + SCARA Arm */}
+        <div className="flex flex-col gap-5">
+        <GameEvaluationCard evaluation={evaluation} moves={moveHistory} />
         <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
           <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
             <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>SCARA Arm</h2>
@@ -1279,13 +1378,15 @@ export default function Dashboard() {
               <BoardPiecesSvg game={game} visible={scaraPiecesVisible} opacity={scaraPiecesOpacity} />
               <ChessComCoordinates svgBoardUnits />
               <circle cx={ARM_BASE.x} cy={ARM_BASE.y} r="0.18" fill="oklch(0.65 0.22 25)" opacity="0.85" />
-              <RobotArmOverlay
-                embed move={robotMove}
-                mode={turnState === "arm_calibrating" ? "calibrating" : robotMove ? "playing" : "idle"}
-                onDone={finishRobotMove} debugTarget={armDebug ? armDebugTarget : null}
-                idleTarget={armCalibrated ? armIdleTarget : null}
-                opacity={armOpacity} expectedOpacity={expectedOpacity} onAnglesChange={setArmAngles}
-              />
+              {armView === "Arm" && (
+                <RobotArmOverlay
+                  embed move={robotMove}
+                  mode={turnState === "arm_calibrating" ? "calibrating" : robotMove ? "playing" : "idle"}
+                  onDone={finishRobotMove} debugTarget={armDebug ? armDebugTarget : null}
+                  idleTarget={armCalibrated ? armIdleTarget : null}
+                  opacity={armOpacity} expectedOpacity={expectedOpacity} onAnglesChange={setArmAngles}
+                />
+              )}
             </svg>
             <details className="rounded-md border border-border p-3">
               <summary className="cursor-pointer font-jetbrains text-xs font-semibold" style={{ color: "var(--charm-text)" }}>Arm debug</summary>
@@ -1347,6 +1448,7 @@ export default function Dashboard() {
             </div>
           </CardContent>
         </Card>
+        </div>
 
         <div className="flex flex-col gap-5">
           {/* CV Mode card */}
@@ -1535,9 +1637,6 @@ export default function Dashboard() {
               </div>
             </CardContent>
           </Card>
-
-          {/* Game Evaluation card */}
-          <GameEvaluationCard evaluation={evaluation} />
         </div>
       </div>
 

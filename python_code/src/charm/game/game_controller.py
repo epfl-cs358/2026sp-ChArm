@@ -516,6 +516,10 @@ class GameController:
             try:
                 self.ui_link.error_msg(label)
                 time.sleep(2.0)
+                # error_msg puts the LCD in ERROR mode (line 1 = "Illegal move !").
+                # The move was legal, so restore GAME mode (6) to resume normal
+                # turn-status display instead of leaving the box stuck on ERROR.
+                self.ui_link.set_mode(6)
             except Exception as exc:
                 print(f"[GAME] LCD rating flash failed: {exc!r}", flush=True)
 
