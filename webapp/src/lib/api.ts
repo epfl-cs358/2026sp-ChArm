@@ -85,6 +85,8 @@ export const api = {
     player_color?: "white" | "black";
     difficulty?: 0 | 1 | 2;
     skill_level?: number;
+    uci_elo?: number | null;
+    use_limit_strength?: boolean;
     params?: PipelineParams;
     capture?: boolean;
     max_mismatches?: number;
@@ -101,6 +103,8 @@ export const api = {
     max_mismatches?: number;
     difficulty?: 0 | 1 | 2;
     skill_level?: number;
+    uci_elo?: number | null;
+    use_limit_strength?: boolean;
     engine_path?: string;
     think_time?: number;
     port?: string;
@@ -117,12 +121,16 @@ export const api = {
     think_time?: number;
     difficulty?: 0 | 1 | 2;
     skill_level?: number;
+    uci_elo?: number | null;
+    use_limit_strength?: boolean;
   }) => post<GameSessionResult>("/api/game/session/manual-move", payload),
 
   manualStart: (payload: {
     player_color?: "white" | "black";
     difficulty?: 0 | 1 | 2;
     skill_level?: number;
+    uci_elo?: number | null;
+    use_limit_strength?: boolean;
     engine_path?: string;
     think_time?: number;
     execute_robot?: boolean;
@@ -444,6 +452,27 @@ export const api = {
     post<{ triggered: boolean }>("/api/controller/check-board", {}),
   controllerPlayerDone: () =>
     post<{ triggered: boolean }>("/api/controller/player-done", {}),
+  controllerRestart: () =>
+    post<{ restarted: boolean; controller_running: boolean }>("/api/controller/restart", {}),
+  controllerSetColor: (color: "white" | "black") =>
+    post<{ set: boolean; color?: string; reason?: string }>(
+      "/api/controller/set-color",
+      { color },
+    ),
+  setDifficultyParams: (payload: {
+    skill_level: number;
+    think_time: number;
+    uci_elo?: number | null;
+    use_limit_strength?: boolean;
+  }) =>
+    post<{
+      applied: boolean;
+      controller_running: boolean;
+      skill_level: number;
+      think_time: number;
+      uci_elo: number | null;
+      use_limit_strength: boolean;
+    }>("/api/game/difficulty-params", payload),
   lcdSetMode: (mode: number) =>
     post<{ sent: boolean; mode?: number; reason?: string }>(
       "/api/controller/lcd/set-mode",

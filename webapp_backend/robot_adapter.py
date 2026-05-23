@@ -308,16 +308,33 @@ def parse_board_info(responses: list[str], calibration_path: Path) -> Optional[d
     }
 
 
+def _mirror_sq(sq: str) -> str:
+    """Mirror a square's RANK only, preserving the file: a1↔a8, e2↔e7.
+
+    Used for arm coordinates when the player is Black. The board is never
+    physically rotated: the player's pieces always sit on the near side
+    (calibration a1/h1, ranks 1-2) and the robot's on the far side (a8/h8,
+    ranks 7-8) with the SAME files. So the engine's White squares (internal
+    ranks 1-2) map to the physical far side at the same file — a rank flip,
+    not a full 180° rotation (which would also swap a-file ↔ h-file)."""
+    return sq[0] + str(9 - int(sq[1]))
+
+
 def move_commands(
     uci: str,
     piece_type: Optional[str],
     capture: bool,
     castling: bool,
     captured_piece_type: Optional[str] = None,
+    flip_180: bool = False,
 ) -> list[str]:
     move = chess.Move.from_uci(uci)
-    from_square = chess.square_name(move.from_square)
-    to_square = chess.square_name(move.to_square)
+
+    def sq(square_name: str) -> str:
+        return _mirror_sq(square_name) if flip_180 else square_name
+
+    from_square = sq(chess.square_name(move.from_square))
+    to_square = sq(chess.square_name(move.to_square))
     piece = piece_type or "pawn"
     commands: list[str] = []
     if capture:
@@ -325,14 +342,14 @@ def move_commands(
         commands.extend([f"pick {captured_piece} {to_square}", f"put {captured_piece} trash"])
     commands.extend([f"pick {piece} {from_square}", f"put {piece} {to_square}"])
     if castling:
-        if to_square == "g1":
-            commands.extend(["pick rook h1", "put rook f1"])
-        elif to_square == "c1":
-            commands.extend(["pick rook a1", "put rook d1"])
-        elif to_square == "g8":
-            commands.extend(["pick rook h8", "put rook f8"])
-        elif to_square == "c8":
-            commands.extend(["pick rook a8", "put rook d8"])
+        if to_square == sq("g1"):
+            commands.extend([f"pick rook {sq('h1')}", f"put rook {sq('f1')}"])
+        elif to_square == sq("c1"):
+            commands.extend([f"pick rook {sq('a1')}", f"put rook {sq('d1')}"])
+        elif to_square == sq("g8"):
+            commands.extend([f"pick rook {sq('h8')}", f"put rook {sq('f8')}"])
+        elif to_square == sq("c8"):
+            commands.extend([f"pick rook {sq('a8')}", f"put rook {sq('d8')}"])
     commands.append("home")
     return commands
 
@@ -387,6 +404,7 @@ def commands_for_request(payload: dict) -> list[str]:
             bool(payload.get("capture")),
             bool(payload.get("castling")),
             payload.get("captured_piece_type"),
+            flip_180=bool(payload.get("flip_180")),
         )
     if command == "raw":
         raw = payload.get("raw")

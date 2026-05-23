@@ -6,10 +6,15 @@ import chess
 
 
 def _mirror_sq(sq: str) -> str:
-    """Mirror a square name 180°: a1↔h8, e2↔d7, etc."""
-    file = chr(ord('h') - (ord(sq[0]) - ord('a')))
-    rank = str(9 - int(sq[1]))
-    return file + rank
+    """Mirror a square's RANK only, preserving the file: a1↔a8, e2↔e7.
+
+    Used for arm coordinates when the player is Black. The board is never
+    physically rotated: the player's pieces always sit on the near side
+    (calibration a1/h1, ranks 1-2) and the robot's on the far side (a8/h8,
+    ranks 7-8) with the SAME files. So the engine's White squares (internal
+    ranks 1-2) map to the physical far side at the same file — a rank flip,
+    not a full 180° rotation (which would also swap a-file ↔ h-file)."""
+    return sq[0] + str(9 - int(sq[1]))
 
 
 def execute_move(uci_move: str, board: chess.Board, ser: serial.Serial, lock: threading.Lock, flip_180: bool = False):

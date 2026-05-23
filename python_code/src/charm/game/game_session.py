@@ -622,6 +622,8 @@ class GameSession:
         engine_path: str = "stockfish",
         think_time: float = 0.1,
         skill_level: int = 12,
+        uci_elo: Optional[int] = None,
+        use_limit_strength: bool = False,
     ) -> SessionResult:
         """
         Compute the robot's next move using Stockfish.
@@ -657,6 +659,8 @@ class GameSession:
             engine_path=engine_path,
             think_time=think_time,
             skill_level=skill_level,
+            uci_elo=uci_elo,
+            use_limit_strength=use_limit_strength,
         )
 
         if best_move is None:

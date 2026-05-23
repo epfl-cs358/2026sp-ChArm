@@ -99,6 +99,11 @@ class GameController:
         self.config = config
         self.current_difficulty = 10  # Default level 10 out of 20
         self.current_skill_level = 9  # Stockfish skill = difficulty - 1
+        # Optional Direct-Elo strength levers (set via set_difficulty_params).
+        # When use_limit_strength is True, Stockfish targets current_uci_elo and
+        # ignores current_skill_level.
+        self.current_uci_elo: Optional[int] = None
+        self.current_use_limit_strength: bool = False
         self.current_phase: str = "idle"
         self.last_error: Optional[str] = None
         self.last_bot_move: Optional[str] = None
@@ -156,6 +161,28 @@ class GameController:
 
     def stop(self) -> None:
         self.ui_link.close()
+
+    def restart(self) -> None:
+        """Fully reset the game session and return the LCD to its menu.
+
+        Clears the shared session and the retained move-evaluation state, then
+        sends the box back to MENU (mode 1) so the next game starts clean. A
+        dead/offline ESP32 socket must not abort the reset, so the LCD write is
+        best-effort.
+        """
+        self.session.reset()
+        self.last_player_move_rating = None
+        self.last_player_cp_loss = None
+        self._last_player_best_move_san = None
+        self._last_player_best_move_uci = None
+        self.config.player_color = "white"
+        self.config.flip_180 = False
+        if self.ui_link:
+            try:
+                self.ui_link.set_mode(1)  # 1 = MENU mode
+            except Exception as exc:
+                print(f"[GAME] Restart: failed to reset LCD mode: {exc!r}", flush=True)
+        self._write_state("waiting")
 
     def _write_state(self, phase: str, error_message: str = None, bot_move: str = None) -> None:
         """Publish a phase transition.
@@ -380,6 +407,8 @@ class GameController:
             engine_path=self.config.engine_path,
             think_time=self.config.think_time,
             skill_level=self.current_skill_level,
+            uci_elo=self.current_uci_elo,
+            use_limit_strength=self.current_use_limit_strength,
         )
 
         if not robot_result.success:
@@ -567,6 +596,26 @@ class GameController:
         if self.config.on_set_difficulty is not None:
             self.config.on_set_difficulty(difficulty)
         self._write_state("waiting")
+
+    def set_difficulty_params(
+        self,
+        skill_level: Optional[int] = None,
+        think_time: Optional[float] = None,
+        uci_elo: Optional[int] = None,
+        use_limit_strength: bool = False,
+    ) -> None:
+        """Apply extended Stockfish strength levers mid-game.
+
+        Used by the webapp's advanced difficulty modal. Bypasses the legacy
+        1–20 ``difficulty`` → skill mapping so LCD-driven robot moves use the
+        same skill level / think time / Direct-Elo settings as the dashboard.
+        """
+        if skill_level is not None:
+            self.current_skill_level = max(0, min(20, int(skill_level)))
+        if think_time is not None:
+            self.config.think_time = float(think_time)
+        self.current_uci_elo = uci_elo
+        self.current_use_limit_strength = bool(use_limit_strength)
 
     def _on_promotion_choice(self, piece: str) -> None:
         """Called by the bridge when ESP32 sends PROMOTION_CHOICE <piece>."""

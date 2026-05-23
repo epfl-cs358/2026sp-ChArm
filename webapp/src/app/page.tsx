@@ -16,6 +16,7 @@ import {
   Grid3X3,
   Loader2,
   Play,
+  RotateCcw,
   Settings,
   ShieldCheck,
   Square,
@@ -71,28 +72,94 @@ function controllerPhaseLabel(phase: ControllerPhase): string {
   }
 }
 
-function estimateEloForSkill(skill: number): number {
-  const anchors: Array<[number, number]> = [
-    [0, 1100], [5, 1500], [10, 1800], [15, 2300], [20, 2850],
-  ];
-  const s = Math.max(0, Math.min(20, skill));
-  for (let i = 0; i < anchors.length - 1; i++) {
-    const [s0, e0] = anchors[i];
-    const [s1, e1] = anchors[i + 1];
-    if (s >= s0 && s <= s1) {
-      const t = (s - s0) / (s1 - s0);
-      return Math.round(e0 + t * (e1 - e0));
-    }
+// ── Extended difficulty system (1–50 compound level) ───────────────────────
+const LEVEL_STORAGE_KEY = "charm-compound-level";
+const DEFAULT_COMPOUND_LEVEL = 25;
+const MIN_COMPOUND_LEVEL = 1;
+const MAX_COMPOUND_LEVEL = 50;
+
+type StockfishParams = {
+  skill_level: number;
+  think_time: number;
+  uci_elo: number | null;
+  use_limit_strength: boolean;
+  elo_estimate: number;
+};
+
+// Map a 1–50 compound level to concrete Stockfish parameters across three
+// zones: pure Skill, Skill + longer think, then Direct-Elo targeting.
+function compoundLevelToParams(level: number): StockfishParams {
+  const lvl = Math.max(MIN_COMPOUND_LEVEL, Math.min(MAX_COMPOUND_LEVEL, level));
+  if (lvl <= 15) {
+    const skill = Math.round(((lvl - 1) / 14) * 10); // 1–15 → Skill 0–10
+    const think = 0.05 + ((lvl - 1) / 14) * 0.1; // 50–150ms
+    const elo = Math.round(600 + ((lvl - 1) / 14) * 800);
+    return { skill_level: skill, think_time: think, uci_elo: null, use_limit_strength: false, elo_estimate: elo };
+  } else if (lvl <= 30) {
+    const t = (lvl - 16) / 14;
+    const skill = Math.round(10 + t * 10); // 16–30 → Skill 10–20
+    const think = 0.15 + t * 0.35; // 150–500ms
+    const elo = Math.round(1400 + t * 600);
+    return { skill_level: skill, think_time: think, uci_elo: null, use_limit_strength: false, elo_estimate: elo };
   }
-  return anchors[anchors.length - 1][1];
+  const t = (lvl - 31) / 19;
+  const elo = Math.round(1700 + t * (3190 - 1700));
+  const think = 0.3 + t * 1.7; // 300ms–2s
+  return { skill_level: 20, think_time: think, uci_elo: elo, use_limit_strength: true, elo_estimate: elo };
 }
 
-function skillTier(skill: number): string {
-  if (skill <= 3) return "Beginner";
-  if (skill <= 7) return "Casual";
-  if (skill <= 12) return "Club";
-  if (skill <= 16) return "Strong";
+function estimateEloForCompoundLevel(level: number): number {
+  return compoundLevelToParams(level).elo_estimate;
+}
+
+function compoundTier(level: number): string {
+  if (level <= 8) return "Beginner";
+  if (level <= 15) return "Club";
+  if (level <= 23) return "Intermediate";
+  if (level <= 30) return "Strong";
+  if (level <= 40) return "Expert";
   return "Master";
+}
+
+// Calibration table for advanced (Skill + Think Time) Elo estimation.
+const ELO_TABLE: Record<number, Record<number, number>> = {
+  0:  { 0.05: 550,  0.1: 600,  0.3: 680,  0.5: 720,  1.0: 780,  2.0: 830  },
+  5:  { 0.05: 1000, 0.1: 1100, 0.3: 1250, 0.5: 1350, 1.0: 1450, 2.0: 1520 },
+  10: { 0.05: 1400, 0.1: 1550, 0.3: 1700, 0.5: 1800, 1.0: 1900, 2.0: 1980 },
+  15: { 0.05: 1900, 0.1: 2050, 0.3: 2200, 0.5: 2300, 1.0: 2420, 2.0: 2500 },
+  20: { 0.05: 2300, 0.1: 2500, 0.3: 2700, 0.5: 2850, 1.0: 3000, 2.0: 3190 },
+};
+const SKILL_ANCHORS = [0, 5, 10, 15, 20];
+const TIME_ANCHORS = [0.05, 0.1, 0.3, 0.5, 1.0, 2.0];
+
+// 2D bilinear interpolation over ELO_TABLE — pure, client-side, zero latency.
+function estimateEloFromParams(skillLevel: number, thinkTime: number): number {
+  const s = Math.max(0, Math.min(20, skillLevel));
+  const t = Math.max(0.05, Math.min(2.0, thinkTime));
+
+  const siRaw = SKILL_ANCHORS.findIndex((a) => a >= s);
+  const si = siRaw === -1 ? SKILL_ANCHORS.length - 1 : siRaw;
+  const s0 = SKILL_ANCHORS[Math.max(0, si - 1)];
+  const s1 = SKILL_ANCHORS[si];
+  const sT = s0 === s1 ? 0 : (s - s0) / (s1 - s0);
+
+  const tiRaw = TIME_ANCHORS.findIndex((a) => a >= t);
+  const ti = tiRaw === -1 ? TIME_ANCHORS.length - 1 : tiRaw;
+  const t0 = TIME_ANCHORS[Math.max(0, ti - 1)];
+  const t1 = TIME_ANCHORS[ti];
+  const tT = t0 === t1 ? 0 : (t - t0) / (t1 - t0);
+
+  const e00 = ELO_TABLE[s0][t0];
+  const e01 = ELO_TABLE[s0][t1];
+  const e10 = ELO_TABLE[s1][t0];
+  const e11 = ELO_TABLE[s1][t1];
+
+  return Math.round(
+    e00 * (1 - sT) * (1 - tT) +
+    e01 * (1 - sT) * tT +
+    e10 * sT * (1 - tT) +
+    e11 * sT * tT,
+  );
 }
 
 const RobotArmOverlay = dynamic(() => import("@/components/RobotArmOverlay"), { ssr: false });
@@ -395,15 +462,32 @@ function getHistoryRows(uciMoves: string[]): { num: number; w: string; b?: strin
   return rows;
 }
 
+function invertScore(score: string): string {
+  if (score.startsWith("+")) return "-" + score.substring(1);
+  if (score.startsWith("-")) return "+" + score.substring(1);
+  if (score.startsWith("M")) return "-M" + score.substring(1);
+  if (score.startsWith("-M")) return "M" + score.substring(2);
+  const num = parseFloat(score);
+  if (!isNaN(num) && num !== 0) {
+    return num > 0 ? `-${num.toFixed(1)}` : `+${Math.abs(num).toFixed(1)}`;
+  }
+  return score;
+}
+
 function GameEvaluationCard({
   evaluation,
   moves = [],
+  playerColor = "white",
 }: {
   evaluation: GameEvaluation | null;
   moves?: string[];
+  playerColor?: "white" | "black";
 }) {
-  // Map win % to a horizontal split between white (top of bar) and black.
+  const isBlack = playerColor === "black";
   const winPct = evaluation?.win_percentage ?? 50;
+  const displayWinPct = isBlack ? (100 - winPct) : winPct;
+  const displayScore = isBlack && evaluation?.score ? invertScore(evaluation.score) : (evaluation?.score ?? "0.0");
+
   const whiteShare = Math.max(2, Math.min(98, winPct));
   const blackShare = 100 - whiteShare;
   const ratingStyle = evaluation?.player_move_rating
@@ -417,11 +501,11 @@ function GameEvaluationCard({
       const winner = evaluation.mate > 0 ? "White" : "Black";
       positionLine = `${winner} has a forced mate in ${Math.abs(evaluation.mate)}`;
     } else if (evaluation.winning_color === "white") {
-      positionLine = `White is winning (${evaluation.score})`;
+      positionLine = `White is winning (${displayScore})`;
     } else if (evaluation.winning_color === "black") {
-      positionLine = `Black is winning (${evaluation.score})`;
+      positionLine = `Black is winning (${displayScore})`;
     } else {
-      positionLine = `Position is equal (${evaluation.score})`;
+      positionLine = `Position is equal (${displayScore})`;
     }
   }
 
@@ -433,31 +517,40 @@ function GameEvaluationCard({
       <TooltipProvider delay={150}>
         <CardContent className="px-4 pb-4 space-y-4">
           <div className="flex items-center gap-4">
-            {/* Vertical eval bar — white on top, black on bottom (Chess.com style). */}
+            {/* Vertical eval bar — matches board orientation (player POV is at the bottom). */}
             <InfoTip
               side="right"
               text="Visual gauge of the position balance. Larger White share means White advantage; larger Black share means Black advantage."
             >
               <div
-                className="relative h-48 w-7 cursor-help overflow-hidden rounded border"
+                className="relative h-48 w-7 cursor-help overflow-hidden rounded border flex flex-col"
                 style={{ borderColor: "var(--charm-border)" }}
                 aria-label="evaluation bar"
               >
-                <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
-                <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
+                {isBlack ? (
+                  <>
+                    <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
+                    <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
+                  </>
+                ) : (
+                  <>
+                    <div style={{ background: "oklch(0.18 0.01 250)", height: `${blackShare}%` }} />
+                    <div style={{ background: "var(--charm-board-light)", height: `${whiteShare}%` }} />
+                  </>
+                )}
                 <div className="pointer-events-none absolute inset-x-0" style={{ top: "50%", borderTop: "1px dashed oklch(0 0 0 / 0.35)" }} />
               </div>
             </InfoTip>
             <div className="flex-1 space-y-1.5">
               <InfoTip text="Stockfish centipawn score. Positive numbers favor White, negative numbers favor Black. 'M' represents checkmate in X moves.">
                 <p className="w-fit cursor-help font-jetbrains text-4xl font-semibold" style={{ color: "var(--charm-text)" }}>
-                  {evaluation?.score ?? "0.0"}
+                  {displayScore}
                 </p>
               </InfoTip>
               <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>{positionLine}</p>
-              <InfoTip text="The mathematical win probability for White based on current engine evaluation.">
+              <InfoTip text={`The mathematical win probability for ${playerColor} based on current engine evaluation.`}>
                 <p className="w-fit cursor-help font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                  Win probability (white): <span style={{ color: "var(--charm-cyan)" }}>{winPct.toFixed(1)}%</span>
+                  Win probability ({playerColor}): <span style={{ color: "var(--charm-cyan)" }}>{displayWinPct.toFixed(1)}%</span>
                 </p>
               </InfoTip>
             </div>
@@ -617,6 +710,27 @@ export default function Dashboard() {
   const [showSkillModal, setShowSkillModal] = useState(false);
   const [draftSkillLevel, setDraftSkillLevel] = useState<number>(DEFAULT_SKILL_LEVEL);
 
+  // Compound 1–50 difficulty + advanced overrides. `difficultyParams` is the
+  // single effective set of Stockfish levers sent to the backend; it comes
+  // from the compound level unless the user applied advanced overrides.
+  const [compoundLevel, setCompoundLevel] = useState(DEFAULT_COMPOUND_LEVEL);
+  const [advancedParams, setAdvancedParams] = useState<StockfishParams | null>(null);
+  const [draftLevel, setDraftLevel] = useState(DEFAULT_COMPOUND_LEVEL);
+  const [advancedMode, setAdvancedMode] = useState(false);
+  const [draftThinkTime, setDraftThinkTime] = useState(0.5);
+  const [draftUciElo, setDraftUciElo] = useState<number | null>(null);
+  const [draftUseLimitStrength, setDraftUseLimitStrength] = useState(false);
+  const difficultyParams = useMemo<StockfishParams>(
+    () => advancedParams ?? compoundLevelToParams(compoundLevel),
+    [advancedParams, compoundLevel],
+  );
+  // Live Elo shown in the difficulty modal — reacts instantly to any slider.
+  const liveEloEstimate = advancedMode
+    ? (draftUseLimitStrength && draftUciElo !== null
+        ? draftUciElo
+        : estimateEloFromParams(draftSkillLevel, draftThinkTime))
+    : estimateEloForCompoundLevel(draftLevel);
+
   // Interactive play state.
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [legalTargets, setLegalTargets] = useState<Set<string>>(new Set());
@@ -629,6 +743,12 @@ export default function Dashboard() {
   const [robotArmPlay, setRobotArmPlay] = useState(false);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
 
+  // Color selection modal — shown once per game before Start Game fires.
+  const [playerColor, setPlayerColor] = useState<"white" | "black">("white");
+  const [showColorModal, setShowColorModal] = useState(false);
+  // Callback stored while the modal is open, run with the chosen color on confirm.
+  const pendingStart = useRef<((color: "white" | "black") => void) | null>(null);
+
   useEffect(() => {
     const storedPort = window.localStorage.getItem(ROBOT_PORT_STORAGE_KEY);
     if (storedPort) setRobotPort(storedPort);
@@ -640,8 +760,16 @@ export default function Dashboard() {
       setSkillLevel(clamped);
       setDraftSkillLevel(clamped);
     }
+
+    const storedLevel = window.localStorage.getItem(LEVEL_STORAGE_KEY);
+    const parsedLevel = storedLevel ? parseInt(storedLevel, 10) : NaN;
+    if (Number.isFinite(parsedLevel)) {
+      const clamped = Math.max(MIN_COMPOUND_LEVEL, Math.min(MAX_COMPOUND_LEVEL, parsedLevel));
+      setCompoundLevel(clamped);
+      setDraftLevel(clamped);
+    }
   }, []);
-  const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; at: number } | null>(null);
+  const [skillApplyToast, setSkillApplyToast] = useState<{ level: number; elo: number; at: number } | null>(null);
 
   // ── In-process LCD controller link ─────────────────────────────────────
   const [controllerRunning, setControllerRunning] = useState(false);
@@ -695,6 +823,11 @@ export default function Dashboard() {
         // session state so the board / manual-move UI and the primary button
         // stay correct (e.g. a failed board check keeps "Start game").
         setGameSessionStarted(!!gs.game_started);
+        // Surface controller-side failures (e.g. board-setup validation) so
+        // the user sees why a check failed — including the flipped-board hint.
+        if (gs.phase === "error" && gs.error_message) {
+          setError(gs.error_message);
+        }
       } catch {
         // network blip — ignore
       }
@@ -745,6 +878,12 @@ export default function Dashboard() {
       window.localStorage.setItem(SKILL_LEVEL_STORAGE_KEY, String(skillLevel));
     }
   }, [skillLevel]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LEVEL_STORAGE_KEY, String(compoundLevel));
+    }
+  }, [compoundLevel]);
 
   useEffect(() => {
     if (!skillApplyToast) return;
@@ -809,6 +948,7 @@ export default function Dashboard() {
           arm_port: resolveSerialPort(robotPort) || DEFAULT_SERIAL_PORT,
           player_color: "white",
           difficulty,
+          think_time: difficultyParams.think_time,
           engine_path: DEFAULT_ENGINE_PATH,
         });
         setControllerRunning(!!s.running);
@@ -818,7 +958,29 @@ export default function Dashboard() {
     } finally {
       setControllerBusy(false);
     }
-  }, [controllerBusy, controllerRunning, difficulty, resolveSerialPort, robotPort]);
+  }, [controllerBusy, controllerRunning, difficulty, difficultyParams, resolveSerialPort, robotPort]);
+
+  const handleRestart = useCallback(async () => {
+    if (!confirm("Restart the game and clear arm calibration?")) return;
+    try {
+      await api.controllerRestart();
+      // Reset all client-side state so the dashboard reflects a fresh game.
+      setGame(new Chess());
+      setControllerMoves([]);
+      setMoveHistory([]);
+      setMoveLog([]);
+      setStepResult(null);
+      setRobotMove(null);
+      setEvaluation(null);
+      setLastMove(null);
+      setError(null);
+      setGameSessionStarted(false);
+      setPlayerColor("white");   // reset colour choice so modal re-appears
+      setArmCalibrated(false);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Restart failed");
+    }
+  }, [setArmCalibrated]);
 
   const activateCnnModel = useCallback(async (run_id: string) => {
     setCnnModelBusy(true);
@@ -936,7 +1098,10 @@ export default function Dashboard() {
         port: resolveSerialPort(robotPort),
         baud: 115200,
         difficulty,
-        skill_level: skillLevel,
+        skill_level: difficultyParams.skill_level,
+        think_time: difficultyParams.think_time,
+        uci_elo: difficultyParams.uci_elo,
+        use_limit_strength: difficultyParams.use_limit_strength,
       });
       if (session.status === "robot_move_failed") {
         setError(session.robot_move?.message ?? "Robot reply failed");
@@ -949,17 +1114,20 @@ export default function Dashboard() {
       setSelectedSquare(null);
       setLegalTargets(new Set());
     }
-  }, [applySessionResponse, difficulty, manualBusy, robotArmPlay, robotPort, skillLevel]);
+  }, [applySessionResponse, difficulty, difficultyParams, manualBusy, robotArmPlay, robotPort]);
 
-  const startSimulationSession = useCallback(async () => {
+  const startSimulationSession = useCallback(async (colorOverride?: "white" | "black") => {
     if (manualBusy) return;
     setManualBusy(true);
     setError(null);
     try {
       const session = await api.manualStart({
-        player_color: "white",
+        player_color: colorOverride ?? playerColor,
         difficulty,
-        skill_level: skillLevel,
+        skill_level: difficultyParams.skill_level,
+        think_time: difficultyParams.think_time,
+        uci_elo: difficultyParams.uci_elo,
+        use_limit_strength: difficultyParams.use_limit_strength,
         execute_robot: robotArmPlay,
         port: resolveSerialPort(robotPort),
         baud: 115200,
@@ -976,7 +1144,7 @@ export default function Dashboard() {
     } finally {
       setManualBusy(false);
     }
-  }, [applySessionResponse, difficulty, manualBusy, robotArmPlay, robotPort, skillLevel]);
+  }, [applySessionResponse, difficulty, difficultyParams, manualBusy, playerColor, robotArmPlay, robotPort]);
 
   const handleSquareClick = useCallback((square: string) => {
     if (manualBusy || pendingPromotion) return;
@@ -1028,7 +1196,7 @@ export default function Dashboard() {
     void submitManualMove(`${from}${to}${piece}`);
   }, [pendingPromotion, submitManualMove]);
 
-  const processHumanTurn = useCallback(async () => {
+  const processHumanTurn = useCallback(async (colorOverride?: "white" | "black") => {
     if (!armCalibrated) {
       setError("Run startup arm calibration before the first turn.");
       setTurnState("arm_calibrate");
@@ -1042,9 +1210,12 @@ export default function Dashboard() {
     try {
       if (!gameSessionStarted) {
         const session = await api.startGameSession({
-          player_color: "white",
+          player_color: colorOverride ?? playerColor,
           difficulty,
-          skill_level: skillLevel,
+          skill_level: difficultyParams.skill_level,
+          think_time: difficultyParams.think_time,
+          uci_elo: difficultyParams.uci_elo,
+          use_limit_strength: difficultyParams.use_limit_strength,
           params: DEFAULT_PARAMS,
           capture: true,
           max_mismatches: 0,
@@ -1070,6 +1241,7 @@ export default function Dashboard() {
         }
         if (session.fen) setGame(new Chess(session.fen));
         if (session.moves) setMoveHistory(session.moves);
+        if (session.evaluation) setEvaluation(session.evaluation);
         setGameSessionStarted(true);
         setMoveLog((current) => [
           ...current,
@@ -1089,7 +1261,10 @@ export default function Dashboard() {
         capture: true,
         max_mismatches: 0,
         difficulty,
-        skill_level: skillLevel,
+        skill_level: difficultyParams.skill_level,
+        think_time: difficultyParams.think_time,
+        uci_elo: difficultyParams.uci_elo,
+        use_limit_strength: difficultyParams.use_limit_strength,
         port: resolveSerialPort(robotPort),
         baud: 115200,
       });
@@ -1115,6 +1290,7 @@ export default function Dashboard() {
 
       if (response.fen) setGame(new Chess(response.fen));
       if (response.moves) setMoveHistory(response.moves);
+      if (response.evaluation) setEvaluation(response.evaluation);
       if (response.human_move?.move_uci) {
         setMoveLog((current) => [...current, `You: ${response.human_move?.san ?? response.human_move?.move_uci}`]);
         setLastMove(response.human_move.move_uci);
@@ -1140,7 +1316,7 @@ export default function Dashboard() {
       setError(e instanceof Error ? e.message : "Failed to process turn");
       setTurnState("error");
     }
-  }, [armCalibrated, difficulty, gameSessionStarted, robotPort, robotStatus, turnState, busy, skillLevel]);
+  }, [armCalibrated, difficulty, difficultyParams, gameSessionStarted, playerColor, robotPort, robotStatus, turnState, busy]);
 
   // Phases where the controller is mid-loop and a new trigger would collide.
   const controllerBusyPhase = (
@@ -1162,16 +1338,43 @@ export default function Dashboard() {
   // the same in-process controller loops the physical buttons trigger.
   const handlePrimaryAction = useCallback(() => {
     if (controllerRunning) {
-      const trigger = controllerPreGame
-        ? api.controllerCheckBoard()
-        : api.controllerPlayerDone();
-      void trigger.catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : "Controller trigger failed"),
-      );
+      if (controllerPreGame) {
+        // Pre-game with the LCD link: pick color, push it to the controller,
+        // then trigger the board check.
+        pendingStart.current = (color) => {
+          void api
+            .controllerSetColor(color)
+            .then(() => api.controllerCheckBoard())
+            .catch((e: unknown) =>
+              setError(e instanceof Error ? e.message : "Controller trigger failed"),
+            );
+        };
+        setShowColorModal(true);
+        return;
+      }
+      void api
+        .controllerPlayerDone()
+        .catch((e: unknown) =>
+          setError(e instanceof Error ? e.message : "Controller trigger failed"),
+        );
+      return;
+    }
+    // On the very first start (no session yet), show the color picker.
+    if (!gameSessionStarted) {
+      pendingStart.current = (color) => void processHumanTurn(color);
+      setShowColorModal(true);
       return;
     }
     void processHumanTurn();
-  }, [controllerRunning, controllerPreGame, processHumanTurn]);
+  }, [controllerRunning, controllerPreGame, gameSessionStarted, processHumanTurn]);
+
+  const handleConfirmColor = useCallback((color: "white" | "black") => {
+    setPlayerColor(color);
+    setShowColorModal(false);
+    const run = pendingStart.current;
+    pendingStart.current = null;
+    run?.(color);
+  }, []);
 
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
@@ -1275,16 +1478,33 @@ export default function Dashboard() {
           </Badge>
           <button
             type="button"
-            onClick={() => { setDraftSkillLevel(skillLevel); setShowSkillModal(true); }}
-            title={`Stockfish skill ${skillLevel}/20 (~${estimateEloForSkill(skillLevel)} Elo). Click to change.`}
+            onClick={() => {
+              setDraftLevel(compoundLevel);
+              setDraftSkillLevel(difficultyParams.skill_level);
+              setDraftThinkTime(difficultyParams.think_time);
+              setDraftUciElo(difficultyParams.uci_elo);
+              setDraftUseLimitStrength(difficultyParams.use_limit_strength);
+              setAdvancedMode(advancedParams !== null);
+              setShowSkillModal(true);
+            }}
+            title={`Stockfish difficulty Lv ${compoundLevel}/50 (~${difficultyParams.elo_estimate} Elo). Click to change.`}
             className="flex items-center gap-2 rounded-md border px-3 py-1.5 font-jetbrains text-xs transition-colors hover:bg-[oklch(from_var(--charm-cyan)_l_c_h_/_0.14)]"
             style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "oklch(from var(--charm-cyan) l c h / 0.08)", color: "var(--charm-cyan)" }}>
             <Swords className="size-4" />
             <span style={{ color: "var(--charm-muted)" }}>Stockfish</span>
-            <span className="font-semibold" style={{ color: "var(--charm-cyan)" }}>Lv {skillLevel}/20</span>
+            <span className="font-semibold" style={{ color: "var(--charm-cyan)" }}>Lv {compoundLevel}/50</span>
             <span style={{ color: "var(--charm-muted)" }}>·</span>
-            <span style={{ color: "var(--charm-muted)" }}>~{estimateEloForSkill(skillLevel)} Elo</span>
+            <span style={{ color: "var(--charm-muted)" }}>~{difficultyParams.elo_estimate} Elo</span>
           </button>
+          <Button
+            variant="outline"
+            onClick={handleRestart}
+            className="font-jetbrains"
+            title="Reset the game session and clear arm calibration."
+          >
+            <RotateCcw className="size-4" />
+            Restart Game
+          </Button>
           <Badge variant="outline" style={{ borderColor: "var(--charm-border)", color: turnState === "error" ? "oklch(0.65 0.22 25)" : "var(--charm-cyan)" }}>
             {statusLabel}
           </Badge>
@@ -1344,7 +1564,7 @@ export default function Dashboard() {
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(330px,0.65fr)]">
         {/* Column 1: Game Evaluation (wide, top) + SCARA Arm */}
         <div className="flex flex-col gap-5">
-        <GameEvaluationCard evaluation={evaluation} moves={moveHistory} />
+        <GameEvaluationCard evaluation={evaluation} moves={moveHistory} playerColor={playerColor} />
         <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
           <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
             <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>SCARA Arm</h2>
@@ -1543,7 +1763,7 @@ export default function Dashboard() {
                   {testBusy === "capture" ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />}
                   Capture
                 </Button>
-                <Button variant="outline" size="sm" className="font-jetbrains" onClick={processHumanTurn} disabled={busy || !armCalibrated || Boolean(testBusy)}>
+                <Button variant="outline" size="sm" className="font-jetbrains" onClick={() => void processHumanTurn()} disabled={busy || !armCalibrated || Boolean(testBusy)}>
                   <Bot className="size-4" />
                   Game
                 </Button>
@@ -1616,7 +1836,10 @@ export default function Dashboard() {
                 <Button
                   className="w-full font-jetbrains"
                   variant="outline"
-                  onClick={startSimulationSession}
+                  onClick={() => {
+                    pendingStart.current = (color) => void startSimulationSession(color);
+                    setShowColorModal(true);
+                  }}
                   disabled={manualBusy}
                 >
                   {manualBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
@@ -1707,6 +1930,57 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Player color selection modal */}
+      {showColorModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 backdrop-blur-sm"
+          style={{ background: "oklch(0 0 0 / 0.72)" }}
+          onClick={() => { pendingStart.current = null; setShowColorModal(false); }}>
+          <div className="mx-4 w-full max-w-lg rounded-xl border shadow-2xl"
+            style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: "var(--charm-border)" }}>
+              <div className="flex items-center gap-2">
+                <UserRound className="size-4" style={{ color: "var(--charm-cyan)" }} />
+                <span className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Choose your color</span>
+              </div>
+              <button onClick={() => { pendingStart.current = null; setShowColorModal(false); }}
+                className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>✕ close</button>
+            </div>
+            <div className="p-5">
+              <p className="mb-4 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                Pick the side you are playing. The board is validated against this orientation —
+                set your pieces on your side of the board before starting.
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                {([
+                  { color: "white" as const, label: "Start as White", sub: "You move first", circle: "var(--charm-board-light)", text: "oklch(0.2 0 0)" },
+                  { color: "black" as const, label: "Start as Black", sub: "Robot moves first", circle: "oklch(0.18 0.01 250)", text: "oklch(0.95 0 0)" },
+                ]).map((opt) => (
+                  <button
+                    key={opt.color}
+                    type="button"
+                    onClick={() => handleConfirmColor(opt.color)}
+                    className="group flex flex-col items-center gap-3 rounded-lg border p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg"
+                    style={{ borderColor: "var(--charm-border)", background: "oklch(from var(--charm-cyan) l c h / 0.03)" }}
+                  >
+                    <div
+                      className="flex size-16 items-center justify-center rounded-full border transition-transform group-hover:scale-105"
+                      style={{ background: opt.circle, borderColor: "var(--charm-border)", color: opt.text }}
+                    >
+                      <Swords className="size-7" />
+                    </div>
+                    <div className="text-center">
+                      <div className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>{opt.label}</div>
+                      <div className="font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>{opt.sub}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stockfish skill modal */}
       {showSkillModal && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-12 backdrop-blur-sm"
@@ -1725,36 +1999,86 @@ export default function Dashboard() {
             <div className="space-y-5 p-5">
               <div className="flex items-baseline justify-between">
                 <div>
-                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>Skill Level</div>
+                  <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>Difficulty</div>
                   <div className="font-jetbrains text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
-                    {draftSkillLevel}<span className="ml-1 text-base" style={{ color: "var(--charm-muted)" }}>/ 20</span>
+                    Lv {draftLevel}<span className="ml-1 text-base" style={{ color: "var(--charm-muted)" }}>/ 50</span>
                   </div>
                 </div>
                 <div className="text-right">
                   <div className="font-jetbrains text-xs uppercase tracking-wider" style={{ color: "var(--charm-muted)" }}>Estimated Elo</div>
-                  <div className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>~{estimateEloForSkill(draftSkillLevel)}</div>
-                  <div className="font-jetbrains text-xs mt-0.5" style={{ color: "var(--charm-muted)" }}>{skillTier(draftSkillLevel)}</div>
+                  <div className="font-jetbrains text-2xl font-semibold" style={{ color: "var(--charm-text)" }}>~{liveEloEstimate}</div>
+                  <div className="font-jetbrains text-xs mt-0.5" style={{ color: "var(--charm-muted)" }}>{compoundTier(draftLevel)}</div>
                 </div>
               </div>
-              <Slider value={[draftSkillLevel]} min={MIN_SKILL_LEVEL} max={MAX_SKILL_LEVEL} step={1}
+              <Slider value={[draftLevel]} min={MIN_COMPOUND_LEVEL} max={MAX_COMPOUND_LEVEL} step={1}
                 onValueChange={(v) => {
                   const next = Array.isArray(v) ? v[0] : v;
-                  if (Number.isFinite(next)) setDraftSkillLevel(Math.max(MIN_SKILL_LEVEL, Math.min(MAX_SKILL_LEVEL, next as number)));
+                  if (Number.isFinite(next)) {
+                    const lvl = Math.max(MIN_COMPOUND_LEVEL, Math.min(MAX_COMPOUND_LEVEL, next as number));
+                    setDraftLevel(lvl);
+                    // Keep advanced sliders in sync with the compound level when
+                    // not in advanced mode, so toggling Advanced is continuous.
+                    if (!advancedMode) {
+                      const p = compoundLevelToParams(lvl);
+                      setDraftSkillLevel(p.skill_level);
+                      setDraftThinkTime(p.think_time);
+                      setDraftUciElo(p.uci_elo);
+                      setDraftUseLimitStrength(p.use_limit_strength);
+                    }
+                  }
                 }} className="w-full" />
               <div className="flex justify-between font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
-                <span>1 · Beginner</span><span>10 · Club</span><span>20 · Master</span>
+                <span>1 · Beginner</span><span>15 · Club</span><span>30 · Strong</span><span>50 · Master</span>
               </div>
+
+              {/* Advanced expert sliders */}
+              <div className="rounded-md border" style={{ borderColor: "var(--charm-border)" }}>
+                <button type="button" onClick={() => setAdvancedMode((a) => !a)}
+                  className="flex w-full items-center justify-between px-3 py-2 font-jetbrains text-xs"
+                  style={{ color: "var(--charm-text)" }}>
+                  <span><Settings className="mr-1 inline size-3" /> Advanced (manual Stockfish levers)</span>
+                  <span style={{ color: "var(--charm-muted)" }}>{advancedMode ? "▲" : "▼"}</span>
+                </button>
+                {advancedMode && (
+                  <div className="space-y-4 border-t px-3 py-3" style={{ borderColor: "var(--charm-border)" }}>
+                    <div className="space-y-1">
+                      <div className="flex justify-between font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                        <span>Skill Level</span><span style={{ color: "var(--charm-cyan)" }}>{draftSkillLevel}/20</span>
+                      </div>
+                      <Slider value={[draftSkillLevel]} min={0} max={20} step={1}
+                        onValueChange={(v) => { const n = Array.isArray(v) ? v[0] : v; if (Number.isFinite(n)) setDraftSkillLevel(Math.max(0, Math.min(20, n as number))); }}
+                        className="w-full" />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex justify-between font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                        <span>Think Time</span><span style={{ color: "var(--charm-cyan)" }}>{draftThinkTime.toFixed(2)}s</span>
+                      </div>
+                      <Slider value={[draftThinkTime]} min={0.05} max={3.0} step={0.05}
+                        onValueChange={(v) => { const n = Array.isArray(v) ? v[0] : v; if (Number.isFinite(n)) setDraftThinkTime(Math.max(0.05, Math.min(3.0, n as number))); }}
+                        className="w-full" />
+                    </div>
+                    <label className="flex items-center gap-2 font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                      <input type="checkbox" checked={draftUseLimitStrength}
+                        onChange={(e) => { setDraftUseLimitStrength(e.target.checked); if (e.target.checked && draftUciElo === null) setDraftUciElo(1500); }} />
+                      Direct Elo targeting (UCI_LimitStrength)
+                    </label>
+                    <div className="space-y-1" style={{ opacity: draftUseLimitStrength ? 1 : 0.4 }}>
+                      <div className="flex justify-between font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
+                        <span>UCI Elo</span><span style={{ color: "var(--charm-cyan)" }}>{draftUciElo ?? 1320}</span>
+                      </div>
+                      <Slider value={[draftUciElo ?? 1320]} min={1320} max={3190} step={10}
+                        disabled={!draftUseLimitStrength}
+                        onValueChange={(v) => { const n = Array.isArray(v) ? v[0] : v; if (Number.isFinite(n)) setDraftUciElo(Math.max(1320, Math.min(3190, n as number))); }}
+                        className="w-full" />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-md border px-3 py-2 font-jetbrains text-xs"
                 style={{ borderColor: "var(--charm-border)", background: "oklch(from var(--charm-cyan) l c h / 0.04)", color: "var(--charm-muted)" }}>
                 Stockfish reconfigures on every robot move, so changes apply to the <span style={{ color: "var(--charm-cyan)" }}>next</span> move — including mid-game.
               </div>
-              {draftSkillLevel !== skillLevel && (
-                <div className="rounded-md border px-3 py-2 font-jetbrains text-xs flex items-center justify-between"
-                  style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.4)", background: "oklch(from var(--charm-cyan) l c h / 0.07)", color: "var(--charm-text)" }}>
-                  <span>Current: <span style={{ color: "var(--charm-muted)" }}>Lv {skillLevel} (~{estimateEloForSkill(skillLevel)} Elo)</span></span>
-                  <span>Pending: <span style={{ color: "var(--charm-cyan)" }}>Lv {draftSkillLevel} (~{estimateEloForSkill(draftSkillLevel)} Elo)</span></span>
-                </div>
-              )}
               <div className="flex justify-end gap-2 pt-1">
                 <button type="button" onClick={() => setShowSkillModal(false)}
                   className="rounded-md border px-3 py-1.5 font-jetbrains text-xs"
@@ -1763,14 +2087,31 @@ export default function Dashboard() {
                 </button>
                 <button type="button"
                   onClick={() => {
-                    setSkillLevel(draftSkillLevel);
-                    setSkillApplyToast({ level: draftSkillLevel, at: Date.now() });
+                    const applied: StockfishParams = advancedMode
+                      ? {
+                          skill_level: draftSkillLevel,
+                          think_time: draftThinkTime,
+                          uci_elo: draftUseLimitStrength ? draftUciElo : null,
+                          use_limit_strength: draftUseLimitStrength,
+                          elo_estimate: liveEloEstimate,
+                        }
+                      : compoundLevelToParams(draftLevel);
+                    setCompoundLevel(draftLevel);
+                    setAdvancedParams(advancedMode ? applied : null);
+                    setSkillLevel(applied.skill_level);
+                    setSkillApplyToast({ level: draftLevel, elo: applied.elo_estimate, at: Date.now() });
                     setShowSkillModal(false);
-                    // Push the change to the LCD when the in-process controller is active.
-                    void api.lcdSetDifficulty(draftSkillLevel).catch(() => undefined);
+                    // Push to the running controller (affects LCD-driven robot moves)
+                    // and reflect on the LCD's 1–20 display via a remap.
+                    void api.setDifficultyParams({
+                      skill_level: applied.skill_level,
+                      think_time: applied.think_time,
+                      uci_elo: applied.uci_elo,
+                      use_limit_strength: applied.use_limit_strength,
+                    }).catch(() => undefined);
+                    void api.lcdSetDifficulty(Math.max(1, Math.min(20, Math.round((draftLevel / 50) * 20)))).catch(() => undefined);
                   }}
-                  disabled={draftSkillLevel === skillLevel}
-                  className="rounded-md border px-3 py-1.5 font-jetbrains text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="rounded-md border px-3 py-1.5 font-jetbrains text-xs"
                   style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "oklch(from var(--charm-cyan) l c h / 0.15)", color: "var(--charm-cyan)" }}>
                   Apply
                 </button>
@@ -1784,8 +2125,8 @@ export default function Dashboard() {
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] rounded-md border px-4 py-2 font-jetbrains text-xs shadow-lg flex items-center gap-2"
           style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.5)", background: "var(--charm-card)", color: "var(--charm-text)" }}>
           <CheckCircle2 className="size-4" style={{ color: "var(--charm-cyan)" }} />
-          Stockfish skill level set to <span style={{ color: "var(--charm-cyan)" }}>{skillApplyToast.level}/20</span>
-          <span style={{ color: "var(--charm-muted)" }}>(~{estimateEloForSkill(skillApplyToast.level)} Elo)</span>
+          Difficulty set to <span style={{ color: "var(--charm-cyan)" }}>Lv {skillApplyToast.level}/50</span>
+          <span style={{ color: "var(--charm-muted)" }}>(~{skillApplyToast.elo} Elo)</span>
           <span style={{ color: "var(--charm-muted)" }}>— applies on next robot move.</span>
         </div>
       )}

@@ -354,6 +354,8 @@ class GameSessionPayload(BaseModel):
     player_color: str = "white"
     difficulty: int = 1
     skill_level: Optional[int] = None
+    uci_elo: Optional[int] = None
+    use_limit_strength: bool = False
     params: PipelineParams = Field(default_factory=PipelineParams)
     capture: bool = True
     max_mismatches: int = 0
@@ -370,6 +372,8 @@ class GameSessionTurnPayload(BaseModel):
     max_mismatches: int = 0
     difficulty: int = 1
     skill_level: Optional[int] = None
+    uci_elo: Optional[int] = None
+    use_limit_strength: bool = False
     engine_path: str = "stockfish"
     think_time: float = 0.5
     port: Optional[str] = None
@@ -792,7 +796,7 @@ def _game_session_payload(
     }
 
 
-def _robot_move_request(move_uci: str, board: chess.Board) -> dict:
+def _robot_move_request(move_uci: str, board: chess.Board, flip_180: bool = False) -> dict:
     move = chess.Move.from_uci(move_uci)
     piece = board.piece_at(move.from_square)
     captured_piece = board.piece_at(move.to_square)
@@ -802,6 +806,7 @@ def _robot_move_request(move_uci: str, board: chess.Board) -> dict:
     return {
         "command": "move",
         "uci": move_uci,
+        "flip_180": flip_180,
         "capture": board.is_capture(move),
         "castling": board.is_castling(move),
         "promotion": bool(move.promotion),
@@ -811,7 +816,8 @@ def _robot_move_request(move_uci: str, board: chess.Board) -> dict:
 
 
 def _execute_robot_session_move(move_uci: str, board: chess.Board, port: Optional[str], baud: int) -> dict:
-    payload = _robot_move_request(move_uci, board)
+    flip_180 = (_GAME_SESSION.get_player_color() == "black")
+    payload = _robot_move_request(move_uci, board, flip_180=flip_180)
     commands = robot_adapter.commands_for_request(payload)
     responses = robot_adapter.send_commands(commands, port, baud)
     return robot_adapter.response(responses, ROBOT_CAL_PATH)
@@ -1506,6 +1512,7 @@ def game_session_start(payload: GameSessionPayload):
             capture.white_bitmap,
             capture.black_bitmap,
             max_mismatches=payload.max_mismatches,
+            flip_180=(payload.player_color == "black"),
         )
         return AttemptDecision(
             success=last_initial.success,
@@ -1552,6 +1559,8 @@ def game_session_start(payload: GameSessionPayload):
             engine_path=payload.engine_path,
             think_time=payload.think_time,
             skill_level=_resolve_skill_level(payload.skill_level, payload.difficulty),
+            uci_elo=payload.uci_elo,
+            use_limit_strength=payload.use_limit_strength,
         )
         if robot_result.success and robot_result.move_uci and robot_board_copy is not None:
             if payload.execute_robot:
@@ -1648,6 +1657,8 @@ def game_session_player_done(payload: GameSessionTurnPayload):
         engine_path=payload.engine_path,
         think_time=payload.think_time,
         skill_level=_resolve_skill_level(payload.skill_level, payload.difficulty),
+        uci_elo=payload.uci_elo,
+        use_limit_strength=payload.use_limit_strength,
     )
     robot_command = None
     if not robot_result.success or not robot_result.move_uci or robot_board_copy is None:
@@ -1708,6 +1719,8 @@ class ManualStartPayload(BaseModel):
     player_color: Literal["white", "black"] = "white"
     difficulty: int = 1
     skill_level: Optional[int] = None
+    uci_elo: Optional[int] = None
+    use_limit_strength: bool = False
     engine_path: str = "stockfish"
     think_time: float = 0.1
     execute_robot: bool = False
@@ -1753,6 +1766,8 @@ def game_session_manual_start(payload: ManualStartPayload):
             engine_path=payload.engine_path,
             think_time=payload.think_time,
             skill_level=skill_level,
+            uci_elo=payload.uci_elo,
+            use_limit_strength=payload.use_limit_strength,
         )
         if robot_result.success and robot_result.move_uci and robot_board_copy is not None:
             if payload.execute_robot:
@@ -1802,6 +1817,8 @@ class ManualMovePayload(BaseModel):
     think_time: float = 0.1
     difficulty: int = 1
     skill_level: Optional[int] = None
+    uci_elo: Optional[int] = None
+    use_limit_strength: bool = False
 
 
 def _evaluate_safe(
@@ -1930,6 +1947,8 @@ def game_session_manual_move(payload: ManualMovePayload):
         engine_path=payload.engine_path,
         think_time=payload.think_time,
         skill_level=skill_level,
+        uci_elo=payload.uci_elo,
+        use_limit_strength=payload.use_limit_strength,
     )
     robot_command: Optional[dict] = None
 
@@ -3828,6 +3847,10 @@ def controller_start(payload: ControllerStartPayload):
                 on_line=lambda line: print(f"[ESP32] {line}", flush=True),
             )
         except Exception as exc:
+            try:
+                robot_adapter.close()
+            except Exception:
+                pass
             _CONTROLLER_STATE["last_error"] = f"ESP32 TCP connect failed: {exc}"
             raise HTTPException(502, _CONTROLLER_STATE["last_error"]) from exc
 
@@ -3852,6 +3875,10 @@ def controller_start(payload: ControllerStartPayload):
         except Exception as exc:
             try:
                 ui_link.close()
+            except Exception:
+                pass
+            try:
+                robot_adapter.close()
             except Exception:
                 pass
             _CONTROLLER_STATE["last_error"] = f"Controller start failed: {exc}"
@@ -3987,6 +4014,78 @@ def controller_player_done():
         raise HTTPException(409, "Controller not running")
     threading.Thread(target=controller.player_done, daemon=True).start()
     return {"triggered": True}
+
+
+@app.post("/api/controller/restart")
+def controller_restart():
+    """Fully reset the active game so a new one can be started cleanly.
+
+    Resets the shared session (so the next start re-validates the board and
+    re-asks for color) and clears the cached pipeline/evaluation/phase. Works
+    whether or not the LCD controller is running — without it we still reset
+    the shared session the webapp plays through.
+    """
+    with _CONTROLLER_LOCK:
+        controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+        if controller is not None:
+            controller.restart()
+        else:
+            _GAME_SESSION.reset()
+        _CONTROLLER_STATE["pipeline"] = None
+        _CONTROLLER_STATE["evaluation"] = None
+        _CONTROLLER_STATE["bot_move"] = None
+        _CONTROLLER_STATE["phase_error"] = None
+        _CONTROLLER_STATE["phase"] = "waiting" if controller is not None else "idle"
+        _CONTROLLER_STATE["phase_updated_at"] = time.time()
+    return {"restarted": True, "controller_running": _controller_is_running()}
+
+
+class ControllerSetColorPayload(BaseModel):
+    color: Literal["white", "black"]
+
+
+@app.post("/api/controller/set-color")
+def controller_set_color(payload: ControllerSetColorPayload):
+    """Set the player's color on the running controller (mirrors the LCD
+    color-select screen). No-op ack if the controller isn't running."""
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    if controller is None:
+        return {"set": False, "reason": "controller_not_running"}
+    controller.set_player_color(payload.color)
+    return {"set": True, "color": payload.color}
+
+
+class DifficultyParams(BaseModel):
+    skill_level: int = Field(12, ge=0, le=20)
+    think_time: float = Field(0.5, ge=0.05, le=5.0)
+    uci_elo: Optional[int] = Field(None, ge=1320, le=3190)
+    use_limit_strength: bool = False
+
+
+@app.post("/api/game/difficulty-params")
+def game_difficulty_params(payload: DifficultyParams):
+    """Apply extended Stockfish strength levers mid-game.
+
+    Webapp-driven play passes these per turn in its payloads, so this endpoint's
+    job is to push the new strength to the running LCD controller (mirrors
+    lcdSetDifficulty). If no controller is running it's a no-op ack.
+    """
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    if controller is not None:
+        controller.set_difficulty_params(
+            skill_level=payload.skill_level,
+            think_time=payload.think_time,
+            uci_elo=payload.uci_elo,
+            use_limit_strength=payload.use_limit_strength,
+        )
+    return {
+        "applied": True,
+        "controller_running": controller is not None,
+        "skill_level": payload.skill_level,
+        "think_time": payload.think_time,
+        "uci_elo": payload.uci_elo,
+        "use_limit_strength": payload.use_limit_strength,
+    }
 
 
 # ───────────────────────────────────────────────────────────────────────────
