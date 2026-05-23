@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 import urllib.request
@@ -5,7 +6,8 @@ import urllib.error
 from pathlib import Path
 
 # Change this IP if ESP32-CAM prints a new IP in Serial Monitor.
-ESP32_URL = "http://172.21.73.228/capture"
+# You can also set the CHARM_ESP32_CAM_URL environment variable.
+ESP32_URL = os.getenv("CHARM_ESP32_CAM_URL", "http://172.21.73.228/capture")
 
 # This file is:
 #   python_code/src/charm/vision/transferphoto.py

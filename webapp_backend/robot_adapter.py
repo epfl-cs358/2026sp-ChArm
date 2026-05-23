@@ -165,8 +165,15 @@ def close() -> None:
 def _get_serial(port: Optional[str], baud: int):
     global _serial, _serial_key
     import serial
+    import sys
 
-    resolved_port = port or find_port() or os.getenv("CHARM_SERIAL_PORT", "/dev/cu.usbmodem1401")
+    default_port = "/dev/cu.usbmodem1401"
+    if os.name == "nt":
+        default_port = "COM3"
+    elif sys.platform.startswith("linux"):
+        default_port = "/dev/ttyACM0" if os.path.exists("/dev/ttyACM0") else "/dev/ttyUSB0"
+
+    resolved_port = port or find_port() or os.getenv("CHARM_SERIAL_PORT", default_port)
     key = (resolved_port, baud)
     with _serial_lock:
         if _serial is None or not getattr(_serial, "is_open", False) or _serial_key != key:

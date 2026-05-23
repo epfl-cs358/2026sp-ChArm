@@ -433,52 +433,59 @@ The tracker statuses currently used by the move-validity layer are:
 - `invalid_observation`
 - `ambiguous_observation`
 
-## Setup
+## Setup & Installation
 
-### Python Environment
+We provide a cross-platform setup wizard and launcher scripts that run on **Windows, macOS, and Linux**.
 
-From the repository root:
+### What the Setup Wizard Does
+The setup wizard automates the entire installation and deployment pipeline:
+1. **Prerequisite Check**: Verifies that Python 3 and Node.js/NPM are present on your machine.
+2. **Python Environment**: Automatically creates a local virtual environment (`venv/` in the root) and installs all required dependencies (including **PlatformIO** so you do not need Arduino IDE).
+3. **Frontend Dependencies**: Installs React/Next.js frontend libraries in the `webapp/` folder.
+4. **Firmware Wizard**: Runs a step-by-step firmware compiling and uploading flow. It automatically scans your computer's USB/Serial ports, displays them, and lets you select the correct port for:
+   - **ESP32-CAM** (Mega Bridge)
+   - **ESP32 UI Box**
+   - **Arduino Mega 2560**
+5. **Startup Shortcuts**: Creates root launcher scripts (`start.sh` for Linux/macOS, `start.bat` for Windows) targeting the virtual environment.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r python_code/requirements.txt
-```
+---
 
-Install Stockfish separately if it is not already available on your machine:
+### Step 1: Run the Installation Script
 
-```bash
-brew install stockfish
-```
+1. **Linux / macOS**:
+   ```bash
+   ./install.sh
+   ```
+2. **Windows**:
+   Double-click or run from CMD:
+   ```cmd
+   install.bat
+   ```
 
-or on Debian/Ubuntu:
+Follow the prompts to configure Node dependencies and select your serial ports to flash the hardware controllers.
 
-```bash
-sudo apt install stockfish
-```
+> [!NOTE]
+> Make sure to install Stockfish separately if it is not already available on your machine:
+> - **Debian/Ubuntu**: `sudo apt install stockfish`
+> - **macOS**: `brew install stockfish`
+> - **Windows**: Download the binary from the official Stockfish site and add it to your PATH.
 
-### Arduino Firmware
+---
 
-The production firmware is built from `arduino_code/` with PlatformIO.
+### Step 2: How to Launch the App
 
-Typical workflow:
+Once setup is complete, you can launch both backend and frontend servers with a single command:
 
-```bash
-cd arduino_code
-pio run
-pio run --target upload
-pio device monitor
-```
+1. **Linux / macOS**:
+   ```bash
+   ./start.sh
+   ```
+2. **Windows**:
+   ```cmd
+   start.bat
+   ```
 
-### Optional Web Tools
-
-The repository also contains:
-
-- `webapp/` — Next.js frontend
-- `webapp_backend/` — FastAPI backend
-
-These are optional developer tools and are not required to run the core robot
-pipeline.
+This will automatically load the virtual environment and start the FastAPI webserver and React dashboard concurrently.
 
 ## Calibration
 
@@ -507,7 +514,7 @@ The typical workflow is:
 ### 1. Run the vision pipeline on a test image
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python python_code/main.py
 ```
 
@@ -524,7 +531,7 @@ This:
 ### 2. Run the full host-side game application
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python python_code/play_game.py \
   --esp32-host 172.21.71.52 \
   --engine-path stockfish
@@ -547,7 +554,7 @@ Useful arguments:
 ### 3. Capture a sequence of raw board photos
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python python_code/capture_game_session.py --game game_2
 ```
 
@@ -556,7 +563,7 @@ This is useful for collecting images to debug or improve the vision pipeline.
 ### 4. Test the state tracker without camera input
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python python_code/tests/demo_state_tracker.py --moves e2e4 e7e5 g1f3
 ```
 
@@ -579,7 +586,7 @@ python python_code/tests/demo_state_tracker.py --moves e2e4 --show-invalid-examp
 Run the Python test suite:
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python -m unittest discover -s python_code/tests -v
 ```
 
