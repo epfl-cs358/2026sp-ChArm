@@ -12,9 +12,27 @@ import serial
 
 from charm.arduino.uiController_bridge import ArduinoUIControllerLink
 from charm.arduino.arduino_bridge import execute_move, send_command
+from charm.chess_engine import (
+    Evaluation,
+    classify_move_rating,
+    evaluate_position,
+    format_score,
+    win_percentage_from_cp,
+    winning_color,
+)
 from charm.game.cv_scan import build_router, persist_validated_capture
 from charm.game.game_session import GameSession, SessionResult
 from charm.vision.cv_router import AttemptDecision
+
+
+# Move-quality term flashed on the LCD (mirrors api_server._RATING_LCD_LABEL).
+_RATING_LCD_LABEL = {
+    "Blunder": "BLUNDER!",
+    "Mistake": "MISTAKE!",
+    "Inaccuracy": "INACCURACY",
+    "Good": "GOOD",
+    "Excellent": "EXCELLENT!",
+}
 
 
 # Shared with webapp_backend/api_server.py — both must resolve to the same
@@ -29,6 +47,8 @@ BoardImageProvider = Callable[[], str]
 MoveExecutor = Callable[[], None]
 DifficultyHandler = Callable[[int], None]
 PhaseListener = Callable[[str, Optional[str], Optional[str]], None]
+ScanListener = Callable[[dict], None]
+EvaluationListener = Callable[[dict], None]
 
 
 @dataclass
@@ -54,6 +74,13 @@ class GameControllerConfig:
     # Called on every phase transition. Receives (phase, error_message, bot_move).
     # Used by the in-process api_server to surface phase to the webapp.
     on_phase_change: Optional[PhaseListener] = None
+    # Called when a CV scan validates. Receives the pipeline debug payload
+    # (refined_warp / occupancy_debug / cnn_overlay / bitmaps …) so the webapp
+    # can render the same pipeline visualization it shows for webapp-driven play.
+    on_scan_complete: Optional[ScanListener] = None
+    # Called when a Stockfish evaluation is ready. Receives a GameEvaluation
+    # dict matching the dashboard's Game Evaluation panel.
+    on_evaluation_complete: Optional[EvaluationListener] = None
     # When True, also persist phase to controller_game_state.json (legacy file-based path).
     write_state_file: bool = False
     engine_path: str = "stockfish"
@@ -75,6 +102,13 @@ class GameController:
         self.current_phase: str = "idle"
         self.last_error: Optional[str] = None
         self.last_bot_move: Optional[str] = None
+        # Most recent player-move evaluation, retained so the post-robot-move
+        # panel can show "you played a Blunder; best was Nf3" alongside the
+        # final position score.
+        self.last_player_move_rating: Optional[str] = None
+        self.last_player_cp_loss: Optional[int] = None
+        self._last_player_best_move_san: Optional[str] = None
+        self._last_player_best_move_uci: Optional[str] = None
         self._promotion_event = threading.Event()
         self._promotion_piece: str = "q"
         self.ui_link.set_handlers(
@@ -89,7 +123,36 @@ class GameController:
 
     def start(self) -> None:
         self.ui_link.start()
-        self._write_state("waiting")
+
+        # Sync current game state to the ESP32 UI box if a game is already in
+        # progress (e.g. the user started a session on the webapp, then booted
+        # the LCD controller mid-game). Otherwise sit in the main menu.
+        board = self.session.get_current_board() if self.session else None
+        if self.session and self.session.initialized and self.session.game_started and board is not None:
+            try:
+                self.ui_link.set_difficulty(self.current_difficulty)
+            except Exception as e:
+                print(f"[GAME] Sync difficulty failed: {e}", flush=True)
+
+            try:
+                self.ui_link.set_mode(6)  # 6 = GAME mode
+            except Exception as e:
+                print(f"[GAME] Sync mode failed: {e}", flush=True)
+
+            try:
+                if board.is_game_over():
+                    self.ui_link.game_over(self._game_over_reason(board))
+                    self._write_state("game_over")
+                else:
+                    if board.turn == chess.WHITE:
+                        self.ui_link.player_turn_white()
+                    else:
+                        self.ui_link.player_turn_black()
+                    self._write_state("player_turn")
+            except Exception as e:
+                print(f"[GAME] Sync turn failed: {e}", flush=True)
+        else:
+            self._write_state("waiting")
 
     def stop(self) -> None:
         self.ui_link.close()
@@ -153,18 +216,23 @@ class GameController:
             print(f"[DEBUG] router: primary={cfg.primary} attempts_each={cfg.attempts_each} modes={list(fns.keys())}", flush=True)
 
             last_initial: dict = {"result": None}
+            last_capture = [None]
 
             def _on_init_attempt(mode, idx, capture) -> AttemptDecision:
                 print(f"[DEBUG] init attempt mode={mode} idx={idx}", flush=True)
+                last_capture[0] = capture
                 result = self.session.initialize_from_bitmaps(
                     capture.white_bitmap,
                     capture.black_bitmap,
-                    max_mismatches=0,
+                    max_mismatches=0,  # setup validation is strict — no noise tolerance
                     flip_180=self.config.flip_180,
                 )
                 last_initial["result"] = result
+                # Emit only on success so the webapp overlay doesn't flicker
+                # through intermediate failed frames during the retry loop.
                 if result.success:
                     persist_validated_capture(capture, cfg, mode_used=mode, move_uci=None)
+                    self._emit_scan(capture)
                 return AttemptDecision(
                     success=result.success,
                     error=None if result.success else result.message,
@@ -176,6 +244,10 @@ class GameController:
             if not router_result.success or last_initial["result"] is None or not last_initial["result"].success:
                 print("[DEBUG] RETURN FALSE: no attempt validated the initial board", flush=True)
                 print("=======================================================\n", flush=True)
+                # Emit the last captured frame once so the user can inspect what
+                # the CV saw on failure (without flickering through every retry).
+                if last_capture[0] is not None:
+                    self._emit_scan(last_capture[0])
                 self._write_state("error")
                 return False
 
@@ -223,19 +295,30 @@ class GameController:
         if self.config.on_player_done is not None:
             self.config.on_player_done()
 
+        # Snapshot the position the player faced *before* their move so we can
+        # score the move quality once the scan commits it.
+        board_before = self.session.get_current_board()
+        board_before_copy = board_before.copy(stack=True) if board_before is not None else None
+        player_turn_white = board_before.turn == chess.WHITE if board_before is not None else True
+
         router, fns, cfg = build_router()
         last_move: dict = {"result": None}
+        last_capture = [None]
 
         def _on_move_attempt(mode, idx, capture) -> AttemptDecision:
             print(f"[DEBUG] move attempt mode={mode} idx={idx}", flush=True)
+            last_capture[0] = capture
             result = self.session.process_bitmaps(
                 capture.white_bitmap,
                 capture.black_bitmap,
                 max_mismatches=0,
             )
             last_move["result"] = result
+            # Emit only on success so the webapp overlay doesn't flicker through
+            # intermediate failed frames during the retry loop.
             if result.success:
                 persist_validated_capture(capture, cfg, mode_used=mode, move_uci=result.move_uci)
+                self._emit_scan(capture)
             return AttemptDecision(
                 success=result.success,
                 error=None if result.success else result.message,
@@ -246,6 +329,10 @@ class GameController:
 
         if not router_result.success or move_result is None or not move_result.success:
             msg = (move_result.message if move_result is not None else None) or "Illegal move"
+            # Emit the last captured frame once so the user can inspect the
+            # failed scan without flickering through every retry.
+            if last_capture[0] is not None:
+                self._emit_scan(last_capture[0])
             self.ui_link.error_msg(msg)
             self._write_state("error", error_message=msg)
             return
@@ -258,6 +345,10 @@ class GameController:
             chosen = self._promotion_piece
             if chosen != "q":
                 self.session.fix_last_promotion(chosen)
+
+        # Score the human move, flash the rating on the LCD, and surface the
+        # interim (post-player) evaluation to the webapp.
+        self._evaluate_player_move(board_before_copy, player_turn_white)
 
         # Check if the player's move ended the game.
         board = self.session.get_current_board()
@@ -316,6 +407,11 @@ class GameController:
 
         # Update the LCD with whose turn it is next, or show game over.
         updated_board = self.session.get_current_board()
+
+        # Evaluate the final position and push the merged panel to the webapp:
+        # final-position score + the retained player-move rating.
+        self._emit_final_evaluation(updated_board)
+
         if updated_board is not None and updated_board.is_game_over():
             self.ui_link.game_over(self._game_over_reason(updated_board))
             self._write_state("game_over")
@@ -331,6 +427,104 @@ class GameController:
 
         self.ui_link.move_done()
         self._write_state("player_turn")
+
+    # ── Evaluation / scan plumbing ─────────────────────────────────────────
+
+    def _emit_scan(self, capture) -> None:
+        """Forward a validated scan's pipeline payload to the webapp."""
+        if self.config.on_scan_complete is None:
+            return
+        try:
+            self.config.on_scan_complete(capture.payload)
+        except Exception as exc:
+            print(f"[GAME] on_scan_complete raised: {exc!r}", flush=True)
+
+    def _evaluate_safe(self, board: Optional[chess.Board]) -> Optional[Evaluation]:
+        """Full-strength Stockfish probe; never raises into the game flow."""
+        if board is None:
+            return None
+        try:
+            return evaluate_position(
+                board,
+                engine_path=self.config.engine_path,
+                think_time=self.config.think_time,
+            )
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            print(f"[GAME] evaluate_position failed: {exc!r}", flush=True)
+            return None
+
+    def _evaluation_panel(self, eval_for_panel: Evaluation) -> dict:
+        """Shape an Evaluation + retained player rating for the dashboard panel."""
+        return {
+            "score": format_score(eval_for_panel.score_cp, eval_for_panel.mate),
+            "score_cp": eval_for_panel.score_cp,
+            "mate": eval_for_panel.mate,
+            "winning_color": winning_color(eval_for_panel.score_cp, eval_for_panel.mate),
+            "win_percentage": round(
+                win_percentage_from_cp(eval_for_panel.score_cp, eval_for_panel.mate), 1
+            ),
+            "player_move_rating": self.last_player_move_rating,
+            "player_cp_loss": self.last_player_cp_loss,
+            # best_move_* = what Stockfish wanted *before* the player moved,
+            # so the UI can say "try X instead".
+            "best_move_suggestion": self._last_player_best_move_san
+            or eval_for_panel.best_move_san,
+            "best_move_uci": self._last_player_best_move_uci
+            or eval_for_panel.best_move_uci,
+        }
+
+    def _emit_evaluation(self, eval_for_panel: Optional[Evaluation]) -> None:
+        if eval_for_panel is None or self.config.on_evaluation_complete is None:
+            return
+        try:
+            self.config.on_evaluation_complete(self._evaluation_panel(eval_for_panel))
+        except Exception as exc:
+            print(f"[GAME] on_evaluation_complete raised: {exc!r}", flush=True)
+
+    def _evaluate_player_move(
+        self, board_before: Optional[chess.Board], player_turn_white: bool
+    ) -> None:
+        """Score the just-committed human move, flash the LCD, emit the eval."""
+        board_after = self.session.get_current_board()
+        eval_before = self._evaluate_safe(board_before)
+        eval_after = self._evaluate_safe(board_after)
+        if eval_before is None or eval_after is None:
+            self._emit_evaluation(eval_after or eval_before)
+            return
+
+        # Convert White-POV scores to the moving player's POV so a "loss" is
+        # always a drop in the moving side's eval.
+        sign = 1 if player_turn_white else -1
+        cp_before = (eval_before.score_cp or 0) * sign
+        cp_after = (eval_after.score_cp or 0) * sign
+        mate_before = eval_before.mate
+        mate_after = eval_after.mate
+        if not player_turn_white:
+            mate_before = -mate_before if mate_before is not None else None
+            mate_after = -mate_after if mate_after is not None else None
+
+        rating, cp_loss = classify_move_rating(cp_before, cp_after, mate_before, mate_after)
+        self.last_player_move_rating = rating
+        self.last_player_cp_loss = cp_loss
+        self._last_player_best_move_san = eval_before.best_move_san
+        self._last_player_best_move_uci = eval_before.best_move_uci
+
+        label = _RATING_LCD_LABEL.get(rating)
+        if label is not None:
+            try:
+                self.ui_link.error_msg(label)
+                time.sleep(2.0)
+            except Exception as exc:
+                print(f"[GAME] LCD rating flash failed: {exc!r}", flush=True)
+
+        # Interim panel uses the post-player position.
+        self._emit_evaluation(eval_after)
+
+    def _emit_final_evaluation(self, final_board: Optional[chess.Board]) -> None:
+        """Push the final-position panel (merged with retained player rating)."""
+        self._emit_evaluation(self._evaluate_safe(final_board))
 
     def run_calibration(self) -> None:
         """Called by the bridge when the ESP32 sends CALIBRATION. Forwards the
@@ -349,6 +543,10 @@ class GameController:
     def set_player_color(self, color: str) -> None:
         """Called by the bridge when Arduino sends SET_COLOR (color selection screen)."""
         self.config.player_color = color
+        # The vision scan already applies a 180° correction for the camera
+        # mount, so a White setup is already in standard coordinates → no flip.
+        # A Black setup is physically rotated 180° relative to standard
+        # coordinates (White on ranks 7–8), so it must be flipped.
         self.config.flip_180 = (color == "black")
         self._write_state("waiting")
 

@@ -19,8 +19,10 @@ the combined data.
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -66,6 +68,21 @@ _model_lock = threading.Lock()
 
 def _flip_bitmap_180(b: list[list[int]]) -> list[list[int]]:
     return [list(reversed(row)) for row in reversed(b)]
+
+
+def to_b64(img, quality: int = 85) -> str:
+    """Encode a BGR ndarray as a base64 JPEG (matches api_server.to_b64)."""
+    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return base64.b64encode(buf).decode()
+
+
+def _color_labels_from_bitmaps(
+    wb: list[list[int]], bb: list[list[int]]
+) -> list[list[str]]:
+    return [
+        ["white" if wb[r][c] else "black" if bb[r][c] else "empty" for c in range(8)]
+        for r in range(8)
+    ]
 
 
 def _fetch_raw_path() -> Path:
@@ -124,10 +141,24 @@ def make_scan_vision() -> Callable[[], CaptureOutcome]:
         bp = run_board_pipeline(str(LATEST_CALIBRATED_PATH))
         wb = _flip_bitmap_180(bp.white_bitmap)
         bb = _flip_bitmap_180(bp.black_bitmap)
+        payload = {
+            "cv_mode": "vision",
+            "raw_path": str(raw_path),
+            "image_path": str(raw_path),
+            "timestamp": time.time(),
+            "refined_warp": to_b64(bp.warped_board),
+            "occupancy_debug": to_b64(bp.occupancy_debug_image),
+            "piece_color_debug": to_b64(bp.piece_color_debug_image),
+            "grid_debug": to_b64(bp.grid_debug_image),
+            "occupancy_matrix": bp.occupancy_matrix,
+            "white_bitmap": wb,
+            "black_bitmap": bb,
+            "color_labels": _color_labels_from_bitmaps(wb, bb),
+        }
         return CaptureOutcome(
             white_bitmap=wb,
             black_bitmap=bb,
-            payload={"cv_mode": "vision", "raw_path": str(raw_path)},
+            payload=payload,
             refined_image=refined,
         )
 
@@ -150,17 +181,41 @@ def make_scan_cnn() -> Callable[[], CaptureOutcome]:
             result = classifier.classify_cells(cells)
         wb = [[0] * 8 for _ in range(8)]
         bb = [[0] * 8 for _ in range(8)]
+        overlay = refined.copy()
+        label_color = {"empty": (160, 160, 160), "white": (255, 255, 255), "black": (40, 40, 40)}
         for pred in result.predictions:
             if pred.label == "white":
                 wb[pred.row][pred.col] = 1
             elif pred.label == "black":
                 bb[pred.row][pred.col] = 1
+            x = pred.col * (overlay.shape[1] // 8) + 4
+            y = pred.row * (overlay.shape[0] // 8) + 20
+            cv2.putText(
+                overlay,
+                f"{pred.label[0].upper()} {pred.confidence:.2f}",
+                (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                label_color.get(pred.label, (200, 200, 200)),
+                1, cv2.LINE_AA,
+            )
         wb = _flip_bitmap_180(wb)
         bb = _flip_bitmap_180(bb)
+        payload = {
+            "cv_mode": "cnn",
+            "raw_path": str(raw_path),
+            "image_path": str(raw_path),
+            "timestamp": time.time(),
+            "refined_warp": to_b64(refined),
+            "cnn_overlay": to_b64(overlay),
+            "white_bitmap": wb,
+            "black_bitmap": bb,
+            "color_labels": _color_labels_from_bitmaps(wb, bb),
+            "cnn_active": True,
+        }
         return CaptureOutcome(
             white_bitmap=wb,
             black_bitmap=bb,
-            payload={"cv_mode": "cnn", "raw_path": str(raw_path)},
+            payload=payload,
             refined_image=refined,
         )
 

@@ -5,6 +5,7 @@ import {
   PipelineResult,
   PipelineSnapshotSaveResult,
   CalibrationData,
+  GameEvaluation,
   GameSessionResult,
   RobotCalibrationWrite,
   RobotCommandResult,
@@ -439,6 +440,10 @@ export const api = {
   controllerStop: () => post<ControllerStatus>("/api/controller/stop", {}),
   controllerStatus: () => get<ControllerStatus>("/api/controller/status"),
   controllerGameState: () => get<ControllerGameState>("/api/controller/game-state"),
+  controllerCheckBoard: () =>
+    post<{ triggered: boolean }>("/api/controller/check-board", {}),
+  controllerPlayerDone: () =>
+    post<{ triggered: boolean }>("/api/controller/player-done", {}),
   lcdSetMode: (mode: number) =>
     post<{ sent: boolean; mode?: number; reason?: string }>(
       "/api/controller/lcd/set-mode",
@@ -494,7 +499,12 @@ export interface ControllerGameState {
   moves: string[];
   player_color: "white" | "black" | null;
   robot_color: "white" | "black" | null;
+  game_started?: boolean;
   difficulty?: number | null;
+  error_message?: string | null;
+  bot_move?: string | null;
+  pipeline?: PipelineResult | null;
+  evaluation?: GameEvaluation | null;
   updated_at: number | null;
 }
 

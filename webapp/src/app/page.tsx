@@ -587,6 +587,21 @@ export default function Dashboard() {
             // pre-start FEN; the next poll will correct it.
           }
         }
+        // Keep the webapp in lock-step with the LCD-driven game so the
+        // dashboard mirrors the physical box: difficulty slider, the
+        // Stockfish evaluation panel, and the CV pipeline visualization.
+        if (typeof gs.difficulty === "number") {
+          setSkillLevel(Math.max(0, Math.min(20, gs.difficulty)));
+        }
+        if (gs.evaluation) setEvaluation(gs.evaluation);
+        if (gs.pipeline) {
+          setResult(gs.pipeline);
+          setLastCapturePath(gs.pipeline.image_path ?? null);
+        }
+        // The LCD owns game start/stop; mirror the controller's actual
+        // session state so the board / manual-move UI and the primary button
+        // stay correct (e.g. a failed board check keeps "Start game").
+        setGameSessionStarted(!!gs.game_started);
       } catch {
         // network blip — ignore
       }
@@ -1030,6 +1045,37 @@ export default function Dashboard() {
     }
   }, [armCalibrated, difficulty, gameSessionStarted, robotPort, robotStatus, turnState, busy, skillLevel]);
 
+  // Phases where the controller is mid-loop and a new trigger would collide.
+  const controllerBusyPhase = (
+    controllerPhase === "checking_board" ||
+    controllerPhase === "bot_thinking" ||
+    controllerPhase === "bot_moving" ||
+    controllerPhase === "game_over"
+  );
+  // Until the session is actually started (board validated), the primary
+  // button validates the board ("Start game"); afterwards it submits the
+  // player's move ("Player done"). Driving this off the real session state
+  // means a failed board check keeps "Start game" so the user can retry.
+  const controllerPreGame = !gameSessionStarted;
+  const primaryActionLabel = controllerRunning
+    ? (controllerPreGame ? "Start game" : "Player done")
+    : (gameSessionStarted ? "Player done" : "Start game");
+
+  // When the LCD controller is running, the dashboard's primary button drives
+  // the same in-process controller loops the physical buttons trigger.
+  const handlePrimaryAction = useCallback(() => {
+    if (controllerRunning) {
+      const trigger = controllerPreGame
+        ? api.controllerCheckBoard()
+        : api.controllerPlayerDone();
+      void trigger.catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "Controller trigger failed"),
+      );
+      return;
+    }
+    void processHumanTurn();
+  }, [controllerRunning, controllerPreGame, processHumanTurn]);
+
   const testCapture = useCallback(async () => {
     if (busy || testBusy) return;
     setError(null);
@@ -1176,13 +1222,15 @@ export default function Dashboard() {
             Manual calibration
           </Button>
           <Button
-            onClick={processHumanTurn}
-            disabled={busy || !armCalibrated || controllerRunning}
-            title={controllerRunning ? "LCD controller is running — stop it first" : undefined}
+            onClick={handlePrimaryAction}
+            disabled={controllerRunning ? controllerBusyPhase : (busy || !armCalibrated)}
+            title={controllerRunning
+              ? "Drives the LCD controller's board check / player-done loop"
+              : undefined}
             className="font-jetbrains"
             style={{ background: "oklch(from var(--charm-cyan) l c h / 0.12)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.4)", color: "var(--charm-cyan)" }}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
-            {gameSessionStarted ? "Player done" : "Start game"}
+            {primaryActionLabel}
           </Button>
         </div>
       </div>

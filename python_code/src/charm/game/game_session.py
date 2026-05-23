@@ -272,12 +272,20 @@ class GameSession:
         print("===============================================\n")
 
         if mismatch_count > max_mismatches:
+            message = (
+                "Initial board setup is invalid. "
+                "Please reset the pieces to the standard starting position."
+            )
+            # The pieces may be set up correctly but the board is oriented the
+            # wrong way (e.g. the player chose the wrong color). Re-test the
+            # opposite orientation; if it validates, tell them so they can retry.
+            other_white = [list(reversed(row)) for row in reversed(white_bitmap)]
+            other_black = [list(reversed(row)) for row in reversed(black_bitmap)]
+            if compare_board_to_bitmaps(expected_board, other_white, other_black) <= max_mismatches:
+                message = "Initial board is flipped (supposed to be the other way)."
             result = SessionResult(
                 success=False,
-                message=(
-                    "Initial board setup is invalid. "
-                    "Please reset the pieces to the standard starting position."
-                ),
+                message=message,
                 mismatch_count=mismatch_count,
             )
             self._record_step(image_path, result)
@@ -329,12 +337,19 @@ class GameSession:
         mismatch_count = compare_board_to_bitmaps(expected_board, wb, bb)
 
         if mismatch_count > max_mismatches:
+            message = (
+                "Initial board setup is invalid. "
+                "Please reset the pieces to the standard starting position."
+            )
+            # Detect a correctly-arranged but wrongly-oriented board: flip the
+            # scanned bitmaps 180° and re-test against the standard position.
+            other_white = [list(reversed(row)) for row in reversed(wb)]
+            other_black = [list(reversed(row)) for row in reversed(bb)]
+            if compare_board_to_bitmaps(expected_board, other_white, other_black) <= max_mismatches:
+                message = "Initial board is flipped (supposed to be the other way)."
             result = SessionResult(
                 success=False,
-                message=(
-                    "Initial board setup is invalid. "
-                    "Please reset the pieces to the standard starting position."
-                ),
+                message=message,
                 mismatch_count=mismatch_count,
             )
             self._record_step("cnn_scan", result)

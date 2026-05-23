@@ -3759,6 +3759,8 @@ _CONTROLLER_STATE: dict = {
     "phase_error": None,
     "bot_move": None,
     "phase_updated_at": None,
+    "pipeline": None,        # latest validated-scan pipeline payload
+    "evaluation": None,      # latest Stockfish evaluation panel
 }
 
 
@@ -3776,6 +3778,14 @@ def _on_phase_change(phase: str, error_message: Optional[str], bot_move: Optiona
     _CONTROLLER_STATE["phase_error"] = error_message
     _CONTROLLER_STATE["bot_move"] = bot_move
     _CONTROLLER_STATE["phase_updated_at"] = time.time()
+
+
+def _on_scan_complete(pipeline: dict) -> None:
+    _CONTROLLER_STATE["pipeline"] = pipeline
+
+
+def _on_evaluation_complete(evaluation: dict) -> None:
+    _CONTROLLER_STATE["evaluation"] = evaluation
 
 
 class ControllerStartPayload(BaseModel):
@@ -3830,6 +3840,8 @@ def controller_start(payload: ControllerStartPayload):
             engine_path=_resolve_stockfish_path(payload.engine_path),
             think_time=payload.think_time,
             on_phase_change=_on_phase_change,
+            on_scan_complete=_on_scan_complete,
+            on_evaluation_complete=_on_evaluation_complete,
             write_state_file=False,
         )
 
@@ -3851,6 +3863,8 @@ def controller_start(payload: ControllerStartPayload):
         _CONTROLLER_STATE["esp32"] = {"host": payload.esp32_host, "port": payload.esp32_port}
         _CONTROLLER_STATE["arm_port"] = resolved_arm_port
         _CONTROLLER_STATE["last_error"] = None
+        _CONTROLLER_STATE["pipeline"] = None
+        _CONTROLLER_STATE["evaluation"] = None
         # GameController.start() already wrote "waiting" via _write_state.
         return {
             "running": True,
@@ -3895,9 +3909,12 @@ def controller_game_state():
         "moves": _GAME_SESSION.get_move_history(),
         "player_color": _GAME_SESSION.get_player_color(),
         "robot_color": _GAME_SESSION.get_robot_color(),
+        "game_started": _GAME_SESSION.game_started,
         "difficulty": controller.current_difficulty if controller is not None else None,
         "error_message": _CONTROLLER_STATE["phase_error"],
         "bot_move": _CONTROLLER_STATE["bot_move"],
+        "pipeline": _CONTROLLER_STATE["pipeline"],
+        "evaluation": _CONTROLLER_STATE["evaluation"],
         "updated_at": _CONTROLLER_STATE["phase_updated_at"],
     }
     if not running:
@@ -3935,8 +3952,41 @@ def controller_stop():
         _CONTROLLER_STATE["phase"] = "idle"
         _CONTROLLER_STATE["phase_error"] = None
         _CONTROLLER_STATE["bot_move"] = None
+        _CONTROLLER_STATE["pipeline"] = None
+        _CONTROLLER_STATE["evaluation"] = None
         _CONTROLLER_STATE["phase_updated_at"] = time.time()
         return {"running": False}
+
+
+@app.post("/api/controller/check-board")
+def controller_check_board():
+    """Programmatically trigger the in-process controller's CHECK_BOARD loop.
+
+    Mirrors the physical 'check board' button so the webapp's Start-game
+    button drives the same flow while the LCD controller is running. The loop
+    captures, validates, and (if the bot moves first) runs the arm — so it is
+    dispatched on a background thread and the request returns immediately.
+    """
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    if controller is None:
+        raise HTTPException(409, "Controller not running")
+    threading.Thread(target=controller.check_board, daemon=True).start()
+    return {"triggered": True}
+
+
+@app.post("/api/controller/player-done")
+def controller_player_done():
+    """Programmatically trigger the in-process controller's PLAYER_DONE loop.
+
+    Mirrors the physical 'player done' button. Runs the scan + Stockfish
+    evaluation + robot reply on a background thread so the HTTP call returns
+    immediately; results surface through /api/controller/game-state.
+    """
+    controller: Optional[GameController] = _CONTROLLER_STATE["controller"]
+    if controller is None:
+        raise HTTPException(409, "Controller not running")
+    threading.Thread(target=controller.player_done, daemon=True).start()
+    return {"triggered": True}
 
 
 # ───────────────────────────────────────────────────────────────────────────
