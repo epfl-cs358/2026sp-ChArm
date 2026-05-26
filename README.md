@@ -5,10 +5,10 @@ ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
 //TODO Add picture/Video
 
 The intended workflow is:
-
-1. The player picks a difficulty and starts a game from the on-robot LCD/encoder UI or the webapp.
-2. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
-3. An ESP32-CAM captures a picture of the board.
+1. The player starts by initiating arm calibration
+2. The player clicks start game and picks a difficulty and starts a game from the LCD/encoder UI or the webapp.
+3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
+4. An ESP32-CAM captures a picture of the board.
 5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour,and infers which move the human made by comparing the observed board to the previous board.
 6. Stockfish computes the best move at the selected skill level.
 7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
@@ -17,21 +17,14 @@ The intended workflow is:
 This README is the top-level guide for understanding, rebuilding, and running the project.
 
 ## Project Overview
-
-ChArm combines four subsystems:
-
-- **mechanical**: SCARA arm, Z lead screw, servo gripper, custom board setup
-- **embedded control**: Arduino Mega firmware for homing, motion, calibration
-- **computer vision**: board rectification, 8×8 cell extraction, occupancy and colour detection through a CNN
-- **game logic**: `python-chess` state tracking and Stockfish move selection
-- **web dashboard** : allows player to get more insight on the game, visualise the CV pipeline, train the CNN model, visualise the current board state, gather labelled data. 
-
 The project is organized so that hardware control and chess/vision logic can be developed and tested independently.
 
 ## Main Features
 
+### Software feature 
 - Chess piece occupation and color detection from an esp32 cam image.
-- Converts the observed board into white/black 8×8 occupancy bitmaps
+- manual control of the arm through the webapp or the lcd box
+- 
 - Reconstructs the played move by comparing the observation against all legal moves
 - Validates whether an observed update is legal, invalid, unchanged, or ambiguous
 - Uses Stockfish to compute the robot's move
@@ -98,7 +91,7 @@ You will likely need:
 - A 12V Power supply gives power to the motors through the CNC shield and, through a 12V to 5V buck converter, powers the camera, limit switches, UI ESP32 and gripper servo.
 
 **Sub-circuits**
--  **UI Box** : the box receives 5V and the stripboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
+-  **UI Box** : the box receives 5V and the veroboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
    -  The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
 -  **Limit Switches** : A stripboard handles the current going through the switches. When the switch is pressed, the current is diverted and signals the CNC shield. We use small resistors to avoid short circuits. 
 
