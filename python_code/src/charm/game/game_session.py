@@ -330,8 +330,12 @@ class GameSession:
         wb = white_bitmap
         bb = black_bitmap
         if flip_180:
-            wb = [list(reversed(row)) for row in reversed(wb)]
-            bb = [list(reversed(row)) for row in reversed(bb)]
+            # Rank-only mirror (reverse rows, keep files), matching the arm's
+            # _mirror_sq: the board is never physically rotated, so a Black game
+            # is a rank flip, NOT a full 180° (which would also swap a-file↔h-file
+            # and desync detection from arm placement after the first move).
+            wb = [list(row) for row in reversed(wb)]
+            bb = [list(row) for row in reversed(bb)]
 
         expected_board = chess.Board()
         mismatch_count = compare_board_to_bitmaps(expected_board, wb, bb)
@@ -391,8 +395,10 @@ class GameSession:
         wb = white_bitmap
         bb = black_bitmap
         if self.flip_180:
-            wb = [list(reversed(row)) for row in reversed(wb)]
-            bb = [list(reversed(row)) for row in reversed(bb)]
+            # Rank-only mirror (see initialize_from_bitmaps) so move detection
+            # stays in the same orientation as the arm's _mirror_sq placement.
+            wb = [list(row) for row in reversed(wb)]
+            bb = [list(row) for row in reversed(bb)]
         inference_result = self.tracker.update_from_bitmaps(
             wb, bb, max_mismatches=max_mismatches
         )

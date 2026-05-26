@@ -134,6 +134,8 @@ class GameController:
         # the LCD controller mid-game). Otherwise sit in the main menu.
         board = self.session.get_current_board() if self.session else None
         if self.session and self.session.initialized and self.session.game_started and board is not None:
+            self.config.player_color = self.session.get_player_color() or "white"
+            self.config.flip_180 = (self.config.player_color == "black")
             try:
                 self.ui_link.set_difficulty(self.current_difficulty)
             except Exception as e:
@@ -387,7 +389,8 @@ class GameController:
         if board is not None and board.is_check():
             self.ui_link.send_check()
 
-        self._do_robot_move()
+        # Run the robot move in a background thread to prevent blocking the main loop.
+        threading.Thread(target=self._do_robot_move, daemon=True).start()
 
     def _do_robot_move(self) -> None:
         """Compute, physically execute, and commit the robot's next move."""
@@ -429,7 +432,10 @@ class GameController:
             self.ui_link.bot_promoting(robot_result.move_uci[4])
         self._write_state("bot_moving", bot_move=move_label)
 
-        execute_move(robot_result.move_uci, board, self.config.arm_ser, self.config.arm_lock, flip_180=self.config.flip_180)
+        # Drive the arm off the session's flip (set at init for both colors and
+        # already trusted by the camera read) rather than the config copy, so the
+        # arm and detection can never disagree about board orientation.
+        execute_move(robot_result.move_uci, board, self.config.arm_ser, self.config.arm_lock, flip_180=self.session.flip_180)
 
         # Commit the robot's move into the session's internal board.
         self.session.commit_robot_move(robot_result.move_uci)
