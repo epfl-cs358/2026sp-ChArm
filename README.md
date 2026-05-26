@@ -10,7 +10,7 @@ The intended workflow is:
 3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
 4. An ESP32-CAM captures a picture of the board.
 5. From the image a computer vision algorithm and / or a CNN algorithm creates two bitmaps from chesspiece placement.
-6. 6. Stockfish computes the best move at the selected skill level.
+6. Stockfish computes the best move at the selected skill level.
 7. The arm physically moves the chess piece on the board
 8. Turn passes back to the human; repeat from 3.
 
