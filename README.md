@@ -1,8 +1,6 @@
 # ChArm — Chess-Playing SCARA Robot
 
-ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
-lead-screw Z axis, a servo gripper, an Arduino-controlled UI, and a Python host
-that handles computer vision and chess logic.
+ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical lead-screw Z axis, a servo gripper, an Arduino-controlled UI, and a Python host that handles computer vision and chess logic.
 
 //TODO Add picture/Video
 
@@ -16,8 +14,7 @@ The intended workflow is:
 6. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
 7. Turn passes back to the human; repeat.
 
-This README is the top-level guide for understanding, rebuilding, and running
-the project.
+This README is the top-level guide for understanding, rebuilding, and running the project.
 
 ## Project Overview
 
@@ -28,8 +25,7 @@ ChArm combines four subsystems:
 - **computer vision**: board rectification, 8×8 cell extraction, occupancy and colour detection
 - **game logic**: `python-chess` state tracking and Stockfish move selection
 
-The project is organized so that hardware control and chess/vision logic can be
-developed and tested independently.
+The project is organized so that hardware control and chess/vision logic can be developed and tested independently.
 
 ## Main Features
 
@@ -105,8 +101,7 @@ You will likely need:
    -  The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
 -  **Limit Switches** : A stripboard handles the current going through the switches. When the switch is pressed, the current is diverted and signals the CNC shield. We use small resistors to avoid short circuits. 
 
-The main production firmware pin assignments are defined in
-[arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h).
+The main production firmware pin assignments are defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h).
 
 **Bill of Materials**
 
@@ -151,9 +146,7 @@ The main production firmware pin assignments are defined in
 
 ### Motion Constants
 
-The motion and geometry constants live in
-[arduino_code/src/hardware/src/config.h](arduino_code/src/hardware/src/config.h).
-These values should be checked whenever the robot is rebuilt or recalibrated.
+The motion and geometry constants live in [arduino_code/src/hardware/src/config.h](arduino_code/src/hardware/src/config.h). These values should be checked whenever the robot is rebuilt or recalibrated.
 
 Important examples:
 
@@ -168,8 +161,7 @@ Important examples:
 
 ### Arduino Side
 
-The main Arduino entry point is
-[arduino_code/src/main.cpp](arduino_code/src/main.cpp).
+The main Arduino entry point is [arduino_code/src/main.cpp](arduino_code/src/main.cpp).
 
 It is responsible for:
 
@@ -188,17 +180,13 @@ Key hardware abstractions are in `arduino_code/src/hardware/src/`:
 - `Gripper`
 - `LimitSwitch`
 
-The PlatformIO environments are defined in
-[arduino_code/platformio.ini](arduino_code/platformio.ini).
+The PlatformIO environments are defined in [arduino_code/platformio.ini](arduino_code/platformio.ini).
 
 ### ESP32-Cam Side
 
-The ESP32-CAM firmware is in
-[arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino](arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino).
+The ESP32-CAM firmware is in [arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino](arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino).
 
-Upload it to an AI Thinker ESP32-CAM board with the Arduino ESP32 core. Before
-flashing, set the `ssid` and `password` constants in the sketch to the Wi-Fi
-network used by the Python host.
+Upload it to an AI Thinker ESP32-CAM board with the Arduino ESP32 core. Before flashing, set the `ssid` and `password` constants in the sketch to the Wi-Fi network used by the Python host.
 
 At runtime, the board:
 
@@ -220,10 +208,7 @@ The Mega bridge uses these serial commands:
 The ESP32D firmware for the player-facing UI box is in
 [arduino_code/esp32_ui_box/](arduino_code/esp32_ui_box/).
 
-Before flashing, edit `WIFI_CREDENTIALS` in
-[arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp)
-so the ESP32 can join the same Wi-Fi network as the Python host. If no
-configured network is reachable, the firmware starts a fallback access point:
+Before flashing, edit `WIFI_CREDENTIALS` in [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp) so the ESP32 can join the same Wi-Fi network as the Python host. If no configured network is reachable, the firmware starts a fallback access point:
 
 - SSID: `ChArm-UI`
 - password: `charm1234`
@@ -236,12 +221,9 @@ pio run -e esp32_ui_box -t upload
 pio device monitor -e esp32_ui_box
 ```
 
-The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP
-address after Wi-Fi connects; pass that address to the Python host with
-`--esp32-host`.
+The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; pass that address to the Python host with `--esp32-host`.
 
-Wire the rotary encoder/button and LCD to the ESP32D pins defined in
-[arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h):
+Wire the rotary encoder/button and LCD to the ESP32D pins defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h):
 
 | UI signal | ESP32D pin |
 |---|---:|
@@ -255,11 +237,7 @@ Wire the rotary encoder/button and LCD to the ESP32D pins defined in
 | LCD D6 | 33 |
 | LCD D7 | 32 |
 
-The UI box exchanges newline-terminated TCP commands with Python. The main
-ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`,
-`SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates
-such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`,
-`PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
+The UI box exchanges newline-terminated TCP commands with Python. The main ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
 
 ### Python Side
 
@@ -288,19 +266,15 @@ Important files:
 
 ### Vision & CNN Architecture
 
-This section describes the technical structure of the board-recognition stack,
-including both the geometric preprocessing pipeline and the planned CNN-based
-classifier architecture.
+This section describes the technical structure of the board-recognition stack, including both the geometric preprocessing pipeline and the planned CNN-based classifier architecture.
 
 #### Geometric Vision Pipeline
 
-The geometric pipeline transforms a raw, perspective-distorted camera image into
-a normalized 8×8 board representation.
+The geometric pipeline transforms a raw, perspective-distorted camera image into a normalized 8×8 board representation.
 
 **Two-stage perspective warping**
 
-To align the board as accurately as possible, the system applies two sequential
-homography transformations:
+To align the board as accurately as possible, the system applies two sequential homography transformations:
 
 1. **Global warp**  
    The four outer corners of the board, obtained through calibration, are
@@ -320,9 +294,7 @@ The refined image is divided into 64 `SquareCell` objects. Each cell contains:
 
 #### CNN Classification
 
-The CNN classifier is intended to replace or complement the classical
-occupancy/brightness heuristics with a learned model trained specifically on the
-ChArm board and piece set.
+The CNN classifier is intended to replace or complement the classical occupancy/brightness heuristics with a learned model trained specifically on the ChArm board and piece set.
 
 **Model objective**
 
@@ -344,15 +316,11 @@ A lightweight Keras CNN is planned for efficient inference on CPU:
 
 **Batch inference**
 
-Instead of processing cells individually, all 64 board squares can be stacked
-into a single tensor and passed through the model in one forward pass. This
-allows the whole board to be evaluated efficiently and consistently.
+Instead of processing cells individually, all 64 board squares can be stacked into a single tensor and passed through the model in one forward pass. This allows the whole board to be evaluated efficiently and consistently.
 
 #### Fail-Safe Mechanism
 
-To improve robustness in difficult conditions such as shadows, blur, or unclear
-piece placement, the vision system is designed around a retry-and-fallback
-strategy.
+To improve robustness in difficult conditions such as shadows, blur, or unclear piece placement, the vision system is designed around a retry-and-fallback strategy.
 
 **Primary / fallback routing**
 
@@ -376,8 +344,7 @@ is requested.
 
 #### Living Dataset and Continuous Improvement
 
-A major long-term advantage of the CNN approach is that the model can improve
-over time using data collected during real operation.
+A major long-term advantage of the CNN approach is that the model can improve over time using data collected during real operation.
 
 **Correction loop**
 
@@ -396,8 +363,7 @@ Over time, the model becomes more specialized to:
 - the specific physical pieces
 - real camera noise and shadows
 
-This creates a system that becomes more robust with use, instead of relying
-only on fixed handcrafted thresholds.
+This creates a system that becomes more robust with use, instead of relying only on fixed handcrafted thresholds.
 
 #### `game/`
 
