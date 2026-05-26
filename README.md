@@ -77,7 +77,7 @@ The project is organized so that hardware control and chess/vision logic can be 
     - J2 (elbow): 18 → 105 tooth reduction
   - **Z axis** — 290 mm-travel vertical lead screw (4-start, 2 mm pitch → 8
   mm/rev)
-  - **Gripper** — servo-driven, 0°–65° open/close span, ~100 mm offset
+  - **Gripper** — servo-driven, 0°–65° open/close span
   - **Motors** — 3× 1.8° / 200-step steppers, driven at 16× microstepping (except the lead screw that is driven at 2x microstepping)
 
   ### Electronics
