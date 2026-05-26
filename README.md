@@ -7,10 +7,10 @@ ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
 The intended workflow is:
 
 1. The player picks a difficulty and starts a game from the on-robot LCD/encoder UI or the webapp.
-2. The player makes his move on the physical board and presses OK.
+2. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
 3. An ESP32-CAM captures a picture of the board.
-5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour, and infers which move the human made by comparing the observed board to all legal moves.
-6. Stockfish computes the computer's reply at the selected skill level.
+5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour,and infers which move the human made by comparing the observed board to the previous board.
+6. Stockfish computes the best move at the selected skill level.
 7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
 8. Turn passes back to the human; repeat.
 
@@ -30,7 +30,7 @@ The project is organized so that hardware control and chess/vision logic can be 
 
 ## Main Features
 
-- Detects the board state from a calibrated camera image
+- Chess piece occupation and color detection from an esp32 cam image.
 - Converts the observed board into white/black 8×8 occupancy bitmaps
 - Reconstructs the played move by comparing the observation against all legal moves
 - Validates whether an observed update is legal, invalid, unchanged, or ambiguous
