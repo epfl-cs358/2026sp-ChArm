@@ -6,13 +6,13 @@ ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
 
 The intended workflow is:
 
-1. The player picks a difficulty and starts a game from the on-robot LCD/encoder UI.
-2. The player makes their move on the physical board and presses OK.
-3. An ESP32-CAM captures the board.
-4. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour, and infers which move the human made by comparing the observed board to all legal moves.
-5. Stockfish computes the computer's reply at the selected skill level.
-6. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
-7. Turn passes back to the human; repeat.
+1. The player picks a difficulty and starts a game from the on-robot LCD/encoder UI or the webapp.
+2. The player makes his move on the physical board and presses OK.
+3. An ESP32-CAM captures a picture of the board.
+5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour, and infers which move the human made by comparing the observed board to all legal moves.
+6. Stockfish computes the computer's reply at the selected skill level.
+7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
+8. Turn passes back to the human; repeat.
 
 This README is the top-level guide for understanding, rebuilding, and running the project.
 
@@ -20,10 +20,11 @@ This README is the top-level guide for understanding, rebuilding, and running th
 
 ChArm combines four subsystems:
 
-- **mechanics**: SCARA arm, Z lead screw, servo gripper, custom board setup
-- **embedded control**: Arduino Mega firmware for homing, motion, calibration, and UI
-- **computer vision**: board rectification, 8×8 cell extraction, occupancy and colour detection
+- **mechanical**: SCARA arm, Z lead screw, servo gripper, custom board setup
+- **embedded control**: Arduino Mega firmware for homing, motion, calibration
+- **computer vision**: board rectification, 8×8 cell extraction, occupancy and colour detection through a CNN
 - **game logic**: `python-chess` state tracking and Stockfish move selection
+- **web dashboard** : allows player to get more insight on the game, visualise the CV pipeline, train the CNN model, visualise the current board state, gather labelled data. 
 
 The project is organized so that hardware control and chess/vision logic can be developed and tested independently.
 
