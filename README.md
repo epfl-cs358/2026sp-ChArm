@@ -1,4 +1,4 @@
-# ChArm — Chess-Playing SCARA Robot
+# ChArm
 
 ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical lead-screw Z axis, a servo gripper, an Arduino-controlled UI, and a Python host that handles computer vision and chess logic.
 
