@@ -97,10 +97,38 @@ You will likely need:
 
 ### Electronics and Wiring
 
-//TODO Add Electrical Circuit picture and explanation
+<img src="ChArm Electrical Circuit.png" alt="Electrical Circuit"/>
+
+**Power**
+- A 12V Power supply gives power to the motors through the CNC shield and, through a 12V to 5V buck converter, powers the camera, limit switches, UI ESP32 and gripper servo.
+
+**Sub-circuits**
+-  **UI Box** : the box receives 5V and the stripboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
+   -  The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
+-  **Limit Switches** : A stripboard handles the current going through the switches. When the switch is pressed, the current is diverted and signals the CNC shield. We use small resistors to avoid short circuits. 
 
 The main production firmware pin assignments are defined in
 [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h).
+
+**Bill of Materials**
+
+| Amount | Part Type |
+|---|---:|
+| 1 | 2.1mm DC Barrel Jack |
+| 4 | 220Ω Resistor |
+| 1 | Arduino Mega |
+| 1 | Arduino CNC V3 |
+| 1 | DG Servo 9g |
+| 1 | ESP32 - CAM |
+| 1 | ESP32 - D |
+| 4 | Micro Lever Limit Switch |
+| 1 | KY-040 Rotary encoder |
+| 1 | 16x2 1602A LCD Display |
+| 1 | Potentiometer |
+| 1 | LM2596 Buck Converter |
+| 3 | 17HS4401 Stepper motors |
+| 3 | A4988 Motor Drivers |
+| 2 | Wago 221-415 |
 
 **Steppers (STEP / DIR / shared ENABLE)**
 
