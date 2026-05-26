@@ -9,7 +9,7 @@ The intended workflow is:
 2. The player clicks start game and picks a difficulty and the color he wants to play all from the LCD/encoder UI or the webapp.
 3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
 4. An ESP32-CAM captures a picture of the board.
-5. From the image a computer vision algorithm and / or a CNN algorithm creates a bitmap from chesspiece placement.
+5. From the image a computer vision algorithm and / or a CNN algorithm creates two bitmaps from chesspiece placement.
 6. 6. Stockfish computes the best move at the selected skill level.
 7. The arm physically moves the chess piece on the board
 8. Turn passes back to the human; repeat from 3.
@@ -67,6 +67,27 @@ The project is organized so that hardware control and chess/vision logic can be 
 ├── webapp/                       Optional Next.js frontend
 └── webapp_backend/               Optional FastAPI backend
 ```
+## Hardware
+
+  ### Mechanical
+
+  - **SCARA arm** — two 250 mm links (~500 mm reach), belt-reduced rotational
+  joints
+    - J1 (base): 20 → 160 tooth reduction
+    - J2 (elbow): 18 → 105 tooth reduction
+  - **Z axis** — 290 mm-travel vertical lead screw (4-start, 2 mm pitch → 8
+  mm/rev)
+  - **Gripper** — servo-driven, 0°–65° open/close span, ~100 mm offset
+  - **Motors** — 3× 1.8° / 200-step steppers, driven at 16× microstepping (except the lead screw that is driven at 2x microstepping)
+
+  ### Electronics
+
+  - **Arduino Mega 2560** — motion control, calibration, EEPROM persistence
+  - **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
+  - **ESP32-WROOM UI box** — 16×2 LCD + rotary encoder/button, TCP link to host
+  - **3× STEP/DIR stepper drivers**
+  - **4× limit switches** — J1 home, 2x J2 home, Z bottom
+  - **Power supply** 
 
 ## Hardware Summary
 
@@ -83,10 +104,9 @@ The physical system is centered around:
 
 ### Fabrication Tools
 
-You will likely need:
-
-- **3D printer** for mechanical arm parts, brackets, gripper components, and enclosures
-- **laser cutter** for flat structural parts such as board elements, joints, or mounts
+- **metal lathe and drill press** used to machine the flanges at the base
+- **3D printer** used for a lot of parts around the arm.
+- **laser cutter** for structural parts that would not print well.
 - **soldering equipment** for wiring and connectors
 
 ### CAD Overview
