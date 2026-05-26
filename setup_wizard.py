@@ -27,6 +27,26 @@ def get_pio_path():
         return str(pio_path)
     return "pio"
 
+# USB vendor IDs for the USB-to-UART bridge chips used by ESP32 / Arduino boards.
+ESP_COMPATIBLE_VIDS = {
+    0x10C4,  # Silicon Labs CP210x (common on ESP32-CAM)
+    0x1A86,  # QinHeng CH340/CH341 (common on ESP32 dev boards / clones)
+    0x0403,  # FTDI
+    0x303A,  # Espressif (native USB on ESP32-S2/S3/C3)
+    0x067B,  # Prolific PL2303
+    0x2341,  # Arduino
+    0x2A03,  # Arduino (older)
+    0x1B4F,  # SparkFun
+    0x239A,  # Adafruit
+}
+
+# Substrings (lowercased) that identify a likely ESP32/Arduino USB-serial port
+# when VID/PID metadata is unavailable.
+ESP_COMPATIBLE_KEYWORDS = (
+    "usbserial", "usbmodem", "wchusbserial", "slab", "cp210", "ch340",
+    "ch341", "ftdi", "uart", "ttyusb", "ttyacm",
+)
+
 def get_serial_ports():
     try:
         import serial.tools.list_ports
@@ -35,30 +55,55 @@ def get_serial_ports():
         color_print("Warning: pyserial is not available. Port autodetect disabled.", "yellow")
         return []
 
+def is_esp_compatible(port):
+    """Heuristic: is this port a likely ESP32/Arduino USB-serial device?"""
+    if getattr(port, "vid", None) in ESP_COMPATIBLE_VIDS:
+        return True
+    haystack = f"{port.device} {port.description or ''} {getattr(port, 'hwid', '') or ''}".lower()
+    return any(keyword in haystack for keyword in ESP_COMPATIBLE_KEYWORDS)
+
 def select_port():
-    ports = get_serial_ports()
-    if not ports:
+    all_ports = get_serial_ports()
+    if not all_ports:
         return input("Please enter the serial port path manually (e.g. /dev/ttyUSB0 or COM3): ").strip()
-    
-    color_print("\nDetected serial ports:", "cyan")
-    for idx, port in enumerate(ports, 1):
-        desc = f" - {port.description}" if port.description else ""
-        print(f"  {idx}) {port.device}{desc}")
-    print(f"  {len(ports) + 1}) Enter port manually")
-    
+
+    ports = [p for p in all_ports if is_esp_compatible(p)]
+    showing_filtered = bool(ports)
+    if not ports:
+        color_print("No ESP32/Arduino-compatible ports detected; showing all serial ports.", "yellow")
+        ports = all_ports
+
     while True:
+        if showing_filtered:
+            color_print("\nDetected ESP32/Arduino-compatible serial ports:", "cyan")
+        else:
+            color_print("\nDetected serial ports:", "cyan")
+        for idx, port in enumerate(ports, 1):
+            desc = f" - {port.description}" if port.description else ""
+            print(f"  {idx}) {port.device}{desc}")
+        show_all_option = showing_filtered and len(ports) < len(all_ports)
+        manual_idx = len(ports) + 1
+        if show_all_option:
+            print(f"  {manual_idx}) Show all serial ports")
+            manual_idx += 1
+        print(f"  {manual_idx}) Enter port manually")
+
         try:
-            choice = input(f"Select a port (1-{len(ports) + 1}): ").strip()
+            choice = input(f"Select a port (1-{manual_idx}): ").strip()
             if not choice:
                 continue
             val = int(choice)
             if 1 <= val <= len(ports):
                 return ports[val - 1].device
-            elif val == len(ports) + 1:
+            elif show_all_option and val == len(ports) + 1:
+                ports = all_ports
+                showing_filtered = False
+                continue
+            elif val == manual_idx:
                 return input("Please enter the serial port path manually: ").strip()
         except ValueError:
             pass
-        print(f"Invalid selection. Please choose between 1 and {len(ports) + 1}.")
+        print(f"Invalid selection. Please choose between 1 and {manual_idx}.")
 
 def ask_yes_no(question, default="y"):
     options = "[Y/n]" if default.lower() == "y" else "[y/N]"
@@ -78,11 +123,37 @@ def run_npm_install():
         color_print(f"Error installing frontend dependencies: {e}", "red")
         color_print("You may need to run 'npm install' inside the webapp/ directory manually.", "yellow")
 
+def select_firmware_devices(devices):
+    """Let the user choose which devices to flash. Returns a sublist of devices."""
+    color_print("\nDevices available to flash:", "cyan")
+    for idx, dev in enumerate(devices, 1):
+        print(f"  {idx}) {dev['device_name']}")
+    color_print(
+        "Enter the numbers to flash (e.g. '1,3'), 'all', or 'none' to skip.", "cyan"
+    )
+
+    while True:
+        choice = input("Devices to flash [all]: ").strip().lower()
+        if not choice or choice == "all":
+            return devices
+        if choice in ("none", "skip", "0"):
+            return []
+        try:
+            selected = []
+            for token in choice.replace(",", " ").split():
+                val = int(token)
+                if not 1 <= val <= len(devices):
+                    raise ValueError
+                if devices[val - 1] not in selected:
+                    selected.append(devices[val - 1])
+            if selected:
+                return selected
+        except ValueError:
+            pass
+        print(f"Invalid selection. Choose numbers between 1 and {len(devices)}, 'all', or 'none'.")
+
 def flash_firmware(device_name, directory, env_name):
     color_print(f"\n--- Preparing to flash {device_name} ---", "cyan")
-    if not ask_yes_no(f"Do you want to flash {device_name}?"):
-        color_print(f"Skipped {device_name}.", "yellow")
-        return
 
     port = select_port()
     if not port:
@@ -165,28 +236,32 @@ def main():
     
     # 2. Hardware firmware flashing
     if ask_yes_no("Would you like to flash firmware to your hardware devices?"):
-        # ESP32 CAM
-        flash_firmware(
-            device_name="ESP32 CAM (Mega Bridge)",
-            directory=root_dir / "arduino_code" / "esp32_cam_mega_bridge",
-            env_name="esp32cam"
-        )
-        
-        # ESP32 UI Box
-        flash_firmware(
-            device_name="ESP32 UI Box",
-            directory=root_dir / "arduino_code" / "esp32_ui_box",
-            env_name="esp32_ui_box"
-        )
-        
-        # Arduino Mega
-        flash_firmware(
-            device_name="Arduino Mega 2560",
-            directory=root_dir / "arduino_code",
-            env_name="megaatmega2560"
-        )
-        
-        print_help_tips()
+        devices = [
+            # ESP32 CAM (camera firmware only, not the mega bridge)
+            {
+                "device_name": "ESP32 CAM",
+                "directory": root_dir / "arduino_code" / "esp32_cam_mega_bridge",
+                "env_name": "esp32cam",
+            },
+            {
+                "device_name": "ESP32 UI Box",
+                "directory": root_dir / "arduino_code" / "esp32_ui_box",
+                "env_name": "esp32_ui_box",
+            },
+            {
+                "device_name": "Arduino Mega 2560",
+                "directory": root_dir / "arduino_code",
+                "env_name": "megaatmega2560",
+            },
+        ]
+
+        selected = select_firmware_devices(devices)
+        if not selected:
+            color_print("Skipping all firmware flashing.", "yellow")
+        else:
+            for dev in selected:
+                flash_firmware(**dev)
+            print_help_tips()
 
     # 3. Create startup shortcuts
     generate_launch_scripts()
