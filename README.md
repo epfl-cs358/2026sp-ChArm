@@ -49,6 +49,8 @@ developed and tested independently.
 │   ├── src/                      Firmware entry points and hardware classes
 │   ├── esp32_cam_mega_bridge/    ESP32-CAM ↔ Mega bridge sketches
 │   └── esp32_ui_box/             ESP32 UI box firmware
+├── docs/                         Project documentation
+│   └── CAD/                      Project CAD files
 ├── python_code/                  Python host-side code
 │   ├── src/charm/
 │   │   ├── vision/               Board calibration and image processing
@@ -60,12 +62,9 @@ developed and tested independently.
 │   ├── play_game.py              Full game entry point
 │   ├── main.py                   Vision / integration runner
 │   └── capture_game_session.py   Raw image capture helper
-├── inverse_kinematics/           Early standalone SCARA sketches
 ├── Simulation/                   Prototyping / simulation files
 ├── webapp/                       Optional Next.js frontend
-├── webapp_backend/               Optional FastAPI backend
-├── Proposal MIT.pdf              Original project proposal
-└── notes.md                      Project notes and ideas
+└── webapp_backend/               Optional FastAPI backend
 ```
 
 ## Hardware Summary
@@ -78,17 +77,16 @@ The physical system is centered around:
 - **Servo gripper**
 - **Limit switches**
 - **ESP32-CAM** for board capture
-- **ESP32D-WIFI** for the player-facing LCD/button interface
+- **ESP32D** for the player-facing LCD/button interface
 - **16×2 LCD + rotary encoder/button**
-- **Stepper drivers on a CNC-shield-like STEP/DIR setup**
 
 ### Fabrication Tools
 
 You will likely need:
 
 - **3D printer** for mechanical arm parts, brackets, gripper components, and enclosures
-- **laser cutter** for flat structural parts such as board elements, panels, or mounts
-- **soldering equipment** for wiring, connectors, switch integration, and board-level assembly
+- **laser cutter** for flat structural parts such as board elements, joints, or mounts
+- **soldering equipment** for wiring and connectors
 
 ### CAD Overview
 // TODO
@@ -216,13 +214,6 @@ The Mega bridge uses these serial commands:
 | `STATUS` | `ESP32_OK` |
 | `IP` | `IP <address>` |
 | `CAPTURE` | `CAPTURE_OK` or `CAPTURE_FAIL` |
-
-Wire the bridge serial connection as documented in the sketch:
-
-| ESP32-CAM | Arduino Mega |
-|---|---|
-| GPIO3 / TX | pin 19 / RX1 |
-| GPIO1 / RX | pin 18 / TX1 |
 
 ### ESP32D Side
 
