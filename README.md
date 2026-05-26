@@ -9,9 +9,9 @@ The intended workflow is:
 2. The player clicks start game and picks a difficulty and the color he wants to play all from the LCD/encoder UI or the webapp.
 3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
 4. An ESP32-CAM captures a picture of the board.
-5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour,and infers which move the human made by comparing the observed board to the previous board.
-6. Stockfish computes the best move at the selected skill level.
-7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, enpassant, captures, and castling).
+5. From the image a computer vision algorithm and / or a CNN algorithm creates a bitmap from chesspiece placement.
+6. 6. Stockfish computes the best move at the selected skill level.
+7. The arm physically moves the chess piece on the board
 8. Turn passes back to the human; repeat from 3.
 
 This README is the top-level guide for understanding, rebuilding, and running the project.
