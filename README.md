@@ -6,13 +6,13 @@ ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
 
 The intended workflow is:
 1. The player starts by initiating arm calibration
-2. The player clicks start game and picks a difficulty and starts a game from the LCD/encoder UI or the webapp.
+2. The player clicks start game and picks a difficulty and the color he wants to play all from the LCD/encoder UI or the webapp.
 3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
 4. An ESP32-CAM captures a picture of the board.
 5. The Python host warps/rectifies the image, splits it into an 8×8 grid, detects per-square occupancy and piece colour,and infers which move the human made by comparing the observed board to the previous board.
 6. Stockfish computes the best move at the selected skill level.
-7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, captures, and castling).
-8. Turn passes back to the human; repeat.
+7. The host translates the move into Cartesian pick-and-place commands and sends them to the Arduino Mega, which drives the SCARA arm to physically move the piece (handling normal moves, enpassant, captures, and castling).
+8. Turn passes back to the human; repeat from 3.
 
 This README is the top-level guide for understanding, rebuilding, and running the project.
 
@@ -21,15 +21,26 @@ The project is organized so that hardware control and chess/vision logic can be 
 
 ## Main Features
 
-### Software feature 
-- Chess piece occupation and color detection from an esp32 cam image.
-- manual control of the arm through the webapp or the lcd box
-- 
-- Reconstructs the played move by comparing the observation against all legal moves
-- Validates whether an observed update is legal, invalid, unchanged, or ambiguous
-- Uses Stockfish to compute the robot's move
-- Sends blocking pick-and-place commands to the Arduino Mega
-- Supports captures, castling, and vision-driven game progression
+   **Gameplay**
+     - Plays a full game of physical chess against a human, end to end
+     - Selectable difficulty (easy / medium / hard) powered by Stockfish
+     - Handles normal moves, captures, and castling
+     - On-robot LCD + rotary-encoder UI — no computer interaction needed to play
+
+   **Robot / motion**
+     - Two-link SCARA arm with a Z lead-screw and servo gripper
+     - Automatic homing via limit switches and EEPROM-persisted calibration
+     - Cartesian pick-and-place driven over serial from the Python host
+
+  **Computer vision**
+     - Wi-Fi board capture via ESP32-CAM
+     - Two-stage perspective rectification + 8×8 grid splitting
+     - CNN square classifier (empty / white / black) with a classical fallback pipeline
+     - Self-improving "living dataset" — corrected squares feed the next training cycle
+
+  **Move understanding**
+     - Reconstructs the human's move by matching the observed board against all legal moves
+     - Validates each observation (legal / unchanged / invalid / ambiguous) and re-captures bad frames
 
 ## Repository Layout
 
