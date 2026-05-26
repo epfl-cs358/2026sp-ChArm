@@ -22,25 +22,25 @@ The project is organized so that hardware control and chess/vision logic can be 
 ## Main Features
 
    **Gameplay**
-     - Plays a full game of physical chess against a human, end to end
-     - Selectable difficulty (easy / medium / hard) powered by Stockfish
-     - Handles normal moves, captures, and castling
-     - On-robot LCD + rotary-encoder UI — no computer interaction needed to play
+   - Plays a full game of physical chess against a human, end to end
+   - Selectable difficulty (easy / medium / hard) powered by Stockfish
+   - Handles normal moves, captures, and castling
+   - On-robot LCD + rotary-encoder UI — no computer interaction needed to play
 
    **Robot / motion**
-     - Two-link SCARA arm with a Z lead-screw and servo gripper
-     - Automatic homing via limit switches and EEPROM-persisted calibration
-     - Cartesian pick-and-place driven over serial from the Python host
+   - Two-link SCARA arm with a Z lead-screw and servo gripper
+   - Automatic homing via limit switches and EEPROM-persisted calibration
+   - Cartesian pick-and-place driven over serial from the Python host
 
   **Computer vision**
-     - Wi-Fi board capture via ESP32-CAM
-     - Two-stage perspective rectification + 8×8 grid splitting
-     - CNN square classifier (empty / white / black) with a classical fallback pipeline
-     - Self-improving "living dataset" — corrected squares feed the next training cycle
+   - Wi-Fi board capture via ESP32-CAM
+   - Two-stage perspective rectification + 8×8 grid splitting
+   - CNN square classifier (empty / white / black) with a classical fallback pipeline
+   - Self-improving "living dataset" — corrected squares feed the next training cycle
 
   **Move understanding**
-     - Reconstructs the human's move by matching the observed board against all legal moves
-     - Validates each observation (legal / unchanged / invalid / ambiguous) and re-captures bad frames
+   - Reconstructs the human's move by matching the observed board against all legal moves
+   - Validates each observation (legal / unchanged / invalid / ambiguous) and re-captures bad frames
 
 ## Repository Layout
 
