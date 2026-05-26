@@ -97,7 +97,7 @@ You will likely need:
 
 ### Electronics and Wiring
 
-<img src="ChArm Electrical Circuit.png" alt="Electrical Circuit"/>
+<img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit"/>
 
 **Power**
 - A 12V Power supply gives power to the motors through the CNC shield and, through a 12V to 5V buck converter, powers the camera, limit switches, UI ESP32 and gripper servo.
