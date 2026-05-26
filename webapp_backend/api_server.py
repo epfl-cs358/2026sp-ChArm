@@ -3854,12 +3854,19 @@ def controller_start(payload: ControllerStartPayload):
             _CONTROLLER_STATE["last_error"] = f"ESP32 TCP connect failed: {exc}"
             raise HTTPException(502, _CONTROLLER_STATE["last_error"]) from exc
 
+        # Synchronize configuration with the active session state if already initialized
+        player_color = payload.player_color
+        flip_180 = payload.flip_180
+        if _GAME_SESSION.initialized and _GAME_SESSION.player_color:
+            player_color = _GAME_SESSION.player_color
+            flip_180 = (_GAME_SESSION.player_color == "black")
+
         config = GameControllerConfig(
             board_image_provider=lambda: str(LATEST_CALIBRATED_PATH),
             arm_ser=arm_ser,
             arm_lock=arm_lock,
-            player_color=payload.player_color,
-            flip_180=payload.flip_180,
+            player_color=player_color,
+            flip_180=flip_180,
             engine_path=_resolve_stockfish_path(payload.engine_path),
             think_time=payload.think_time,
             on_phase_change=_on_phase_change,
