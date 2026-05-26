@@ -80,7 +80,7 @@ The project is organized so that hardware control and chess/vision logic can be 
   - **Gripper** — servo-driven, 0°–65° open/close span
   - **Motors** — 3× 1.8° / 200-step steppers, driven at 16× microstepping (except the lead screw that is driven at 2x microstepping)
 
-  ### Electronics
+  ### Electronics and wiring
 
   - **Arduino Mega 2560** — motion control, calibration, EEPROM persistence
   - **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
@@ -122,8 +122,8 @@ The physical system is centered around:
 - A 12V Power supply gives power to the motors through the CNC shield and, through a 12V to 5V buck converter, powers the camera, limit switches, UI ESP32 and gripper servo.
 
 **Sub-circuits**
--  **UI Box** : the box receives 5V and the veroboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
-   -  The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
+- **UI Box** : the box receives 5V and the veroboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
+   - The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
 -  **Limit Switches** : A stripboard handles the current going through the switches. When the switch is pressed, the current is diverted and signals the CNC shield. We use small resistors to avoid short circuits. 
 
 The main production firmware pin assignments are defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h).
