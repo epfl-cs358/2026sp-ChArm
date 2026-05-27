@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 SRC_PATH = ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-# from charm.game import BoardStateTracker, update_tracker_from_image
+from charm.game import BoardStateTracker, update_tracker_from_image
 from charm.vision.pipeline import run_board_pipeline
 from charm.vision.transferphoto import fetch_raw_image
 from charm.vision.calibration_config import (
@@ -97,10 +97,21 @@ def parse_args() -> argparse.Namespace:
         help="UCI moves already played before the observed image.",
     )
     parser.add_argument(
+        "--infer-move",
+        action="store_true",
+        help="Infer a legal move from the observed image using the software board state.",
+    )
+    parser.add_argument(
         "--max-mismatches",
         type=int,
         default=0,
         help="Maximum mismatch count allowed before rejecting the inferred move.",
+    )
+    parser.add_argument(
+        "--max-occupancy-mismatches",
+        type=int,
+        default=2,
+        help="Maximum occupancy-only mismatch count allowed in the legal-move fallback.",
     )
     return parser.parse_args()
 
@@ -154,12 +165,13 @@ def main() -> None:
     calibrated_input_path = ROOT / "output_latest_calibrated_input.jpg"
     cv2.imwrite(str(calibrated_input_path), refined_warp)
 
-    if args.before_moves:
+    if args.infer_move:
         tracker = BoardStateTracker(build_board_from_moves(args.before_moves))
         update_result = update_tracker_from_image(
             tracker=tracker,
             image_path=str(calibrated_input_path),
             max_mismatches=args.max_mismatches,
+            max_occupancy_mismatches=args.max_occupancy_mismatches,
         )
         result = update_result.pipeline_result
         inference_result = update_result.inference_result

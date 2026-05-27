@@ -255,7 +255,7 @@ export const DEFAULT_PARAMS: PipelineParams = {
   brightness_boost: 1.05,
   sharpen_alpha: 1.35,
   sharpen_beta: -0.35,
-  occupancy_threshold: 4.0,
+  occupancy_threshold: 9.0,
   canny_low: 15,
   canny_high: 50,
   occupancy_std_weight: 0.4,

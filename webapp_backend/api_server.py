@@ -179,7 +179,7 @@ class PipelineParams(BaseModel):
     brightness_boost: float = 1.05
     sharpen_alpha: float = 1.35
     sharpen_beta: float = -0.35
-    occupancy_threshold: float = 4.0
+    occupancy_threshold: float = 9.0
     canny_low: int = 15
     canny_high: int = 50
     occupancy_std_weight: float = 0.4

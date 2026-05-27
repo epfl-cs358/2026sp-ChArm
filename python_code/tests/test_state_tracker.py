@@ -10,7 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-from charm.game.state_tracker import BoardStateTracker, board_to_bitmaps, infer_move_from_bitmaps
+from charm.game.state_tracker import (
+    BoardStateTracker,
+    board_to_bitmaps,
+    board_to_occupancy_bitmap,
+    infer_move_from_bitmaps,
+    infer_move_from_occupancy,
+)
 
 
 def clone_bitmap(bitmap: list[list[int]]) -> list[list[int]]:
@@ -278,6 +284,37 @@ class StateTrackerTests(unittest.TestCase):
         self.assertEqual(result.mismatch_count, 1)
         self.assertEqual(result.status, "accepted_legal_move")
         self.assertEqual(tracker.board.fen(), board_after_e4.fen())
+
+    def test_occupancy_fallback_accepts_legal_move_with_extra_noise(self) -> None:
+        board_after_e4 = chess.Board()
+        board_after_e4.push(chess.Move.from_uci("e2e4"))
+        occupancy = board_to_occupancy_bitmap(board_after_e4)
+
+        # Random false positive: d4 suddenly looks occupied.
+        occupancy[4][3] = 1
+
+        result = infer_move_from_occupancy(chess.Board(), occupancy)
+
+        self.assertIsNotNone(result.move)
+        self.assertEqual(result.move.uci(), "e2e4")
+        self.assertEqual(result.mismatch_count, 1)
+        self.assertEqual(result.status, "accepted_legal_move")
+
+    def test_occupancy_fallback_rejects_noise_without_legal_move(self) -> None:
+        occupancy = board_to_occupancy_bitmap(chess.Board())
+
+        # Only an impossible extra piece appears; no source square changed.
+        occupancy[4][3] = 1
+
+        tracker = BoardStateTracker()
+        result = tracker.update_from_occupancy(
+            occupancy,
+            max_mismatches=0,
+        )
+
+        self.assertIsNone(result.move)
+        self.assertEqual(result.status, "invalid_observation")
+        self.assertEqual(tracker.board.fen(), chess.Board().fen())
 
 
 if __name__ == "__main__":

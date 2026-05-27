@@ -34,6 +34,38 @@ const DEBUG_PANELS = [
 
 type SupervisedLabel = "black" | "white" | "unlabeled";
 type ClassLabel = "empty" | "white" | "black";
+type DatasetLabel = "black" | "white" | "empty";
+
+interface DatasetExample {
+  file: File;
+  relativePath: string;
+  expected: DatasetLabel;
+  square: string | null;
+}
+
+interface DatasetSquareResult {
+  square: string;
+  expected: DatasetLabel;
+  predicted: ClassLabel;
+  correct: boolean;
+  occupancyCorrect: boolean;
+}
+
+interface DatasetPhotoResult {
+  relativePath: string;
+  expected: DatasetLabel;
+  square: string | null;
+  correct: boolean;
+  squares: DatasetSquareResult[];
+  error?: string;
+}
+
+interface DatasetSummary {
+  photos: number;
+  evaluatedCells: number;
+  correctCells: number;
+  occupancyCorrectCells: number;
+}
 
 const CLAHE_TILE_CHOICES = [4, 8, 16] as const;
 const RANDOM_SEARCH_TRIALS = 200;
@@ -140,6 +172,100 @@ async function waitWhilePaused(isPaused: () => boolean) {
 function expectedLabelAt(labels: SupervisedLabel[][], row: number, col: number): ClassLabel {
   const label = labels[row][col];
   return label === "unlabeled" ? "empty" : label;
+}
+
+function squareToRowCol(square: string): [number, number] | null {
+  if (!/^[a-h][1-8]$/i.test(square)) return null;
+  const col = square.toLowerCase().charCodeAt(0) - "a".charCodeAt(0);
+  const row = 8 - Number(square[1]);
+  return [row, col];
+}
+
+function rowColToSquare(row: number, col: number): string {
+  return `${String.fromCharCode("a".charCodeAt(0) + col)}${8 - row}`;
+}
+
+function normalizedPredictedLabel(label: ColorLabel | undefined): ClassLabel {
+  return label === "white" || label === "black" ? label : "empty";
+}
+
+function parseDatasetFile(file: File): DatasetExample | null {
+  const relativePath = file.webkitRelativePath || file.name;
+  const parts = relativePath.split("/").filter(Boolean);
+  const labelIndex = parts.findIndex((part) => ["black", "white", "empty"].includes(part.toLowerCase()));
+  if (labelIndex === -1) return null;
+
+  const expected = parts[labelIndex].toLowerCase() as DatasetLabel;
+  const square = expected === "empty" ? null : parts[labelIndex + 1]?.toLowerCase() ?? null;
+  if (expected !== "empty" && (!square || !squareToRowCol(square))) return null;
+
+  return {
+    file,
+    relativePath,
+    expected,
+    square,
+  };
+}
+
+function scoreDatasetExample(example: DatasetExample, result: PipelineResult): DatasetPhotoResult {
+  const squares: DatasetSquareResult[] = [];
+
+  if (example.expected === "empty") {
+    for (let row = 0; row < 8; row += 1) {
+      for (let col = 0; col < 8; col += 1) {
+        const predicted = normalizedPredictedLabel(result.color_labels[row]?.[col]);
+        squares.push({
+          square: rowColToSquare(row, col),
+          expected: "empty",
+          predicted,
+          correct: predicted === "empty",
+          occupancyCorrect: predicted === "empty",
+        });
+      }
+    }
+  } else if (example.square) {
+    const coords = squareToRowCol(example.square);
+    if (coords) {
+      const [row, col] = coords;
+      const predicted = normalizedPredictedLabel(result.color_labels[row]?.[col]);
+      squares.push({
+        square: example.square,
+        expected: example.expected,
+        predicted,
+        correct: predicted === example.expected,
+        occupancyCorrect: predicted !== "empty",
+      });
+    }
+  }
+
+  return {
+    relativePath: example.relativePath,
+    expected: example.expected,
+    square: example.square,
+    correct: squares.every((square) => square.correct),
+    squares,
+  };
+}
+
+function summarizeDataset(results: DatasetPhotoResult[]): DatasetSummary {
+  let evaluatedCells = 0;
+  let correctCells = 0;
+  let occupancyCorrectCells = 0;
+
+  for (const result of results) {
+    for (const square of result.squares) {
+      evaluatedCells += 1;
+      correctCells += square.correct ? 1 : 0;
+      occupancyCorrectCells += square.occupancyCorrect ? 1 : 0;
+    }
+  }
+
+  return {
+    photos: results.length,
+    evaluatedCells,
+    correctCells,
+    occupancyCorrectCells,
+  };
 }
 
 function scoreResult(result: PipelineResult | null, labels: SupervisedLabel[][]): SupervisionScore {
@@ -644,6 +770,129 @@ function ResultStatsPanel({ result }: { result: PipelineResult }) {
   );
 }
 
+function DatasetBatchPanel({
+  examples,
+  running,
+  progress,
+  results,
+  onChooseFolder,
+  onRun,
+}: {
+  examples: DatasetExample[];
+  running: boolean;
+  progress: { done: number; total: number };
+  results: DatasetPhotoResult[];
+  onChooseFolder: () => void;
+  onRun: () => void;
+}) {
+  const summary = summarizeDataset(results);
+  const accuracy = summary.evaluatedCells > 0 ? summary.correctCells / summary.evaluatedCells : null;
+  const occupancyAccuracy =
+    summary.evaluatedCells > 0 ? summary.occupancyCorrectCells / summary.evaluatedCells : null;
+  const recent = results.slice(-10).reverse();
+
+  return (
+    <div className="card p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-mono font-semibold text-text-bright">Dataset Batch</h2>
+          <p className="mt-1 text-xs font-mono text-text-muted">
+            Folder format: black/a1, white/h8, empty/frame.jpg
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onChooseFolder}
+            disabled={running}
+            className="px-3 py-2 text-xs font-mono rounded-md border border-border text-text-muted hover:text-text hover:border-border-bright disabled:opacity-50"
+          >
+            Choose folder
+          </button>
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={running || examples.length === 0}
+            className="btn-cyan px-3 py-2 rounded-md text-xs font-mono disabled:opacity-50"
+          >
+            {running ? "Running..." : "Run dataset"}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-center font-mono text-xs">
+        <div className="rounded-md border border-border px-2 py-2">
+          <p className="text-text-bright font-semibold">{examples.length}</p>
+          <p className="text-text-muted">photos</p>
+        </div>
+        <div className="rounded-md border border-border px-2 py-2">
+          <p className="text-text-bright font-semibold">{progress.done}/{progress.total}</p>
+          <p className="text-text-muted">done</p>
+        </div>
+        <div className="rounded-md border border-border px-2 py-2">
+          <p className="text-cyan-DEFAULT font-semibold">
+            {accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}
+          </p>
+          <p className="text-text-muted">accuracy</p>
+        </div>
+        <div className="rounded-md border border-border px-2 py-2">
+          <p className="text-amber-DEFAULT font-semibold">
+            {occupancyAccuracy === null ? "--" : `${Math.round(occupancyAccuracy * 100)}%`}
+          </p>
+          <p className="text-text-muted">occupancy</p>
+        </div>
+      </div>
+
+      {examples.length > 0 && (
+        <p className="mt-3 truncate font-mono text-[10px] text-text-muted">
+          Loaded {examples[0].relativePath.split("/")[0]} · {examples.length} images
+        </p>
+      )}
+
+      {recent.length > 0 && (
+        <div className="mt-3 max-h-52 overflow-auto rounded-md border border-border">
+          <table className="w-full text-left font-mono text-[10px]">
+            <thead className="sticky top-0 bg-card text-text-muted">
+              <tr>
+                <th className="px-2 py-1 font-normal">photo</th>
+                <th className="px-2 py-1 font-normal">expected</th>
+                <th className="px-2 py-1 font-normal">predicted</th>
+                <th className="px-2 py-1 font-normal">status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((result) => {
+                const first = result.squares[0];
+                const expected = result.square ? `${result.expected}/${result.square}` : result.expected;
+                const predicted = result.error
+                  ? result.error
+                  : result.square
+                  ? `${first?.predicted ?? "none"}/${first?.square ?? result.square}`
+                  : result.correct
+                  ? "all empty"
+                  : `${result.squares.filter((square) => !square.correct).length} wrong`;
+                return (
+                  <tr key={result.relativePath} className="border-t border-border">
+                    <td className="max-w-64 truncate px-2 py-1 text-text-muted">{result.relativePath}</td>
+                    <td className="px-2 py-1 text-text">{expected}</td>
+                    <td className="px-2 py-1 text-text-muted">{predicted}</td>
+                    <td
+                      className="px-2 py-1 font-semibold"
+                      style={{ color: result.correct ? "var(--charm-cyan)" : "var(--charm-amber)" }}
+                    >
+                      {result.correct ? "OK" : "WRONG"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function LabPage() {
   const [paramsA, setParamsA] = useState<PipelineParams>(() => ({ ...DEFAULT_PARAMS }));
   const [paramsB, setParamsB] = useState<PipelineParams>(() => ({ ...DEFAULT_PARAMS }));
@@ -670,8 +919,13 @@ export default function LabPage() {
   const [annotationStats, setAnnotationStats] = useState<{
     count: number; n_white: number; n_black: number; n_scenes: number;
   } | null>(null);
+  const [datasetExamples, setDatasetExamples] = useState<DatasetExample[]>([]);
+  const [datasetResults, setDatasetResults] = useState<DatasetPhotoResult[]>([]);
+  const [datasetRunning, setDatasetRunning] = useState(false);
+  const [datasetProgress, setDatasetProgress] = useState({ done: 0, total: 0 });
   const [showManualCalibration, setShowManualCalibration] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const datasetFolderRef = useRef<HTMLInputElement>(null);
   const runASeq = useRef(0);
   const runBSeq = useRef(0);
   const skipAutoRunRef = useRef(false);
@@ -708,6 +962,52 @@ export default function LabPage() {
     const p = selectedRawImage ? { ...params, image_path: selectedRawImage } : params;
     return api.runPipeline(p);
   }, [source, uploadedFile, selectedRawImage]);
+
+  const handleDatasetFolderChange = useCallback((files: FileList | null) => {
+    const parsed = Array.from(files ?? [])
+      .map(parseDatasetFile)
+      .filter((example): example is DatasetExample => example !== null);
+    setDatasetExamples(parsed);
+    setDatasetResults([]);
+    setDatasetProgress({ done: 0, total: parsed.length });
+  }, []);
+
+  const runDataset = useCallback(async () => {
+    if (datasetRunning || datasetExamples.length === 0) return;
+
+    const activeParams = { ...paramsA };
+    setDatasetRunning(true);
+    setDatasetResults([]);
+    setDatasetProgress({ done: 0, total: datasetExamples.length });
+    setError(null);
+
+    try {
+      for (let index = 0; index < datasetExamples.length; index += 1) {
+        const example = datasetExamples[index];
+        try {
+          const result = await api.uploadAndRun(example.file, activeParams);
+          const scored = scoreDatasetExample(example, result);
+          setResultA(result);
+          setResultAParams(activeParams);
+          setDatasetResults((current) => [...current, scored]);
+        } catch (e: unknown) {
+          const failed: DatasetPhotoResult = {
+            relativePath: example.relativePath,
+            expected: example.expected,
+            square: example.square,
+            correct: false,
+            squares: [],
+            error: e instanceof Error ? e.message : "failed",
+          };
+          setDatasetResults((current) => [...current, failed]);
+        } finally {
+          setDatasetProgress({ done: index + 1, total: datasetExamples.length });
+        }
+      }
+    } finally {
+      setDatasetRunning(false);
+    }
+  }, [datasetExamples, datasetRunning, paramsA]);
 
   const runA = useCallback(async () => {
     const requestId = runASeq.current + 1;
@@ -999,6 +1299,15 @@ export default function LabPage() {
 
   return (
     <div className="p-6 max-w-screen-2xl mx-auto">
+      <input
+        ref={datasetFolderRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => handleDatasetFolderChange(e.target.files)}
+        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+      />
       <div className="mb-6 flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-mono font-semibold text-text-bright">Computer Vision</h1>
@@ -1203,6 +1512,14 @@ export default function LabPage() {
             </div>
 
             <div className="space-y-4">
+              <DatasetBatchPanel
+                examples={datasetExamples}
+                running={datasetRunning}
+                progress={datasetProgress}
+                results={datasetResults}
+                onChooseFolder={() => datasetFolderRef.current?.click()}
+                onRun={runDataset}
+              />
               <LivePhotosPanel result={resultA} />
               {resultA ? (
                 <ResultStatsPanel result={resultA} />

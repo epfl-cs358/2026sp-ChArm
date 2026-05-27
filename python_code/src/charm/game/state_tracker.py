@@ -52,6 +52,24 @@ def count_bitmap_mismatches(left: Bitmap, right: Bitmap) -> int:
     return mismatches
 
 
+def merge_occupancy_bitmap(
+    white_bitmap: Bitmap,
+    black_bitmap: Bitmap,
+) -> Bitmap:
+    occupancy = empty_bitmap()
+
+    for row in range(8):
+        for col in range(8):
+            occupancy[row][col] = 1 if white_bitmap[row][col] or black_bitmap[row][col] else 0
+
+    return occupancy
+
+
+def board_to_occupancy_bitmap(board: chess.Board) -> Bitmap:
+    white_bitmap, black_bitmap = board_to_bitmaps(board)
+    return merge_occupancy_bitmap(white_bitmap, black_bitmap)
+
+
 def compare_board_to_bitmaps(expected_board, white_bitmap, black_bitmap) -> int:
     """
     Compare a python-chess board with detected 8x8 white/black bitmaps.
@@ -90,6 +108,14 @@ def compare_board_to_bitmaps(expected_board, white_bitmap, black_bitmap) -> int:
 
     print("[DEBUG] total mismatch_count =", mismatch_count)
     return mismatch_count
+
+
+def compare_board_to_occupancy(
+    board: chess.Board,
+    observed_occupancy: Bitmap,
+) -> int:
+    expected_occupancy = board_to_occupancy_bitmap(board)
+    return count_bitmap_mismatches(expected_occupancy, observed_occupancy)
 
 
 @dataclass
@@ -160,6 +186,62 @@ def infer_move_from_bitmaps(
     return best_result
 
 
+def infer_move_from_occupancy(
+    board: chess.Board,
+    observed_occupancy: Bitmap,
+) -> MoveInferenceResult:
+    """
+    Infer a legal move using only occupied/empty information.
+
+    This is a fallback for noisy color detection or one-off false positives:
+    if a random square suddenly appears occupied but no legal move explains it,
+    it becomes one mismatch/noise cell instead of changing the chess state.
+    """
+    current_mismatch_count = compare_board_to_occupancy(
+        board,
+        observed_occupancy,
+    )
+
+    if current_mismatch_count == 0:
+        return MoveInferenceResult(
+            move=None,
+            mismatch_count=0,
+            status="unchanged_position",
+            matching_move_count=0,
+        )
+
+    best_result = MoveInferenceResult(
+        move=None,
+        mismatch_count=current_mismatch_count,
+        status="invalid_observation",
+        matching_move_count=0,
+    )
+
+    for move in board.legal_moves:
+        if move.promotion and move.promotion != chess.QUEEN:
+            continue
+
+        candidate_board = board.copy(stack=False)
+        candidate_board.push(move)
+
+        mismatch_count = compare_board_to_occupancy(
+            candidate_board,
+            observed_occupancy,
+        )
+
+        if mismatch_count < best_result.mismatch_count:
+            best_result = MoveInferenceResult(
+                move=move,
+                mismatch_count=mismatch_count,
+                status="accepted_legal_move",
+                matching_move_count=1,
+            )
+        elif mismatch_count == best_result.mismatch_count and best_result.move is not None:
+            best_result.matching_move_count += 1
+
+    return best_result
+
+
 class BoardStateTracker:
     def __init__(self, board: Optional[chess.Board] = None) -> None:
         self.board = board.copy(stack=True) if board is not None else chess.Board()
@@ -178,6 +260,15 @@ class BoardStateTracker:
             observed_black_bitmap,
         )
 
+    def infer_move_from_occupancy(
+        self,
+        observed_occupancy: Bitmap,
+    ) -> MoveInferenceResult:
+        return infer_move_from_occupancy(
+            self.board,
+            observed_occupancy,
+        )
+
     def update_from_bitmaps(
         self,
         observed_white_bitmap: Bitmap,
@@ -188,6 +279,40 @@ class BoardStateTracker:
             observed_white_bitmap,
             observed_black_bitmap,
         )
+
+        if result.status == "unchanged_position":
+            return result
+
+        if result.move is None or result.mismatch_count > max_mismatches:
+            return MoveInferenceResult(
+                move=None,
+                mismatch_count=result.mismatch_count,
+                status="invalid_observation",
+                matching_move_count=result.matching_move_count,
+            )
+
+        if result.matching_move_count > 1:
+            return MoveInferenceResult(
+                move=None,
+                mismatch_count=result.mismatch_count,
+                status="ambiguous_observation",
+                matching_move_count=result.matching_move_count,
+            )
+
+        self.board.push(result.move)
+        return MoveInferenceResult(
+            move=result.move,
+            mismatch_count=result.mismatch_count,
+            status="accepted_legal_move",
+            matching_move_count=result.matching_move_count,
+        )
+
+    def update_from_occupancy(
+        self,
+        observed_occupancy: Bitmap,
+        max_mismatches: int = 1,
+    ) -> MoveInferenceResult:
+        result = self.infer_move_from_occupancy(observed_occupancy)
 
         if result.status == "unchanged_position":
             return result
