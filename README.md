@@ -149,8 +149,37 @@ Two firmware headers hold the values worth checking whenever the robot is rebuil
 
 ## Software Architecture
 
-The software has two halves: the **embedded firmware** running on the
-microcontrollers, and the **Python host** running on the computer.
+ChArm is a distributed system. A Python backend orchestrates the game and talks
+to a web/embedded frontend, three microcontrollers, and a chess engine. The
+backend — `webapp_backend/api_server.py`, a FastAPI service on port `8765` — is
+the single source of truth: both the webapp and the on-robot LCD drive the
+**same** game session through it.
+
+```mermaid
+flowchart LR
+    WEB["Webapp<br/>(Next.js :3000)"]
+    UI["On-robot UI<br/>ESP32 UI box"]
+    CAM["ESP32-CAM"]
+    ARM["Arduino Mega<br/>SCARA arm"]
+
+    subgraph HOST["Python host — FastAPI backend (:8765)"]
+        GAME["game/<br/>state tracker + controller"]
+        VIS["vision/<br/>CV router → classical / CNN"]
+        ENG["chess_engine/<br/>Stockfish + evaluation"]
+        ADP["arduino/ + robot_adapter"]
+    end
+
+    WEB <-->|HTTP / REST| HOST
+    UI <-->|TCP| HOST
+    CAM -->|JPEG over Wi-Fi| VIS
+    GAME --> VIS
+    GAME --> ENG
+    GAME --> ADP
+    ADP -->|USB serial| ARM
+```
+
+The rest of this section documents each layer, bottom-up: the **embedded
+firmware** on the microcontrollers, then the **Python host** modules.
 
 ### Embedded Firmware
 
@@ -219,7 +248,7 @@ pio run -e esp32_ui_box -t upload
 pio device monitor -e esp32_ui_box
 ```
 
-The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; pass that address to the Python host with `--esp32-host`.
+The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp (or backend connect request) so the host can reach the UI box.
 
 Wire the rotary encoder/button and LCD to the ESP32D pins defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h):
 
@@ -239,9 +268,15 @@ The UI box exchanges newline-terminated TCP commands with Python. The main ESP32
 
 ### Python Host
 
-The Python host (`python_code/src/charm/`) is split into four parts: **computer
-vision**, **move understanding**, the **chess engine** wrapper, and the
-**hardware bridges**. Each is described below.
+At runtime the FastAPI backend wires together four packages under
+`python_code/src/charm/`:
+
+| Package | Responsibility |
+|---|---|
+| `vision/` | Capture → rectify → classify into two 8×8 occupancy/colour bitmaps |
+| `game/` | Track board state, reconstruct the human's move, orchestrate turns |
+| `chess_engine/` | Stockfish move selection and position evaluation |
+| `arduino/` | Serial/TCP bridges to the SCARA arm and the UI box |
 
 #### Computer Vision (`vision/`)
 
@@ -260,18 +295,12 @@ Key files: `pipeline.py`, `board_detector.py`, `grid_splitter.py`,
 Both pipelines start from the same stage, which transforms a raw,
 perspective-distorted camera image into a normalized 8×8 board representation.
 
-**Two-stage perspective warping**
+**Two-stage perspective warping** — two sequential homographies align the board:
 
-To align the board as accurately as possible, the system applies two sequential homography transformations:
-
-1. **Global warp**  
-   The four outer corners of the board, obtained through calibration, are
-   mapped to an initial 800×800 square image.
-
-2. **Inner refinement**  
-   Internal grid intersections are then used to refine the first warp. This
-   compensates for lens distortion or small geometric imperfections, producing a
-   final board image where each square is aligned consistently.
+1. **Global warp** — the four calibrated outer corners map to an 800×800 square.
+2. **Inner refinement** — internal grid intersections refine that warp,
+   correcting lens distortion and small geometric error so every square lands
+   consistently.
 
 **Grid splitting**
 
@@ -343,54 +372,33 @@ is requested.
 
 ##### Living dataset and continuous improvement
 
-A major advantage of the CNN approach is that the model can improve over time using data collected during real operation.
+The CNN improves from real operation through a correction loop: when a square is
+misclassified, the user relabels it, the cell crop is added to the dataset, and
+the next training run includes it. Over time the model specializes to the actual
+board texture, lighting, pieces, and camera noise — reducing reliance on
+hand-tuned thresholds.
 
-**Correction loop**
+#### Move Understanding (`game/`)
 
-When a square is misclassified:
+Reconstructs chess state from vision output and orchestrates the turn loop:
 
-1. the user corrects the label through the interface
-2. the corresponding cell image is stored in the dataset
-3. the next training cycle includes this new example
+- `state_tracker.py` — `BoardStateTracker` holds the `python-chess` position and infers the played move from the observed bitmaps
+- `vision_integration.py` — adapts vision output into the tracker
+- `game_session.py` — `GameSession` handles initialization, player-move detection, and robot-move verification
+- `game_controller.py` — `GameController` coordinates UI events, capture, Stockfish, and arm motion
 
-**Environmental specialization**
+#### Chess Engine (`chess_engine/`)
 
-Over time, the model becomes more specialized to:
+- `best_move.py` — wraps Stockfish and returns the engine move for a position at the selected skill level
+- `evaluation.py` — position evaluation, move ratings, and win-probability used for player feedback
 
-- the exact ChArm board texture
-- the real lighting conditions
-- the specific physical pieces
-- real camera noise and shadows
+#### Hardware Bridges (`arduino/`)
 
-This creates a system that becomes more robust with use, instead of relying only on fixed handcrafted thresholds.
+- `arduino_bridge.py` — sends Cartesian pick-and-place commands to the Arduino Mega over USB serial
+- `uiController_bridge.py` — `ArduinoUIControllerLink`, the TCP link to the ESP32 UI box
 
-### Move Understanding (`game/`)
-
-This module handles chess-state reconstruction and game orchestration.
-
-Important files:
-
-- `state_tracker.py`
-- `vision_integration.py`
-- `game_session.py`
-- `game_controller.py`
-
-What they do:
-
-- `BoardStateTracker` keeps the current `python-chess` board state
-- `state_tracker.py` infers the best legal move from observed bitmaps
-- `vision_integration.py` connects the vision output to the tracker
-- `GameSession` manages initialization, player move detection, and robot move verification
-- `GameController` coordinates UI events, image capture, Stockfish, and robot motion
-
-### Chess Engine (`chess_engine/`)
-
-- `best_move.py` wraps Stockfish and returns the engine move for a given board
-
-### Hardware Bridges (`arduino/`)
-
-- `arduino_bridge.py` sends movement commands to the Arduino Mega
-- `uiController_bridge.py` communicates with the ESP32-based UI
+The backend's `webapp_backend/robot_adapter.py` owns the serial connection and a
+lock, so the LCD and the webapp can both drive the arm without colliding.
 
 ## How the Game Flow Works
 
