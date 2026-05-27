@@ -133,6 +133,12 @@ void setup() {
 }
 
 void loop() {
+    // Periodically re-sync the HD44780 4-bit interface so a noise-induced
+    // nibble desync self-heals instead of staying garbled until reset. Runs
+    // in every state (incl. the "Waiting Python" screen below, which returns
+    // before uiController.loop()). tick() self-rate-limits internally.
+    lcd.tick();
+
     // Accept new Python connection when none is active.
     if (!client || !client.connected()) {
         WiFiClient incoming = tcpServer.available();

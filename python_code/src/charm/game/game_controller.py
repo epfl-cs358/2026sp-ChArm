@@ -631,12 +631,12 @@ class GameController:
     def handle_manual_control(self, cmd: str) -> None:
         """Relay a manual jog command from the ESP32 to the Mega."""
         _CMD_MAP = {
-            "MANUAL_JOINT1_FWD":    "jogJ1 2.0",
-            "MANUAL_JOINT1_BWD":    "jogJ1 -2.0",
-            "MANUAL_JOINT2_FWD":    "jogJ2 2.0",
-            "MANUAL_JOINT2_BWD":    "jogJ2 -2.0",
-            "MANUAL_Z_FWD":         "jogZ 0.5",
-            "MANUAL_Z_BWD":         "jogZ -0.5",
+            "MANUAL_JOINT1_FWD":    "jogJ1 0.5",
+            "MANUAL_JOINT1_BWD":    "jogJ1 -0.5",
+            "MANUAL_JOINT2_FWD":    "jogJ2 0.5",
+            "MANUAL_JOINT2_BWD":    "jogJ2 -0.5",
+            "MANUAL_Z_FWD":         "jogZ 2",
+            "MANUAL_Z_BWD":         "jogZ -2",
             "MANUAL_GRIPPER_OPEN":  "OG",
             "MANUAL_GRIPPER_CLOSE": "CG",
         }
