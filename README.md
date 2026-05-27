@@ -9,7 +9,7 @@ ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical
 ### Gameplay loop
 
 1. The player initiates arm calibration.
-2. The player starts a game and selects a difficulty and a colour to play — from either the on-robot LCD/encoder UI or the webapp.
+2. The player starts a game and selects a difficulty and a color to play — from either the on-robot LCD/encoder UI or the webapp.
 3. The player makes a move on the physical board and confirms it with the rotary encoder (or the **Player done** button in the webapp).
 4. The ESP32-CAM captures an image of the board.
 5. A computer-vision algorithm and/or a CNN turns that image into two bitmaps describing piece placement.
@@ -105,12 +105,12 @@ The project is organized so that hardware control and chess/vision logic can be 
 - **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
 - **ESP32 UI box** — 16×2 LCD + rotary encoder/button, TCP link to host
 - **3× STEP/DIR stepper drivers**
-- **4× limit switches** — J1 home, 2× J2 home, Z bottom; wired to a veroboard in a pull-up configuration and read by the Arduino
+- **4× limit switches** — J1 home, 2× J2 home, Z bottom; wired to a stripboard in a pull-up configuration and read by the Arduino
 - **Power supply** — 12 V at 5 A for the motors (through the CNC shield); a buck converter supplies the 5 V components (camera, servo, etc.)
 
 **UI box**
 
-- Needs only 5 V power, distributed to the correct pins on a veroboard. The data pins of the LCD and the button connect to an ESP32 that handles transmission to the host.
+- Needs only 5 V power, distributed to the correct pins on a stripboard. The data pins of the LCD and the button connect to an ESP32 that handles transmission to the host.
 
 <img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit" width=30%/>
 
@@ -132,8 +132,8 @@ The CAD files for the printed and laser-cut parts live in [docs/CAD/](docs/CAD/)
 3. Laser cut the DXF files in the CAD files
 3. Cut 3 320 size 8mm metal rods
 4. There are a lot of heat inserts needed so make sure you put them nicely.
-5. Once the heat inserts are you can start building the 6 main modules to assemble (box, base, arm, lcd, display, camera arm, chessboard)
-6. Next step is to solder and add jst connectors to the 4 main electronical componeents (one camera power veroboard, 1 ui box veroboard, the limist switch themsevles and its pull up resistor veroboard)
+5. Once the heat inserts are inserted you can start building the 6 main modules to assemble (box, base, arm, lcd, display, camera arm, chessboard)
+6. Next step is to solder and add jst connectors to the 4 main electrical components (one camera power stripboard, 1 ui box stripboard, the limit switch themselves and its pull up resistor stripboard)
 7. Now that everything is assembled just wire up the electronics as in the diagram
 8. flash the firmware using the ./install.sh utility
 9. start playing
@@ -238,7 +238,7 @@ At runtime the FastAPI backend wires together four packages under
 
 | Package | Responsibility |
 |---|---|
-| `vision/` | Capture → rectify → classify into two 8×8 occupancy/colour bitmaps |
+| `vision/` | Capture → rectify → classify into two 8×8 occupancy/color bitmaps |
 | `game/` | Track board state, reconstruct the human's move, orchestrate turns |
 | `chess_engine/` | Stockfish move selection and position evaluation |
 | `arduino/` | Serial/TCP bridges to the SCARA arm and the UI box |
@@ -280,7 +280,7 @@ The original, training-free path (`pipeline.py`) classifies each of the 64 cells
 with handcrafted heuristics:
 
 - **occupancy detection** — decides whether a square holds a piece
-- **piece-colour detection** — classifies an occupied square as white or black
+- **piece-color detection** — classifies an occupied square as white or black
 - the per-cell results are assembled into the white/black 8×8 bitmaps
 
 This pipeline needs no model and serves as the fallback when the CNN is
@@ -289,7 +289,7 @@ unavailable or fails to produce a valid board.
 ##### CNN classifier
 
 The CNN classifier (`cnn_classifier.py`) replaces step 4 of the classical
-pipeline (occupancy + colour thresholds) with a single learned model trained on
+pipeline (occupancy + color thresholds) with a single learned model trained on
 the ChArm board and piece set by `train_cnn.py`. `CnnBoardClassifier` wraps a
 trained **Keras / TensorFlow** model, loaded once and reused across requests.
 
@@ -376,7 +376,7 @@ At a high level:
    - the **ESP32-CAM** over Wi-Fi for board capture
 
    The LCD and the webapp share this one backend, so either can drive the game.
-3. The user starts the game from the UI (or webapp) and picks colour and difficulty.
+3. The user starts the game from the UI (or webapp) and picks color and difficulty.
 4. The backend validates the initial board from a calibrated image.
 5. After each player move, the backend:
    - captures a new board image,
@@ -515,7 +515,7 @@ backend (`webapp_backend/api_server.py`, port `8765`) and the Next.js frontend
 
 - open the webapp at <http://localhost:3000>
 
-From there: calibrate the arm (mandatory), start a game, pick colour and difficulty, make
+From there: calibrate the arm (mandatory), start a game, pick color and difficulty, make
 your move on the physical board, and confirm it. The backend captures the board,
 runs the vision pipeline, validates your move, asks Stockfish for the reply, and
 drives the arm.
@@ -568,9 +568,9 @@ The resulting model is then used by the CNN classifier for the next session.
 
 ## Current Limitations
 
-- The move tracker currently works from **occupancy + piece colour**, not full piece identity.
+- The move tracker currently works from **occupancy + piece color**, not full piece identity.
 - Because of that, the system relies on a **known previous chess position** and infers the move by iterating over legal moves.
-- Promotion cannot be uniquely identified from occupancy/colour alone if multiple promotion pieces would produce the same bitmap pattern.
+- Promotion cannot be uniquely identified from occupancy/color alone if multiple promotion pieces would produce the same bitmap pattern.
 - Real-world robustness still depends on lighting, calibration quality, and board visibility.
 
 <!-- TODO: review limitations as a team -->
