@@ -200,6 +200,8 @@ export const api = {
 
   getRobotStatus: () => get<RobotStatus>("/api/robot/status"),
 
+  serialLog: (n = 150) => get<{ entries: SerialLogEntry[] }>(`/api/serial/log?n=${n}`),
+
   updateRobotCalibration: (data: RobotCalibrationWrite) =>
     put<{ status: string } & RobotStatus["robot_calibration"]>("/api/robot/calibration", data),
 
@@ -595,6 +597,12 @@ export interface CnnTrainArtifacts {
     per_class?: Record<string, { precision: number; recall: number; f1: number; support: number }>;
     confusion_matrix?: number[][];
   } | null;
+}
+
+export interface SerialLogEntry {
+  ts: number;
+  dir: "tx" | "rx";
+  text: string;
 }
 
 export interface CnnModelMeta {

@@ -1,6 +1,6 @@
 {
-  "primary": "cnn",
+  "primary": "vision",
   "attempts_each": 5,
-  "auto_save_validated": false,
+  "auto_save_validated": true,
   "dataset_name": "validated_live"
 }

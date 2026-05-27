@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   LabelAccuracyReport,
@@ -8,14 +8,9 @@ import {
   LabelSettings,
 } from "@/lib/api";
 import { DEFAULT_PARAMS } from "@/lib/types";
-
-// Force the on-board crop pipeline for every labeling capture: outer board
-// warp + inner warp. The backend also enforces this, but we keep it explicit
-// here so the request payload makes the contract visible.
-const LABELING_PARAMS = { ...DEFAULT_PARAMS, apply_inner_warp: true };
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -23,28 +18,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import ArucoCalibration from "@/components/ArucoCalibration";
 import ManualCalibration from "@/components/ManualCalibration";
 import BulkPaintBoard, { BulkLabel } from "@/components/BulkPaintBoard";
 import { imageSrc } from "@/lib/image";
 
-// --- Step list (also drives the breadcrumb at the top) ---
+const LABELING_PARAMS = { ...DEFAULT_PARAMS, apply_inner_warp: true };
+
 const STEPS = [
-  { id: 1, label: "Dataset configuration" },
-  { id: 2, label: "Capture settings" },
-  { id: 3, label: "Calibration check" },
-  { id: 4, label: "Empty board capture" },
-  { id: 5, label: "Empty board review" },
-  { id: 6, label: "Place white source piece" },
-  { id: 7, label: "White sweep" },
-  { id: 8, label: "White sweep review" },
-  { id: 9, label: "Switch to black piece" },
-  { id: 10, label: "Black sweep" },
-  { id: 11, label: "Black sweep review" },
-  { id: 12, label: "Finalize & compute stats" },
-] as const;
-type StepId = (typeof STEPS)[number]["id"];
+  { id: 1 as const, label: "Setup" },
+  { id: 2 as const, label: "Calibration" },
+  { id: 3 as const, label: "Empty board" },
+  { id: 4 as const, label: "White pieces" },
+  { id: 5 as const, label: "Black pieces" },
+  { id: 6 as const, label: "Finish" },
+];
+type StepId = 1 | 2 | 3 | 4 | 5 | 6;
 
 const ALL_SQUARES: string[] = (() => {
   const out: string[] = [];
@@ -63,18 +52,11 @@ const DEFAULT_SETTINGS: LabelSettings = {
   lighting_note: "",
 };
 
-function rcKey(square: string): string {
-  const file = square[0].toLowerCase();
-  const rank = parseInt(square[1], 10);
-  const col = file.charCodeAt(0) - "a".charCodeAt(0);
-  const row = 8 - rank;
-  return `${row},${col}`;
-}
-
 type SweepMode = "arm" | "manual" | "bulk";
+type SweepPhase = "idle" | "moving" | "homing" | "waiting" | "capturing";
+type RunState = "idle" | "running" | "paused" | "aborted" | "done";
 
 export default function LabelingWizardPage() {
-  // ---------- global state ----------
   const [step, setStep] = useState<StepId>(1);
   const [datasets, setDatasets] = useState<LabelDatasetMeta[]>([]);
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -82,87 +64,65 @@ export default function LabelingWizardPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // ---------- Step 1: dataset config (each field has its own Apply) ----------
+  // ── Step 1 fields ──────────────────────────────────────────────────────────
   const [mode, setMode] = useState<"new" | "existing">("new");
   const [newName, setNewName] = useState("");
   const [chosenExisting, setChosenExisting] = useState<string>("");
-  const [datasetApplied, setDatasetApplied] = useState(false);
-
   const [draftSource, setDraftSource] = useState("h8");
   const [draftPiece, setDraftPiece] = useState("pawn");
   const [draftLighting, setDraftLighting] = useState("");
-  const [appliedSource, setAppliedSource] = useState(false);
-  const [appliedPiece, setAppliedPiece] = useState(false);
-  const [appliedLighting, setAppliedLighting] = useState(false);
-
-  // ---------- Step 2: capture settings ----------
   const [draftFrames, setDraftFrames] = useState(5);
   const [draftSettle, setDraftSettle] = useState(600);
-  const [appliedFrames, setAppliedFrames] = useState(false);
-  const [appliedSettle, setAppliedSettle] = useState(false);
 
-  // ---------- Step 3: calibration confirmation ----------
+  // ── Step 2: calibration ────────────────────────────────────────────────────
   const [calibrationConfirmed, setCalibrationConfirmed] = useState(false);
   const [calibrationMode, setCalibrationMode] = useState<"manual" | "aruco">("manual");
-  const [appliedCalibrationMode, setAppliedCalibrationMode] = useState(false);
+  const [showCalibrationTool, setShowCalibrationTool] = useState(false);
 
-  // ---------- Step 4/5: empty capture ----------
+  // ── Step 3: empty capture ──────────────────────────────────────────────────
   const [emptyThumb, setEmptyThumb] = useState<string | null>(null);
 
-  // ---------- Step 6: white piece placed confirm ----------
-  const [whitePlaced, setWhitePlaced] = useState(false);
-
-  // ---------- Step 7: white sweep ----------
-  // sweepState: idle, running, paused, aborted, done
-  type SweepPhase = "idle" | "moving" | "homing" | "waiting" | "capturing";
+  // ── Step 4: white sweep ────────────────────────────────────────────────────
+  const [whiteMode, setWhiteMode] = useState<SweepMode>("arm");
   const [whiteIdx, setWhiteIdx] = useState(0);
   const whiteIdxRef = useRef(0);
-  const whiteRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
-  const [whiteRunState, setWhiteRunState] = useState<typeof whiteRunRef.current>("idle");
-  const [whiteCurrentSquare, setWhiteCurrentSquare] = useState<string>("");
+  const whiteRunRef = useRef<RunState>("idle");
+  const [whiteRunState, setWhiteRunState] = useState<RunState>("idle");
+  const [whiteCurrentSquare, setWhiteCurrentSquare] = useState("");
   const [whitePhase, setWhitePhase] = useState<SweepPhase>("idle");
-  const [whiteCapturedThumbs, setWhiteCapturedThumbs] = useState<
-    { square: string; image: string | null }[]
-  >([]);
+  const [whiteCapturedThumbs, setWhiteCapturedThumbs] = useState<{ square: string; image: string | null }[]>([]);
   const whitePawnSquareRef = useRef<string | null>(null);
-  // Per-sweep mode toggle: "arm" runs the arm-driven sweep, "manual" lets
-  // the user move pieces by hand and validate one square at a time, "bulk"
-  // lets the user paint several squares (color or empty) and capture them
-  // all from one board photo.
-  const [whiteMode, setWhiteMode] = useState<SweepMode>("arm");
-  const [whiteManualTarget, setWhiteManualTarget] = useState<string>("a1");
+  const [whiteManualTarget, setWhiteManualTarget] = useState("a1");
   const [whiteManualBusy, setWhiteManualBusy] = useState(false);
   const [whiteBulkLabels, setWhiteBulkLabels] = useState<Record<string, BulkLabel>>({});
   const [whiteBulkBusy, setWhiteBulkBusy] = useState(false);
   const [whiteBulkFrames, setWhiteBulkFrames] = useState(1);
+  const [showWhiteCaptureEdit, setShowWhiteCaptureEdit] = useState(false);
 
-  // ---------- Step 9: black piece placed confirm ----------
-  const [blackPlaced, setBlackPlaced] = useState(false);
-
-  // ---------- Step 10: black sweep ----------
+  // ── Step 5: black sweep ────────────────────────────────────────────────────
+  const [blackMode, setBlackMode] = useState<SweepMode>("arm");
   const [blackIdx, setBlackIdx] = useState(0);
   const blackIdxRef = useRef(0);
-  const blackRunRef = useRef<"idle" | "running" | "paused" | "aborted" | "done">("idle");
-  const [blackRunState, setBlackRunState] = useState<typeof blackRunRef.current>("idle");
-  const [blackCurrentSquare, setBlackCurrentSquare] = useState<string>("");
+  const blackRunRef = useRef<RunState>("idle");
+  const [blackRunState, setBlackRunState] = useState<RunState>("idle");
+  const [blackCurrentSquare, setBlackCurrentSquare] = useState("");
   const [blackPhase, setBlackPhase] = useState<SweepPhase>("idle");
-  const [blackCapturedThumbs, setBlackCapturedThumbs] = useState<
-    { square: string; image: string | null }[]
-  >([]);
+  const [blackCapturedThumbs, setBlackCapturedThumbs] = useState<{ square: string; image: string | null }[]>([]);
   const blackPawnSquareRef = useRef<string | null>(null);
-  const [blackMode, setBlackMode] = useState<SweepMode>("arm");
-  const [blackManualTarget, setBlackManualTarget] = useState<string>("a1");
+  const [blackManualTarget, setBlackManualTarget] = useState("a1");
   const [blackManualBusy, setBlackManualBusy] = useState(false);
   const [blackBulkLabels, setBlackBulkLabels] = useState<Record<string, BulkLabel>>({});
   const [blackBulkBusy, setBlackBulkBusy] = useState(false);
   const [blackBulkFrames, setBlackBulkFrames] = useState(1);
+  const [showBlackCaptureEdit, setShowBlackCaptureEdit] = useState(false);
 
-  // ---------- Step 12: stats ----------
+  // ── Step 6: stats ──────────────────────────────────────────────────────────
   const [accuracy, setAccuracy] = useState<LabelAccuracyReport | null>(null);
   const [computingStats, setComputingStats] = useState(false);
   const [activeClassifier, setActiveClassifier] = useState<string | null>(null);
+  const [rescanning, setRescanning] = useState(false);
 
-  // ---------- effects ----------
+  // ── Effects ────────────────────────────────────────────────────────────────
   const refreshDatasets = useCallback(async () => {
     try {
       const res = await api.listLabelDatasets();
@@ -171,27 +131,6 @@ export default function LabelingWizardPage() {
       setError((e as Error).message);
     }
   }, []);
-
-  const [rescanning, setRescanning] = useState(false);
-  const handleRescanAll = useCallback(async () => {
-    setRescanning(true);
-    try {
-      const res = await api.rescanAllLabelDatasets();
-      await refreshDatasets();
-      const count = res.rescanned.length;
-      setError(count
-        ? `Rescanned ${count} folder${count === 1 ? "" : "s"}.`
-        : "No dataset folders found.");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRescanning(false);
-    }
-  }, [refreshDatasets]);
-
-  useEffect(() => {
-    refreshDatasets();
-  }, [refreshDatasets]);
 
   const refreshActive = useCallback(async () => {
     try {
@@ -202,36 +141,32 @@ export default function LabelingWizardPage() {
     }
   }, []);
 
-  useEffect(() => {
-    refreshActive();
-  }, [refreshActive]);
+  useEffect(() => { refreshDatasets(); }, [refreshDatasets]);
+  useEffect(() => { refreshActive(); }, [refreshActive]);
 
-  const refreshMeta = useCallback(async (name: string) => {
-    try {
-      const res = await api.getLabelDataset(name);
-      setMeta(res.metadata);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, []);
-
+  // When picking an existing dataset, pre-seed all form fields from its settings
   useEffect(() => {
-    if (activeName) refreshMeta(activeName);
-  }, [activeName, refreshMeta]);
+    if (!chosenExisting) return;
+    api.getLabelDataset(chosenExisting)
+      .then((res) => {
+        setDraftSource(res.metadata.settings.source_square);
+        setDraftPiece(res.metadata.settings.piece_type);
+        setDraftLighting(res.metadata.settings.lighting_note);
+        setDraftFrames(res.metadata.settings.frames_per_square);
+        setDraftSettle(res.metadata.settings.settle_ms);
+      })
+      .catch(() => null);
+  }, [chosenExisting]);
 
+  // Load empty board thumbnail
   useEffect(() => {
-    if (!activeName) {
-      setEmptyThumb(null);
-      return;
-    }
-    api
-      .getLabelThumb(activeName, "empty", "a1")
+    if (!activeName) { setEmptyThumb(null); return; }
+    api.getLabelThumb(activeName, "empty", "a1")
       .then((r) => setEmptyThumb(r.image))
       .catch(() => setEmptyThumb(null));
   }, [activeName, meta?.empty_frames]);
 
-  // Seed the captured-thumb galleries from the dataset on initial load, so a
-  // resumed (or reviewed) sweep shows the previously captured squares too.
+  // Seed captured-thumb galleries from saved dataset when loading an existing one
   useEffect(() => {
     if (!activeName) {
       setWhiteCapturedThumbs([]);
@@ -243,23 +178,15 @@ export default function LabelingWizardPage() {
       try {
         const ds = await api.getLabelDataset(activeName);
         const counts = color === "white" ? ds.metadata.white : ds.metadata.black;
-        const bulkCounts =
-          color === "white" ? ds.metadata.bulk_white : ds.metadata.bulk_black;
-        // Show bulk-only squares too — the thumb endpoint falls back to the
-        // first bulk-paint cell if no sweep frame exists.
+        const bulkCounts = color === "white" ? ds.metadata.bulk_white : ds.metadata.bulk_black;
         const seen = new Set<string>();
         for (const [sq, n] of Object.entries(counts ?? {})) if (n > 0) seen.add(sq);
         for (const [sq, n] of Object.entries(bulkCounts ?? {})) if (n > 0) seen.add(sq);
-        const squares = Array.from(seen);
+        const squares = Array.from(seen).sort((a, b) => ALL_SQUARES.indexOf(b) - ALL_SQUARES.indexOf(a));
         if (squares.length === 0) return;
-        // Order by sweep order so newest-first matches the live gallery order
-        squares.sort(
-          (a, b) => ALL_SQUARES.indexOf(b) - ALL_SQUARES.indexOf(a),
-        );
         const results = await Promise.all(
           squares.map((sq) =>
-            api
-              .getLabelThumb(activeName, color, sq)
+            api.getLabelThumb(activeName, color, sq)
               .then((r) => ({ square: sq, image: r.exists ? r.image : null }))
               .catch(() => ({ square: sq, image: null as string | null })),
           ),
@@ -267,272 +194,195 @@ export default function LabelingWizardPage() {
         if (cancelled) return;
         if (color === "white") setWhiteCapturedThumbs(results);
         else setBlackCapturedThumbs(results);
-      } catch {
-        /* best-effort seeding */
-      }
+      } catch { /* best-effort */ }
     };
     seedColor("white");
     seedColor("black");
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [activeName]);
 
-  // ---------- handlers: step 1 ----------
-  const allStep1Applied = useMemo(
-    () => datasetApplied && appliedSource && appliedPiece && appliedLighting,
-    [datasetApplied, appliedSource, appliedPiece, appliedLighting],
-  );
-
-  const handleApplyDataset = async () => {
-    setError(null);
-    try {
-      if (mode === "new") {
-        const trimmed = newName.trim();
-        if (!trimmed) throw new Error("Dataset name is required");
-        const res = await api.createLabelDataset({
-          name: trimmed,
-          settings: { ...DEFAULT_SETTINGS },
-        });
-        setActiveName(res.metadata.name);
-        setMeta(res.metadata);
-      } else {
-        if (!chosenExisting) throw new Error("Pick an existing dataset");
-        setActiveName(chosenExisting);
-        const res = await api.getLabelDataset(chosenExisting);
-        setMeta(res.metadata);
-        // seed drafts from existing settings
-        setDraftSource(res.metadata.settings.source_square);
-        setDraftPiece(res.metadata.settings.piece_type);
-        setDraftLighting(res.metadata.settings.lighting_note);
-        setDraftFrames(res.metadata.settings.frames_per_square);
-        setDraftSettle(res.metadata.settings.settle_ms);
-      }
-      setDatasetApplied(true);
-      await refreshDatasets();
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  // Generic helper: apply one settings field
-  const applySettingsPatch = async (patch: Partial<LabelSettings>) => {
-    if (!activeName || !meta) throw new Error("Apply dataset first");
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const applySettingsPatch = useCallback(async (patch: Partial<LabelSettings>) => {
+    if (!activeName || !meta) throw new Error("No active dataset");
     const merged: LabelSettings = { ...meta.settings, ...patch };
     const res = await api.updateLabelSettings(activeName, merged);
     setMeta(res.metadata);
-  };
+  }, [activeName, meta]);
 
-  const handleApplySource = async () => {
+  const handleRescanAll = useCallback(async () => {
+    setRescanning(true);
+    try {
+      const res = await api.rescanAllLabelDatasets();
+      await refreshDatasets();
+      setError(`Rescanned ${res.rescanned.length} folder${res.rescanned.length === 1 ? "" : "s"}.`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRescanning(false);
+    }
+  }, [refreshDatasets]);
+
+  // ── Step 1: batch-save all settings on Continue ────────────────────────────
+  const handleStep1Continue = useCallback(async () => {
+    setBusy(true);
     setError(null);
     try {
+      let name: string;
+      if (mode === "new") {
+        const trimmed = newName.trim();
+        if (!trimmed) throw new Error("Dataset name is required");
+        const res = await api.createLabelDataset({ name: trimmed, settings: DEFAULT_SETTINGS });
+        name = res.metadata.name;
+        setActiveName(name);
+        setMeta(res.metadata);
+      } else {
+        if (!chosenExisting) throw new Error("Pick an existing dataset first");
+        name = chosenExisting;
+        setActiveName(name);
+        const res = await api.getLabelDataset(name);
+        setMeta(res.metadata);
+      }
+
       const sq = draftSource.trim().toLowerCase();
-      if (!ALL_SQUARES.includes(sq)) throw new Error(`Invalid square: ${draftSource}`);
-      await applySettingsPatch({ source_square: sq });
-      setAppliedSource(true);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-  const handleApplyPiece = async () => {
-    setError(null);
-    try {
-      await applySettingsPatch({ piece_type: draftPiece });
-      setAppliedPiece(true);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-  const handleApplyLighting = async () => {
-    setError(null);
-    try {
-      await applySettingsPatch({ lighting_note: draftLighting });
-      setAppliedLighting(true);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
+      if (!ALL_SQUARES.includes(sq))
+        throw new Error(`"${draftSource}" is not a valid square — use format like h8`);
 
-  // ---------- handlers: step 2 ----------
-  const handleApplyFrames = async () => {
-    setError(null);
-    try {
-      const n = Math.max(1, Math.min(20, Math.round(draftFrames)));
-      await applySettingsPatch({ frames_per_square: n });
-      setDraftFrames(n);
-      setAppliedFrames(true);
+      const merged: LabelSettings = {
+        source_square: sq,
+        piece_type: draftPiece,
+        lighting_note: draftLighting,
+        frames_per_square: Math.max(1, Math.min(20, Math.round(draftFrames))),
+        settle_ms: Math.max(0, Math.min(5000, Math.round(draftSettle))),
+      };
+      const updated = await api.updateLabelSettings(name, merged);
+      setMeta(updated.metadata);
+      await refreshDatasets();
+      setStep(2);
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
-  };
-  const handleApplySettle = async () => {
-    setError(null);
-    try {
-      const n = Math.max(0, Math.min(5000, Math.round(draftSettle)));
-      await applySettingsPatch({ settle_ms: n });
-      setDraftSettle(n);
-      setAppliedSettle(true);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
+  }, [mode, newName, chosenExisting, draftSource, draftPiece, draftLighting, draftFrames, draftSettle, refreshDatasets]);
 
-  // ---------- handlers: step 4 ----------
-  const captureEmpty = async () => {
+  // Inline save for frames/settle in sweep steps (on blur, no Apply button)
+  const saveFrames = useCallback(async (n: number) => {
+    const clamped = Math.max(1, Math.min(20, Math.round(n)));
+    setDraftFrames(clamped);
+    try { await applySettingsPatch({ frames_per_square: clamped }); }
+    catch (e) { setError((e as Error).message); }
+  }, [applySettingsPatch]);
+
+  const saveSettle = useCallback(async (n: number) => {
+    const clamped = Math.max(0, Math.min(5000, Math.round(n)));
+    setDraftSettle(clamped);
+    try { await applySettingsPatch({ settle_ms: clamped }); }
+    catch (e) { setError((e as Error).message); }
+  }, [applySettingsPatch]);
+
+  // ── Step 3: empty capture ──────────────────────────────────────────────────
+  const captureEmpty = useCallback(async () => {
     if (!activeName) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await api.captureLabelEmpty(activeName, {
-        params: LABELING_PARAMS,
-        capture: true,
-      });
+      const res = await api.captureLabelEmpty(activeName, { params: LABELING_PARAMS, capture: true });
       setMeta(res.metadata);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
-  };
+  }, [activeName]);
 
-  // ---------- handlers: sweep core ----------
+  // ── Sweep core ─────────────────────────────────────────────────────────────
   type SweepColor = "white" | "black";
 
-  const doSquare = useCallback(
-    async (
-      color: SweepColor,
-      square: string,
-      fromSquare: string,
-      mode: "append" | "overwrite" = "append",
-    ) => {
-      if (!activeName || !meta) return;
-      const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
-      const setThumbs =
-        color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
+  const doSquare = useCallback(async (
+    color: SweepColor,
+    square: string,
+    fromSquare: string,
+    mode: "append" | "overwrite" = "append",
+  ) => {
+    if (!activeName || !meta) return;
+    const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
+    const setThumbs = color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
 
-      // 1) pick from the previous square, put on the target square (no home yet)
-      setPhase("moving");
-      await api.labelingArm(activeName, {
-        color,
-        square,
-        action: "pick_and_place",
-        from_square: fromSquare,
-      });
+    setPhase("moving");
+    await api.labelingArm(activeName, { color, square, action: "pick_and_place", from_square: fromSquare });
 
-      // 2) send the arm home — the backend blocks until the arm reaches home
-      //    so we can deterministically capture without the arm in frame.
-      setPhase("homing");
-      await api.labelingArm(activeName, {
-        color,
-        square,
-        action: "home",
-      });
+    setPhase("homing");
+    await api.labelingArm(activeName, { color, square, action: "home" });
 
-      // 3) settle so any wobble dampens before grabbing frames
-      setPhase("waiting");
-      await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
+    setPhase("waiting");
+    await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
 
-      // 4) capture frames for the target square. Sweep callers use append;
-      //    retake callers pass overwrite to throw out the old frames.
-      setPhase("capturing");
-      await api.captureLabelSquare(activeName, {
-        color,
-        square,
-        params: LABELING_PARAMS,
-        capture: true,
-        mode,
-      });
+    setPhase("capturing");
+    await api.captureLabelSquare(activeName, { color, square, params: LABELING_PARAMS, capture: true, mode });
 
-      // 5) refresh metadata and add a thumbnail of the just-captured cell
-      const fresh = await api.getLabelDataset(activeName);
-      setMeta(fresh.metadata);
-      try {
-        const thumb = await api.getLabelThumb(activeName, color, square);
-        setThumbs((prev) => [
-          { square, image: thumb.exists ? thumb.image : null },
-          ...prev.filter((t) => t.square !== square),
-        ]);
-      } catch {
-        // thumbnail is best-effort; ignore failures
-      }
-    },
-    [activeName, meta],
-  );
+    const fresh = await api.getLabelDataset(activeName);
+    setMeta(fresh.metadata);
+    try {
+      const thumb = await api.getLabelThumb(activeName, color, square);
+      setThumbs((prev) => [
+        { square, image: thumb.exists ? thumb.image : null },
+        ...prev.filter((t) => t.square !== square),
+      ]);
+    } catch { /* thumbnail is best-effort */ }
+  }, [activeName, meta]);
 
-  const runSweep = useCallback(
-    async (color: SweepColor) => {
-      if (!activeName || !meta) return;
-      const idxRef = color === "white" ? whiteIdxRef : blackIdxRef;
-      const runRef = color === "white" ? whiteRunRef : blackRunRef;
-      const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
-      const setIdx = color === "white" ? setWhiteIdx : setBlackIdx;
-      const setCurrentSquare =
-        color === "white" ? setWhiteCurrentSquare : setBlackCurrentSquare;
-      const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
-      const pawnSquareRef = color === "white" ? whitePawnSquareRef : blackPawnSquareRef;
+  const runSweep = useCallback(async (color: SweepColor) => {
+    if (!activeName || !meta) return;
+    const idxRef = color === "white" ? whiteIdxRef : blackIdxRef;
+    const runRef = color === "white" ? whiteRunRef : blackRunRef;
+    const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
+    const setIdx = color === "white" ? setWhiteIdx : setBlackIdx;
+    const setCurrentSquare = color === "white" ? setWhiteCurrentSquare : setBlackCurrentSquare;
+    const setPhase = color === "white" ? setWhitePhase : setBlackPhase;
+    const pawnSquareRef = color === "white" ? whitePawnSquareRef : blackPawnSquareRef;
 
-      // Don't start a second loop if one is already running (e.g. user
-      // clicked Start twice). Re-entering runSweep while running would race
-      // two for-loops against the same idxRef.
-      if (runRef.current === "running") return;
-      runRef.current = "running";
-      setRunState("running");
+    if (runRef.current === "running") return;
+    runRef.current = "running";
+    setRunState("running");
+    if (!pawnSquareRef.current || idxRef.current === 0) pawnSquareRef.current = meta.settings.source_square;
 
-      if (!pawnSquareRef.current || idxRef.current === 0) {
-        pawnSquareRef.current = meta.settings.source_square;
-      }
-
-      try {
-        for (let i = idxRef.current; i < ALL_SQUARES.length; i++) {
-          // honor abort/pause between squares.
-          // runRef is mutated by other handlers, so TS narrowing isn't useful here.
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
-            const state = runRef.current as string;
-            if (state === "aborted") {
-              setRunState("aborted");
-              setPhase("idle");
-              return;
-            }
-            if (state === "paused") {
-              setPhase("idle");
-              await new Promise((r) => setTimeout(r, 200));
-              continue;
-            }
-            break;
-          }
-
-          const sq = ALL_SQUARES[i];
-          idxRef.current = i;
-          setIdx(i);
-          setCurrentSquare(sq);
-          try {
-            const fromSquare = pawnSquareRef.current ?? meta.settings.source_square;
-            await doSquare(color, sq, fromSquare);
-            pawnSquareRef.current = sq;
-          } catch (e) {
-            setError(`square ${sq}: ${(e as Error).message}`);
-            runRef.current = "paused";
-            setRunState("paused");
-            setPhase("idle");
-            return;
-          }
+    try {
+      for (let i = idxRef.current; i < ALL_SQUARES.length; i++) {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const state = runRef.current as string;
+          if (state === "aborted") { setRunState("aborted"); setPhase("idle"); return; }
+          if (state === "paused") { setPhase("idle"); await new Promise((r) => setTimeout(r, 200)); continue; }
+          break;
         }
-        idxRef.current = ALL_SQUARES.length;
-        setIdx(ALL_SQUARES.length);
-        runRef.current = "done";
-        setRunState("done");
-      } finally {
-        setPhase("idle");
+        const sq = ALL_SQUARES[i];
+        idxRef.current = i;
+        setIdx(i);
+        setCurrentSquare(sq);
+        try {
+          const fromSquare = pawnSquareRef.current ?? meta.settings.source_square;
+          await doSquare(color, sq, fromSquare);
+          pawnSquareRef.current = sq;
+        } catch (e) {
+          setError(`square ${sq}: ${(e as Error).message}`);
+          runRef.current = "paused";
+          setRunState("paused");
+          setPhase("idle");
+          return;
+        }
       }
-    },
-    [activeName, meta, doSquare],
-  );
+      idxRef.current = ALL_SQUARES.length;
+      setIdx(ALL_SQUARES.length);
+      runRef.current = "done";
+      setRunState("done");
+    } finally {
+      setPhase("idle");
+    }
+  }, [activeName, meta, doSquare]);
 
   const pauseSweep = (color: SweepColor) => {
     const runRef = color === "white" ? whiteRunRef : blackRunRef;
     const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
-    // Don't clobber a finished sweep into "paused".
     if (runRef.current !== "running") return;
     runRef.current = "paused";
     setRunState("paused");
@@ -540,15 +390,7 @@ export default function LabelingWizardPage() {
   const resumeSweep = (color: SweepColor) => {
     const runRef = color === "white" ? whiteRunRef : blackRunRef;
     const setRunState = color === "white" ? setWhiteRunState : setBlackRunState;
-    // If currently paused, the existing loop is polling runRef.current. Just
-    // flip it back to "running" and let that loop continue — starting a new
-    // runSweep here would race two loops against the same idxRef.
-    if (runRef.current === "paused") {
-      runRef.current = "running";
-      setRunState("running");
-      return;
-    }
-    // Otherwise (idle, done, aborted), start fresh from the current index.
+    if (runRef.current === "paused") { runRef.current = "running"; setRunState("running"); return; }
     runSweep(color);
   };
   const abortSweep = (color: SweepColor) => {
@@ -560,148 +402,81 @@ export default function LabelingWizardPage() {
     setPhase("idle");
   };
 
-  // ---------- handlers: retake one square ----------
-  const retakeSquare = async (color: SweepColor, sq: string) => {
-    if (!activeName) return;
+  const retakeSquare = useCallback(async (color: SweepColor, sq: string) => {
+    if (!activeName || !meta) return;
     setBusy(true);
     setError(null);
     try {
-      if (!meta) return;
-      // Retake = wipe and redo, by definition.
       await doSquare(color, sq, meta.settings.source_square, "overwrite");
-      await api.labelingArm(activeName, {
-        color,
-        square: meta.settings.source_square,
-        action: "move_piece",
-        from_square: sq,
-      });
+      await api.labelingArm(activeName, { color, square: meta.settings.source_square, action: "move_piece", from_square: sq });
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
-  };
+  }, [activeName, meta, doSquare]);
 
-  // ---------- handlers: manual mode capture ----------
-  // Capture a single square without moving the arm. The user has placed the
-  // piece by hand; this just settles, grabs frames, and updates the gallery.
-  const manualCaptureSquare = useCallback(
-    async (color: SweepColor, square: string) => {
-      if (!activeName || !meta) return;
-      const setBusyForColor =
-        color === "white" ? setWhiteManualBusy : setBlackManualBusy;
-      const setThumbs =
-        color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
-      setBusyForColor(true);
-      setError(null);
+  const manualCaptureSquare = useCallback(async (color: SweepColor, square: string) => {
+    if (!activeName || !meta) return;
+    const setBusyForColor = color === "white" ? setWhiteManualBusy : setBlackManualBusy;
+    const setThumbs = color === "white" ? setWhiteCapturedThumbs : setBlackCapturedThumbs;
+    setBusyForColor(true);
+    setError(null);
+    try {
+      await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
+      await api.captureLabelSquare(activeName, { color, square, params: LABELING_PARAMS, capture: true, skip_arm_home_check: true, mode: "append" });
+      const fresh = await api.getLabelDataset(activeName);
+      setMeta(fresh.metadata);
       try {
-        // Brief settle so the user's hand wobble has time to die down before
-        // we grab frames — same intent as the arm-driven path's settle step.
-        await new Promise((r) => setTimeout(r, Math.max(200, meta.settings.settle_ms)));
-        await api.captureLabelSquare(activeName, {
-          color,
-          square,
-          params: LABELING_PARAMS,
-          capture: true,
-          skip_arm_home_check: true,
-          mode: "append",
-        });
-        const fresh = await api.getLabelDataset(activeName);
-        setMeta(fresh.metadata);
-        try {
-          const thumb = await api.getLabelThumb(activeName, color, square);
-          setThumbs((prev) => [
-            { square, image: thumb.exists ? thumb.image : null },
-            ...prev.filter((t) => t.square !== square),
-          ]);
-        } catch {
-          /* thumbnail is best-effort */
-        }
-        // Advance the target to the next square in sweep order, skipping
-        // squares already captured so the user lands on the next uncaptured one.
-        const counts = color === "white" ? fresh.metadata.white : fresh.metadata.black;
-        const startIdx = ALL_SQUARES.indexOf(square);
-        let nextIdx = (startIdx + 1) % ALL_SQUARES.length;
-        while (nextIdx !== startIdx && (counts[ALL_SQUARES[nextIdx]] ?? 0) > 0) {
-          nextIdx = (nextIdx + 1) % ALL_SQUARES.length;
-        }
-        const next = ALL_SQUARES[nextIdx];
-        if (color === "white") setWhiteManualTarget(next);
-        else setBlackManualTarget(next);
-      } catch (e) {
-        setError(`square ${square}: ${(e as Error).message}`);
-      } finally {
-        setBusyForColor(false);
-      }
-    },
-    [activeName, meta],
-  );
+        const thumb = await api.getLabelThumb(activeName, color, square);
+        setThumbs((prev) => [
+          { square, image: thumb.exists ? thumb.image : null },
+          ...prev.filter((t) => t.square !== square),
+        ]);
+      } catch { /* best-effort */ }
+      const counts = color === "white" ? fresh.metadata.white : fresh.metadata.black;
+      const startIdx = ALL_SQUARES.indexOf(square);
+      let nextIdx = (startIdx + 1) % ALL_SQUARES.length;
+      while (nextIdx !== startIdx && (counts[ALL_SQUARES[nextIdx]] ?? 0) > 0) nextIdx = (nextIdx + 1) % ALL_SQUARES.length;
+      if (color === "white") setWhiteManualTarget(ALL_SQUARES[nextIdx]);
+      else setBlackManualTarget(ALL_SQUARES[nextIdx]);
+    } catch (e) {
+      setError(`square ${square}: ${(e as Error).message}`);
+    } finally {
+      setBusyForColor(false);
+    }
+  }, [activeName, meta]);
 
-  // ---------- handlers: bulk paint capture ----------
-  // One capture, multiple squares labeled at once. Saves per-cell crops to
-  // bulk/<color>/<sq>/cell_<uuid>.jpg on the backend.
-  const bulkCapture = useCallback(
-    async (color: SweepColor) => {
-      if (!activeName || !meta) return;
-      const labels = color === "white" ? whiteBulkLabels : blackBulkLabels;
-      const setBusy = color === "white" ? setWhiteBulkBusy : setBlackBulkBusy;
-      const frames = Math.max(
-        1,
-        Math.min(20, color === "white" ? whiteBulkFrames : blackBulkFrames),
-      );
-      if (Object.keys(labels).length === 0) {
-        setError("Paint at least one square before capturing.");
-        return;
-      }
-      setBusy(true);
-      setError(null);
-      try {
-        await api.captureLabelBulk(activeName, {
-          labels,
-          params: LABELING_PARAMS,
-          capture: true,
-          frames,
-          settle_ms: meta.settings.settle_ms,
-        });
-        // Refresh meta so the per-square existing-count badges update.
-        const fresh = await api.getLabelDataset(activeName);
-        setMeta(fresh.metadata);
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [
-      activeName,
-      meta,
-      whiteBulkLabels,
-      blackBulkLabels,
-      whiteBulkFrames,
-      blackBulkFrames,
-    ],
-  );
+  const bulkCapture = useCallback(async (color: SweepColor) => {
+    if (!activeName || !meta) return;
+    const labels = color === "white" ? whiteBulkLabels : blackBulkLabels;
+    const setBulkBusy = color === "white" ? setWhiteBulkBusy : setBlackBulkBusy;
+    const frames = color === "white" ? whiteBulkFrames : blackBulkFrames;
+    if (Object.keys(labels).length === 0) { setError("Paint at least one square before capturing."); return; }
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await api.captureLabelBulk(activeName, { labels, params: LABELING_PARAMS, capture: true, frames: Math.max(1, Math.min(20, frames)), settle_ms: meta.settings.settle_ms });
+      const fresh = await api.getLabelDataset(activeName);
+      setMeta(fresh.metadata);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [activeName, meta, whiteBulkLabels, blackBulkLabels, whiteBulkFrames, blackBulkFrames]);
 
-  // Send the arm home so it's out of the way while the user is placing
-  // pieces. No-op (with a friendly error) if no arm is connected.
-  const sendArmHomeForManual = useCallback(
-    async (color: SweepColor) => {
-      if (!activeName) return;
-      try {
-        await api.labelingArm(activeName, {
-          color,
-          square: "a1",
-          action: "home",
-        });
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    },
-    [activeName],
-  );
+  const sendArmHomeForManual = useCallback(async (color: SweepColor) => {
+    if (!activeName) return;
+    try {
+      await api.labelingArm(activeName, { color, square: "a1", action: "home" });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [activeName]);
 
-  // ---------- handlers: step 12 ----------
-  const handleComputeStats = async () => {
+  // ── Step 6 ─────────────────────────────────────────────────────────────────
+  const handleComputeStats = useCallback(async () => {
     if (!activeName) return;
     setComputingStats(true);
     setError(null);
@@ -714,17 +489,24 @@ export default function LabelingWizardPage() {
     } finally {
       setComputingStats(false);
     }
-  };
+  }, [activeName]);
 
-  // Shortcut: open an existing dataset and jump straight to bulk-paint so the
-  // user can add more samples without walking through empty-board and the
-  // full per-square sweep again. Defaults to white sweep step (7) with bulk
-  // mode pre-selected; the user can switch to step 10 from there for black.
-  const handleAddMoreData = async () => {
-    if (!chosenExisting) {
-      setError("Pick an existing dataset first");
-      return;
-    }
+  const handleActivate = useCallback(async () => {
+    if (!activeName) return;
+    setError(null);
+    try { await api.setActiveClassifier(activeName); await refreshActive(); }
+    catch (e) { setError((e as Error).message); }
+  }, [activeName, refreshActive]);
+
+  const handleDeactivate = useCallback(async () => {
+    setError(null);
+    try { await api.clearActiveClassifier(); await refreshActive(); }
+    catch (e) { setError((e as Error).message); }
+  }, [refreshActive]);
+
+  // ── Shortcuts for existing datasets ────────────────────────────────────────
+  const handleAddMoreData = useCallback(async () => {
+    if (!chosenExisting) { setError("Pick an existing dataset first"); return; }
     setError(null);
     try {
       const res = await api.getLabelDataset(chosenExisting);
@@ -735,33 +517,17 @@ export default function LabelingWizardPage() {
       setDraftLighting(res.metadata.settings.lighting_note);
       setDraftFrames(res.metadata.settings.frames_per_square);
       setDraftSettle(res.metadata.settings.settle_ms);
-      // Pretend every gating step is satisfied so navigation works.
-      setDatasetApplied(true);
-      setAppliedSource(true);
-      setAppliedPiece(true);
-      setAppliedLighting(true);
-      setAppliedFrames(true);
-      setAppliedSettle(true);
       setCalibrationConfirmed(true);
-      setAppliedCalibrationMode(true);
-      setWhitePlaced(true);
-      setBlackPlaced(true);
       setWhiteMode("bulk");
       setBlackMode("bulk");
-      setStep(7);
+      setStep(4);
     } catch (e) {
       setError((e as Error).message);
     }
-  };
+  }, [chosenExisting]);
 
-  // Shortcut for existing datasets: re-run compute-stats against the saved
-  // JPEGs and jump straight to the Step 12 report — no need to click through
-  // every gated capture step when no recapture is needed.
-  const handleRecomputeExisting = async () => {
-    if (!chosenExisting) {
-      setError("Pick an existing dataset first");
-      return;
-    }
+  const handleRecomputeExisting = useCallback(async () => {
+    if (!chosenExisting) { setError("Pick an existing dataset first"); return; }
     setComputingStats(true);
     setError(null);
     try {
@@ -769,569 +535,425 @@ export default function LabelingWizardPage() {
       const res = await api.computeDatasetStats(chosenExisting);
       setAccuracy(res.accuracy);
       setMeta(res.metadata);
-      setDatasetApplied(true);
-      setStep(12);
+      setStep(6);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setComputingStats(false);
     }
-  };
+  }, [chosenExisting]);
 
-  const handleActivate = async () => {
-    if (!activeName) return;
-    setError(null);
-    try {
-      await api.setActiveClassifier(activeName);
-      await refreshActive();
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  const handleDeactivate = async () => {
-    setError(null);
-    try {
-      await api.clearActiveClassifier();
-      await refreshActive();
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  // ---------- derived ----------
-  // A square counts as "captured" if it has at least one frame from EITHER
-  // the per-square sweep (white/black) OR the bulk-paint session
-  // (bulk_white/bulk_black). Same for the review-step gating below — a
-  // dataset that was filled entirely via bulk paint should still pass.
-  const countDone = (
-    main: Record<string, number> | undefined,
-    bulk: Record<string, number> | undefined,
-  ): number => {
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const countDone = (main: Record<string, number> | undefined, bulk: Record<string, number> | undefined) => {
     const all = new Set<string>();
     for (const [sq, n] of Object.entries(main ?? {})) if (n > 0) all.add(sq);
     for (const [sq, n] of Object.entries(bulk ?? {})) if (n > 0) all.add(sq);
     return all.size;
   };
-  const whiteDoneCount = meta
-    ? countDone(meta.white, meta.bulk_white)
-    : 0;
-  const blackDoneCount = meta
-    ? countDone(meta.black, meta.bulk_black)
-    : 0;
+  const whiteDoneCount = meta ? countDone(meta.white, meta.bulk_white) : 0;
+  const blackDoneCount = meta ? countDone(meta.black, meta.bulk_black) : 0;
 
-  // ---------- render ----------
+  const canGoTo = useCallback((s: StepId): boolean => {
+    if (s === 1) return true;
+    return !!activeName;
+  }, [activeName]);
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="p-6 space-y-6 max-w-5xl">
-      <header>
-        <h1 className="text-2xl font-jetbrains font-semibold">Labeled-data wizard</h1>
-        <p className="text-sm text-muted-foreground font-jetbrains">
-          Arm-driven capture for the per-square exemplar classifier. Every transition
-          requires Apply / Confirm — the wizard never advances on its own.
+    <div className="p-6 max-w-4xl mx-auto space-y-5">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-mono font-semibold text-text-bright">Labeling Wizard</h1>
+        <p className="text-sm text-text-muted mt-1 font-jetbrains">
+          Capture labeled photos so the classifier knows what each square looks like.
         </p>
-      </header>
-
-      <div
-        className="rounded-md border p-3 text-xs font-jetbrains flex items-center justify-between"
-        style={{
-          borderColor: "var(--charm-border)",
-          background: activeClassifier
-            ? "color-mix(in oklab, var(--charm-cyan) 8%, transparent)"
-            : "transparent",
-        }}
-      >
-        <span>
-          Live pipeline classifier:{" "}
-          {activeClassifier ? (
-            <strong style={{ color: "var(--charm-cyan)" }}>
-              exemplar — dataset “{activeClassifier}”
-            </strong>
-          ) : (
-            <strong>threshold-based (no exemplar dataset active)</strong>
-          )}
-        </span>
-        {activeClassifier && (
-          <Button variant="outline" size="sm" onClick={handleDeactivate}>
-            Deactivate
-          </Button>
-        )}
       </div>
 
-      <StepIndicator current={step} />
-
-      {error && (
+      {/* Active-classifier banner */}
+      {(activeClassifier || true) && (
         <div
-          className="rounded-md border p-3 text-sm font-jetbrains"
+          className="rounded-md border px-4 py-3 text-xs font-jetbrains flex items-center justify-between gap-3"
           style={{
-            borderColor: "var(--charm-red, #f87171)",
-            color: "var(--charm-red, #f87171)",
-            background: "color-mix(in oklab, var(--charm-red, #f87171) 8%, transparent)",
+            borderColor: activeClassifier ? "oklch(from var(--charm-cyan) l c h / 0.4)" : "var(--charm-border)",
+            background: activeClassifier ? "oklch(from var(--charm-cyan) l c h / 0.08)" : "transparent",
           }}
         >
-          {error}
+          <span>
+            Active classifier:{" "}
+            {activeClassifier
+              ? <strong style={{ color: "var(--charm-cyan)" }}>"{activeClassifier}"</strong>
+              : <span style={{ color: "var(--charm-muted)" }}>none (threshold-based)</span>}
+          </span>
+          {activeClassifier && (
+            <Button variant="outline" size="sm" onClick={handleDeactivate}>Deactivate</Button>
+          )}
         </div>
       )}
 
-      {/* STEP 1 */}
+      {/* Breadcrumb */}
+      <Breadcrumb step={step} setStep={setStep} canGoTo={canGoTo} activeName={activeName} />
+
+      {/* Error */}
+      {error && (
+        <div className="rounded-md border px-4 py-3 text-sm font-jetbrains"
+          style={{ borderColor: "oklch(0.6 0.22 25 / 0.5)", color: "oklch(0.7 0.22 25)", background: "oklch(0.3 0.12 25 / 0.15)" }}>
+          {error}
+          <button className="ml-3 underline text-xs opacity-70" onClick={() => setError(null)}>dismiss</button>
+        </div>
+      )}
+
+      {/* ── STEP 1: Setup ────────────────────────────────────────────────── */}
       {step === 1 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">Step 1 / 12 — Dataset configuration</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex gap-3 items-center flex-wrap">
-              <label className="flex items-center gap-2 font-jetbrains text-sm">
-                <input
-                  type="radio"
-                  checked={mode === "new"}
-                  onChange={() => {
-                    setMode("new");
-                    setDatasetApplied(false);
-                  }}
-                />
-                New dataset
-              </label>
-              <label className="flex items-center gap-2 font-jetbrains text-sm">
-                <input
-                  type="radio"
-                  checked={mode === "existing"}
-                  onChange={() => {
-                    setMode("existing");
-                    setDatasetApplied(false);
-                  }}
-                />
-                Existing dataset
-              </label>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleRescanAll}
-                disabled={rescanning}
-                className="ml-auto"
-                title="Rebuild metadata.json for every folder under labeled_datasets/ (picks up hand-dropped or merged datasets like combo_dataset)."
-              >
-                {rescanning ? "Rescanning…" : "Rescan folders"}
-              </Button>
-            </div>
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-7">
 
-            {mode === "new" ? (
-              <div className="flex gap-2 items-center">
-                <Input
-                  placeholder="Dataset name (e.g. studio_2026-05-19)"
-                  value={newName}
-                  onChange={(e) => {
-                    setNewName(e.target.value);
-                    setDatasetApplied(false);
-                  }}
-                  className="max-w-md"
-                />
-                <Button onClick={handleApplyDataset} disabled={datasetApplied}>
-                  {datasetApplied ? "Applied ✓" : "Apply"}
-                </Button>
+            {/* Dataset choice */}
+            <section className="space-y-3">
+              <SectionTitle>1. Choose a dataset</SectionTitle>
+              <div className="flex gap-2">
+                {(["new", "existing"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setMode(m)}
+                    className="px-4 py-1.5 rounded-md text-sm font-jetbrains border transition-colors"
+                    style={{
+                      background: mode === m ? "var(--charm-cyan)" : "transparent",
+                      color: mode === m ? "oklch(0.16 0 0)" : "var(--charm-muted)",
+                      borderColor: mode === m ? "var(--charm-cyan)" : "var(--charm-border)",
+                    }}
+                  >
+                    {m === "new" ? "New dataset" : "Existing dataset"}
+                  </button>
+                ))}
               </div>
-            ) : (
-              <div className="flex gap-2 items-center flex-wrap">
-                <Select
-                  value={chosenExisting}
-                  onValueChange={(v) => {
-                    setChosenExisting(v ?? "");
-                    setDatasetApplied(false);
-                  }}
-                >
-                  <SelectTrigger className="w-72">
-                    <SelectValue placeholder="Pick dataset" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {datasets.map((d) => (
-                      <SelectItem key={d.name} value={d.name}>
-                        {d.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button onClick={handleApplyDataset} disabled={datasetApplied}>
-                  {datasetApplied ? "Applied ✓" : "Apply"}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleRecomputeExisting}
-                  disabled={!chosenExisting || computingStats}
-                  title="Rebuild exemplar_config.json + accuracy.json from the dataset's saved JPEGs and jump to the report."
-                >
-                  {computingStats ? "Recomputing…" : "Recompute stats"}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleAddMoreData}
-                  disabled={!chosenExisting}
-                  title="Skip empty-board + per-square sweep and jump to bulk paint so you can grow this dataset."
-                >
-                  + Add more data (bulk paint)
-                </Button>
+
+              {mode === "new" ? (
+                <div className="flex gap-3 items-center">
+                  <Input
+                    placeholder="e.g. studio-2026-05-27"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    className="max-w-xs"
+                  />
+                  <button
+                    onClick={handleRescanAll}
+                    disabled={rescanning}
+                    className="text-xs font-jetbrains underline"
+                    style={{ color: "var(--charm-muted)" }}
+                  >
+                    {rescanning ? "Rescanning…" : "Rescan folders"}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex gap-3 items-center flex-wrap">
+                    <Select value={chosenExisting} onValueChange={(v) => { if (v) setChosenExisting(v); }}>
+                      <SelectTrigger className="w-64">
+                        <SelectValue placeholder="Pick a dataset" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {datasets.map((d) => (
+                          <SelectItem key={d.name} value={d.name}>{d.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <button
+                      onClick={handleRescanAll}
+                      disabled={rescanning}
+                      className="text-xs font-jetbrains underline"
+                      style={{ color: "var(--charm-muted)" }}
+                    >
+                      {rescanning ? "Rescanning…" : "Rescan folders"}
+                    </button>
+                  </div>
+                  {chosenExisting && (
+                    <div className="flex gap-2 flex-wrap">
+                      <Button size="sm" variant="outline" onClick={handleAddMoreData}>
+                        + Add more data (bulk paint)
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={handleRecomputeExisting} disabled={computingStats}>
+                        {computingStats ? "Computing…" : "View / recompute stats"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            {/* Piece settings */}
+            <section className="space-y-3">
+              <SectionTitle>2. Piece settings</SectionTitle>
+              <div className="grid grid-cols-2 gap-5 max-w-lg">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Piece type
+                  </label>
+                  <Select value={draftPiece} onValueChange={(v) => { if (v) setDraftPiece(v); }}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PIECE_TYPES.map((p) => (
+                        <SelectItem key={p} value={p}>{p}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Starting square (arm picks piece from here)
+                  </label>
+                  <Input
+                    value={draftSource}
+                    onChange={(e) => setDraftSource(e.target.value)}
+                    placeholder="h8"
+                    className="w-28"
+                  />
+                </div>
               </div>
-            )}
+            </section>
 
-            <Separator />
+            {/* Capture settings */}
+            <section className="space-y-3">
+              <SectionTitle>3. Capture settings</SectionTitle>
+              <div className="grid grid-cols-2 gap-5 max-w-lg">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Photos per square
+                  </label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={draftFrames}
+                    onChange={(e) => setDraftFrames(parseInt(e.target.value || "1", 10))}
+                    className="w-24"
+                  />
+                  <p className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    5 is a good default. More = better model.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Wait between photos (ms)
+                  </label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={5000}
+                    step={50}
+                    value={draftSettle}
+                    onChange={(e) => setDraftSettle(parseInt(e.target.value || "0", 10))}
+                    className="w-28"
+                  />
+                  <p className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Pause after arm leaves so the board stops wobbling.
+                  </p>
+                </div>
+              </div>
+            </section>
 
-            <SettingRow
-              label="Source square"
-              hint="Square the arm picks the piece from each step (default H8)."
-              applied={appliedSource}
-              onApply={handleApplySource}
-              disabled={!datasetApplied}
-            >
-              <Input
-                value={draftSource}
-                onChange={(e) => {
-                  setDraftSource(e.target.value);
-                  setAppliedSource(false);
-                }}
-                className="w-24"
-              />
-            </SettingRow>
-
-            <SettingRow
-              label="Piece type"
-              hint="Arm uses this to look up its pick/place Z height."
-              applied={appliedPiece}
-              onApply={handleApplyPiece}
-              disabled={!datasetApplied}
-            >
-              <Select
-                value={draftPiece}
-                onValueChange={(v) => {
-                  setDraftPiece(v ?? "pawn");
-                  setAppliedPiece(false);
-                }}
-              >
-                <SelectTrigger className="w-40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PIECE_TYPES.map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </SettingRow>
-
-            <SettingRow
-              label="Lighting / setup note"
-              hint="Free-text describing this session (saved in metadata)."
-              applied={appliedLighting}
-              onApply={handleApplyLighting}
-              disabled={!datasetApplied}
-            >
+            {/* Session note */}
+            <section className="space-y-1.5">
+              <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                Session note (optional — saved in metadata)
+              </label>
               <Input
                 value={draftLighting}
-                onChange={(e) => {
-                  setDraftLighting(e.target.value);
-                  setAppliedLighting(false);
-                }}
-                className="max-w-md"
+                onChange={(e) => setDraftLighting(e.target.value)}
+                placeholder="e.g. studio lights, overcast"
+                className="max-w-sm"
               />
-            </SettingRow>
+            </section>
 
-            <NavRow
-              backDisabled
-              forwardDisabled={!allStep1Applied}
-              forwardLabel="Confirm and continue → Step 2"
-              onForward={() => setStep(2)}
-            />
+            {/* Continue */}
+            <Button
+              onClick={handleStep1Continue}
+              disabled={busy || (mode === "new" ? !newName.trim() : !chosenExisting)}
+            >
+              {busy ? "Saving…" : "Continue →"}
+            </Button>
           </CardContent>
         </Card>
       )}
 
-      {/* STEP 2 */}
+      {/* ── STEP 2: Calibration ───────────────────────────────────────────── */}
       {step === 2 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">Step 2 / 12 — Capture settings</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <SettingRow
-              label="Frames per square"
-              hint="More frames = better noise model. 5 is a good default."
-              applied={appliedFrames}
-              onApply={handleApplyFrames}
-              disabled={!activeName}
-            >
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={draftFrames}
-                onChange={(e) => {
-                  setDraftFrames(parseInt(e.target.value || "0", 10));
-                  setAppliedFrames(false);
-                }}
-                className="w-24"
-              />
-            </SettingRow>
-
-            <SettingRow
-              label="Settle delay (ms)"
-              hint="Pause after arm leaves the frame before capturing."
-              applied={appliedSettle}
-              onApply={handleApplySettle}
-              disabled={!activeName}
-            >
-              <Input
-                type="number"
-                min={0}
-                max={5000}
-                step={50}
-                value={draftSettle}
-                onChange={(e) => {
-                  setDraftSettle(parseInt(e.target.value || "0", 10));
-                  setAppliedSettle(false);
-                }}
-                className="w-32"
-              />
-            </SettingRow>
-
-            <NavRow
-              forwardDisabled={!(appliedFrames && appliedSettle)}
-              forwardLabel="Confirm and continue → Step 3"
-              onBack={() => setStep(1)}
-              onForward={() => setStep(3)}
-            />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 3 */}
-      {step === 3 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">Step 3 / 12 — Calibration check</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Confirm or re-run board calibration. Robot calibration (a1/h1/h8) is
-              separate — set it up on the{" "}
-              <a href="/robot" className="underline">Scara Calibration</a> page if needed.
-            </p>
-            <div
-              className="rounded-md border p-3 text-xs font-jetbrains space-y-1"
-              style={{
-                borderColor: "var(--charm-border)",
-                background: "color-mix(in oklab, var(--charm-cyan) 6%, transparent)",
-              }}
-            >
-              <div>
-                <strong>Capture cropping</strong> — every frame is run through:
-              </div>
-              <ol className="list-decimal pl-5">
-                <li>Outer board four-point warp (using saved corner calibration)</li>
-                <li>Inner-corner refinement warp</li>
-              </ol>
-              <div>
-                Saved JPEGs are 800×800 board-only. Anything outside the board
-                is cropped before disk — no off-board noise enters the dataset.
-              </div>
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-5">
+            <div>
+              <SectionTitle>Board calibration</SectionTitle>
+              <p className="text-sm font-jetbrains mt-1" style={{ color: "var(--charm-muted)" }}>
+                The system needs to know where the board is in the camera view so it can crop each square correctly.
+                Robot calibration (a1/h1/h8) is configured on the{" "}
+                <a href="/robot" className="underline" style={{ color: "var(--charm-cyan)" }}>Scara Calibration</a> page.
+              </p>
             </div>
 
-            {/* Calibration source selector with its own Apply */}
-            <div className="space-y-2">
-              <p className="font-jetbrains text-sm font-semibold">Board calibration source</p>
-              <div className="flex gap-3 items-center">
-                <label className="flex items-center gap-2 font-jetbrains text-sm">
-                  <input
-                    type="radio"
-                    checked={calibrationMode === "manual"}
-                    onChange={() => {
-                      setCalibrationMode("manual");
-                      setAppliedCalibrationMode(false);
-                    }}
-                  />
-                  Manual (existing saved corners)
-                </label>
-                <label className="flex items-center gap-2 font-jetbrains text-sm">
-                  <input
-                    type="radio"
-                    checked={calibrationMode === "aruco"}
-                    onChange={() => {
-                      setCalibrationMode("aruco");
-                      setAppliedCalibrationMode(false);
-                    }}
-                  />
-                  ArUco markers (auto-detect)
-                </label>
-                <Button
-                  size="sm"
-                  variant={appliedCalibrationMode ? "secondary" : "default"}
-                  onClick={() => setAppliedCalibrationMode(true)}
-                >
-                  {appliedCalibrationMode ? "Applied ✓" : "Apply"}
-                </Button>
-              </div>
-              {appliedCalibrationMode && calibrationMode === "aruco" && (
-                <div className="rounded-md border p-3">
-                  <ArucoCalibration
-                    embedded
-                    onApplied={() => setCalibrationConfirmed(true)}
-                  />
-                </div>
-              )}
-              {appliedCalibrationMode && calibrationMode === "manual" && (
-                <div className="rounded-md border p-3 space-y-2">
-                  <p className="text-xs text-muted-foreground font-jetbrains">
-                    Re-pick board / inner-warp corners below. Save Board + Save
-                    Inner from inside the tool, then check the confirm box.
-                  </p>
-                  <ManualCalibration />
-                </div>
-              )}
-            </div>
-
-            <label className="flex items-center gap-2 font-jetbrains text-sm">
+            <label className="flex items-center gap-3 font-jetbrains text-sm cursor-pointer">
               <input
                 type="checkbox"
                 checked={calibrationConfirmed}
                 onChange={(e) => setCalibrationConfirmed(e.target.checked)}
+                className="h-4 w-4 accent-cyan-DEFAULT"
               />
-              I confirm board + robot calibration are good.
+              <span>Board + warp calibration is good — I can see the full board in the camera.</span>
             </label>
+
+            <div>
+              <button
+                onClick={() => setShowCalibrationTool((v) => !v)}
+                className="text-xs font-jetbrains underline"
+                style={{ color: "var(--charm-muted)" }}
+              >
+                {showCalibrationTool ? "Hide calibration tools ↑" : "Need to calibrate? Open calibration tools ↓"}
+              </button>
+
+              {showCalibrationTool && (
+                <div className="mt-4 space-y-3">
+                  <div className="flex gap-2">
+                    {(["manual", "aruco"] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setCalibrationMode(m)}
+                        className="px-3 py-1.5 rounded-md text-xs font-jetbrains border transition-colors"
+                        style={{
+                          background: calibrationMode === m ? "oklch(from var(--charm-cyan) l c h / 0.15)" : "transparent",
+                          color: calibrationMode === m ? "var(--charm-cyan)" : "var(--charm-muted)",
+                          borderColor: calibrationMode === m ? "oklch(from var(--charm-cyan) l c h / 0.5)" : "var(--charm-border)",
+                        }}
+                      >
+                        {m === "manual" ? "Manual (click corners)" : "ArUco markers (auto)"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-md border p-3" style={{ borderColor: "var(--charm-border)" }}>
+                    {calibrationMode === "manual"
+                      ? <ManualCalibration />
+                      : <ArucoCalibration embedded onApplied={() => setCalibrationConfirmed(true)} />}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <NavRow
-              forwardDisabled={!calibrationConfirmed || !appliedCalibrationMode}
-              forwardLabel="Confirm and continue → Step 4"
+              onBack={() => setStep(1)}
+              onForward={() => setStep(3)}
+              forwardDisabled={!calibrationConfirmed}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── STEP 3: Empty board ───────────────────────────────────────────── */}
+      {step === 3 && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-5">
+            <div>
+              <SectionTitle>Capture empty board</SectionTitle>
+              <p className="text-sm font-jetbrains mt-1" style={{ color: "var(--charm-muted)" }}>
+                Remove <strong>all pieces</strong> from the board, then press capture. The system
+                photographs the empty board as a reference for occupancy detection.
+              </p>
+            </div>
+
+            <div className="flex items-start gap-6">
+              <div className="space-y-3">
+                <Button onClick={captureEmpty} disabled={busy || !activeName}>
+                  {busy ? "Capturing…" : "📷 Capture empty board"}
+                </Button>
+                {meta && meta.empty_frames > 0 && (
+                  <p className="text-sm font-jetbrains" style={{ color: "var(--charm-cyan)" }}>
+                    ✓ {meta.empty_frames} frame{meta.empty_frames === 1 ? "" : "s"} captured
+                  </p>
+                )}
+                {meta && meta.empty_frames > 0 && (
+                  <button
+                    onClick={captureEmpty}
+                    disabled={busy}
+                    className="text-xs font-jetbrains underline"
+                    style={{ color: "var(--charm-muted)" }}
+                  >
+                    Recapture
+                  </button>
+                )}
+              </div>
+
+              {emptyThumb && (
+                <img
+                  src={imageSrc(emptyThumb)}
+                  alt="empty board preview"
+                  className="rounded-md border w-48 h-48 object-cover"
+                  style={{ borderColor: "var(--charm-border)" }}
+                />
+              )}
+            </div>
+
+            <NavRow
               onBack={() => setStep(2)}
               onForward={() => setStep(4)}
-            />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 4 */}
-      {step === 4 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 4 / 12 — Empty board capture
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Remove all pieces from the board, then press the button. The wizard will
-              capture {meta?.settings.frames_per_square ?? "?"} frames of the empty board.
-            </p>
-            <Button onClick={captureEmpty} disabled={busy || !activeName}>
-              {busy ? "Capturing…" : "Capture empty board"}
-            </Button>
-            <NavRow
               forwardDisabled={!meta?.empty_frames}
-              forwardLabel="Continue → Step 5"
-              onBack={() => setStep(3)}
-              onForward={() => setStep(5)}
             />
           </CardContent>
         </Card>
       )}
 
-      {/* STEP 5 */}
-      {step === 5 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 5 / 12 — Empty board review
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Frames captured: <strong>{meta?.empty_frames ?? 0}</strong>
-            </p>
-            {emptyThumb && (
-              <img
-                src={`data:image/jpeg;base64,${emptyThumb}`}
-                alt="empty board frame"
-                className="max-w-md rounded-md border"
-              />
-            )}
-            <div className="flex gap-2">
-              <Button onClick={captureEmpty} variant="outline" disabled={busy}>
-                Recapture
-              </Button>
+      {/* ── STEP 4: White pieces ─────────────────────────────────────────── */}
+      {step === 4 && meta && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-5">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <SectionTitle>White pieces — {whiteDoneCount}/64 squares captured</SectionTitle>
+                <div
+                  className="mt-2 px-3 py-2 rounded-md text-sm font-jetbrains inline-block"
+                  style={{ background: "oklch(from var(--charm-cyan) l c h / 0.1)", border: "1px solid oklch(from var(--charm-cyan) l c h / 0.3)" }}
+                >
+                  Place a <strong style={{ color: "var(--charm-cyan)" }}>white {meta.settings.piece_type}</strong> on{" "}
+                  <strong style={{ color: "var(--charm-cyan)" }}>{meta.settings.source_square.toUpperCase()}</strong>,
+                  then start the sweep.
+                </div>
+              </div>
+              {/* Inline settings */}
+              <div className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                <button onClick={() => setShowWhiteCaptureEdit((v) => !v)} className="underline">
+                  {meta.settings.frames_per_square} photos/sq · {meta.settings.settle_ms}ms wait
+                  {showWhiteCaptureEdit ? " ↑" : " ✎"}
+                </button>
+                {showWhiteCaptureEdit && (
+                  <div className="mt-2 flex gap-4 items-end">
+                    <div>
+                      <div className="mb-1">Photos/sq</div>
+                      <Input
+                        type="number" min={1} max={20}
+                        value={draftFrames}
+                        onChange={(e) => setDraftFrames(+e.target.value)}
+                        onBlur={(e) => saveFrames(+e.target.value)}
+                        className="w-20"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1">Wait (ms)</div>
+                      <Input
+                        type="number" min={0} max={5000} step={50}
+                        value={draftSettle}
+                        onChange={(e) => setDraftSettle(+e.target.value)}
+                        onBlur={(e) => saveSettle(+e.target.value)}
+                        className="w-24"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-            <NavRow
-              forwardDisabled={!meta?.empty_frames}
-              forwardLabel="Confirm and continue → Step 6"
-              onBack={() => setStep(4)}
-              onForward={() => setStep(6)}
-            />
-          </CardContent>
-        </Card>
-      )}
 
-      {/* STEP 6 */}
-      {step === 6 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 6 / 12 — Place white source piece
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Place a <strong>white {meta?.settings.piece_type}</strong> on{" "}
-              <strong>{meta?.settings.source_square.toUpperCase()}</strong>. Leave the rest
-              of the board empty.
-            </p>
-            <label className="flex items-center gap-2 font-jetbrains text-sm">
-              <input
-                type="checkbox"
-                checked={whitePlaced}
-                onChange={(e) => setWhitePlaced(e.target.checked)}
-              />
-              Piece is placed correctly.
-            </label>
-            <NavRow
-              forwardDisabled={!whitePlaced}
-              forwardLabel="Confirm and continue → Step 7"
-              onBack={() => setStep(5)}
-              onForward={() => setStep(7)}
-            />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 7 */}
-      {step === 7 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 7 / 12 — White sweep
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
             <ModeToggle
               mode={whiteMode}
               onChange={setWhiteMode}
               disabled={whiteRunState === "running" || whiteManualBusy || whiteBulkBusy}
             />
-            {meta && (
-              <CaptureTuner
-                meta={meta}
-                draftFrames={draftFrames}
-                draftSettle={draftSettle}
-                appliedFrames={appliedFrames}
-                appliedSettle={appliedSettle}
-                onDraftFrames={(n) => {
-                  setDraftFrames(n);
-                  setAppliedFrames(false);
-                }}
-                onDraftSettle={(n) => {
-                  setDraftSettle(n);
-                  setAppliedSettle(false);
-                }}
-                onApplyFrames={handleApplyFrames}
-                onApplySettle={handleApplySettle}
-                disabled={whiteRunState === "running" || whiteManualBusy || whiteBulkBusy}
-              />
-            )}
-            {whiteMode === "arm" ? (
+
+            {whiteMode === "arm" && (
               <SweepRunner
                 color="white"
                 currentSquare={whiteCurrentSquare}
@@ -1344,142 +966,107 @@ export default function LabelingWizardPage() {
                 onAbort={() => abortSweep("white")}
                 done={whiteDoneCount}
               />
-            ) : whiteMode === "manual" ? (
-              meta && (
-                <ManualSweepRunner
-                  color="white"
-                  meta={meta}
-                  target={whiteManualTarget}
-                  setTarget={setWhiteManualTarget}
-                  busy={whiteManualBusy}
-                  onValidate={() => manualCaptureSquare("white", whiteManualTarget)}
-                  onPark={() => sendArmHomeForManual("white")}
-                />
-              )
-            ) : (
-              meta && (
-                <BulkPaintRunner
-                  color="white"
-                  meta={meta}
-                  labels={whiteBulkLabels}
-                  setLabels={setWhiteBulkLabels}
-                  frames={whiteBulkFrames}
-                  setFrames={setWhiteBulkFrames}
-                  busy={whiteBulkBusy}
-                  onCapture={() => bulkCapture("white")}
-                />
-              )
             )}
-            <CapturedGallery thumbs={whiteCapturedThumbs} color="white" />
-            <NavRow
-              forwardDisabled={
-                whiteMode === "bulk"
-                  ? false
-                  : whiteMode === "arm"
-                    ? whiteRunState !== "done" && whiteDoneCount < 64
-                    : whiteDoneCount < 64
-              }
-              forwardLabel="Continue → Step 8"
-              onBack={() => setStep(6)}
-              onForward={() => setStep(8)}
-            />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 8 */}
-      {step === 8 && meta && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 8 / 12 — White sweep review
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <RetakeGrid
-              datasetName={activeName ?? ""}
-              color="white"
-              meta={meta}
-              onRetake={(sq) => retakeSquare("white", sq)}
-              busy={busy}
-            />
-            <NavRow
-              forwardDisabled={whiteDoneCount < 64}
-              forwardLabel="Confirm and continue → Step 9"
-              onBack={() => setStep(7)}
-              onForward={() => setStep(9)}
-            />
-          </CardContent>
-        </Card>
-      )}
-
-      {/* STEP 9 */}
-      {step === 9 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 9 / 12 — Switch to black piece
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Return the white piece off the board. Place a{" "}
-              <strong>black {meta?.settings.piece_type}</strong> on{" "}
-              <strong>{meta?.settings.source_square.toUpperCase()}</strong>.
-            </p>
-            <label className="flex items-center gap-2 font-jetbrains text-sm">
-              <input
-                type="checkbox"
-                checked={blackPlaced}
-                onChange={(e) => setBlackPlaced(e.target.checked)}
+            {whiteMode === "manual" && (
+              <ManualSweepRunner
+                color="white"
+                meta={meta}
+                target={whiteManualTarget}
+                setTarget={setWhiteManualTarget}
+                busy={whiteManualBusy}
+                onValidate={() => manualCaptureSquare("white", whiteManualTarget)}
+                onPark={() => sendArmHomeForManual("white")}
               />
-              Black piece is placed correctly.
-            </label>
+            )}
+            {whiteMode === "bulk" && (
+              <BulkPaintRunner
+                color="white"
+                meta={meta}
+                labels={whiteBulkLabels}
+                setLabels={setWhiteBulkLabels}
+                frames={whiteBulkFrames}
+                setFrames={setWhiteBulkFrames}
+                busy={whiteBulkBusy}
+                onCapture={() => bulkCapture("white")}
+              />
+            )}
+
+            <CapturedGallery thumbs={whiteCapturedThumbs} color="white" />
+
+            {whiteDoneCount > 0 && (
+              <RetakeGrid
+                datasetName={activeName ?? ""}
+                color="white"
+                meta={meta}
+                onRetake={(sq) => retakeSquare("white", sq)}
+                busy={busy}
+              />
+            )}
+
             <NavRow
-              forwardDisabled={!blackPlaced}
-              forwardLabel="Confirm and continue → Step 10"
-              onBack={() => setStep(8)}
-              onForward={() => setStep(10)}
+              onBack={() => setStep(3)}
+              onForward={() => setStep(5)}
+              forwardDisabled={whiteMode === "arm" && whiteRunState !== "done" && whiteDoneCount < 1}
+              forwardLabel={whiteDoneCount < 64 ? `Continue with ${whiteDoneCount}/64 →` : "Continue →"}
             />
           </CardContent>
         </Card>
       )}
 
-      {/* STEP 10 */}
-      {step === 10 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 10 / 12 — Black sweep
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+      {/* ── STEP 5: Black pieces ─────────────────────────────────────────── */}
+      {step === 5 && meta && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-5">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <SectionTitle>Black pieces — {blackDoneCount}/64 squares captured</SectionTitle>
+                <div
+                  className="mt-2 px-3 py-2 rounded-md text-sm font-jetbrains inline-block"
+                  style={{ background: "oklch(from var(--charm-amber) l c h / 0.1)", border: "1px solid oklch(from var(--charm-amber) l c h / 0.3)" }}
+                >
+                  Return the white piece. Place a <strong style={{ color: "var(--charm-amber)" }}>black {meta.settings.piece_type}</strong> on{" "}
+                  <strong style={{ color: "var(--charm-amber)" }}>{meta.settings.source_square.toUpperCase()}</strong>.
+                </div>
+              </div>
+              <div className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                <button onClick={() => setShowBlackCaptureEdit((v) => !v)} className="underline">
+                  {meta.settings.frames_per_square} photos/sq · {meta.settings.settle_ms}ms wait
+                  {showBlackCaptureEdit ? " ↑" : " ✎"}
+                </button>
+                {showBlackCaptureEdit && (
+                  <div className="mt-2 flex gap-4 items-end">
+                    <div>
+                      <div className="mb-1">Photos/sq</div>
+                      <Input
+                        type="number" min={1} max={20}
+                        value={draftFrames}
+                        onChange={(e) => setDraftFrames(+e.target.value)}
+                        onBlur={(e) => saveFrames(+e.target.value)}
+                        className="w-20"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1">Wait (ms)</div>
+                      <Input
+                        type="number" min={0} max={5000} step={50}
+                        value={draftSettle}
+                        onChange={(e) => setDraftSettle(+e.target.value)}
+                        onBlur={(e) => saveSettle(+e.target.value)}
+                        className="w-24"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
             <ModeToggle
               mode={blackMode}
               onChange={setBlackMode}
               disabled={blackRunState === "running" || blackManualBusy || blackBulkBusy}
             />
-            {meta && (
-              <CaptureTuner
-                meta={meta}
-                draftFrames={draftFrames}
-                draftSettle={draftSettle}
-                appliedFrames={appliedFrames}
-                appliedSettle={appliedSettle}
-                onDraftFrames={(n) => {
-                  setDraftFrames(n);
-                  setAppliedFrames(false);
-                }}
-                onDraftSettle={(n) => {
-                  setDraftSettle(n);
-                  setAppliedSettle(false);
-                }}
-                onApplyFrames={handleApplyFrames}
-                onApplySettle={handleApplySettle}
-                disabled={blackRunState === "running" || blackManualBusy || blackBulkBusy}
-              />
-            )}
-            {blackMode === "arm" ? (
+
+            {blackMode === "arm" && (
               <SweepRunner
                 color="black"
                 currentSquare={blackCurrentSquare}
@@ -1492,126 +1079,96 @@ export default function LabelingWizardPage() {
                 onAbort={() => abortSweep("black")}
                 done={blackDoneCount}
               />
-            ) : blackMode === "manual" ? (
-              meta && (
-                <ManualSweepRunner
-                  color="black"
-                  meta={meta}
-                  target={blackManualTarget}
-                  setTarget={setBlackManualTarget}
-                  busy={blackManualBusy}
-                  onValidate={() => manualCaptureSquare("black", blackManualTarget)}
-                  onPark={() => sendArmHomeForManual("black")}
-                />
-              )
-            ) : (
-              meta && (
-                <BulkPaintRunner
-                  color="black"
-                  meta={meta}
-                  labels={blackBulkLabels}
-                  setLabels={setBlackBulkLabels}
-                  frames={blackBulkFrames}
-                  setFrames={setBlackBulkFrames}
-                  busy={blackBulkBusy}
-                  onCapture={() => bulkCapture("black")}
-                />
-              )
             )}
+            {blackMode === "manual" && (
+              <ManualSweepRunner
+                color="black"
+                meta={meta}
+                target={blackManualTarget}
+                setTarget={setBlackManualTarget}
+                busy={blackManualBusy}
+                onValidate={() => manualCaptureSquare("black", blackManualTarget)}
+                onPark={() => sendArmHomeForManual("black")}
+              />
+            )}
+            {blackMode === "bulk" && (
+              <BulkPaintRunner
+                color="black"
+                meta={meta}
+                labels={blackBulkLabels}
+                setLabels={setBlackBulkLabels}
+                frames={blackBulkFrames}
+                setFrames={setBlackBulkFrames}
+                busy={blackBulkBusy}
+                onCapture={() => bulkCapture("black")}
+              />
+            )}
+
             <CapturedGallery thumbs={blackCapturedThumbs} color="black" />
+
+            {blackDoneCount > 0 && (
+              <RetakeGrid
+                datasetName={activeName ?? ""}
+                color="black"
+                meta={meta}
+                onRetake={(sq) => retakeSquare("black", sq)}
+                busy={busy}
+              />
+            )}
+
             <NavRow
-              forwardDisabled={
-                blackMode === "bulk"
-                  ? false
-                  : blackMode === "arm"
-                    ? blackRunState !== "done" && blackDoneCount < 64
-                    : blackDoneCount < 64
-              }
-              forwardLabel="Continue → Step 11"
-              onBack={() => setStep(9)}
-              onForward={() => setStep(11)}
+              onBack={() => setStep(4)}
+              onForward={() => setStep(6)}
+              forwardDisabled={blackMode === "arm" && blackRunState !== "done" && blackDoneCount < 1}
+              forwardLabel={blackDoneCount < 64 ? `Continue with ${blackDoneCount}/64 →` : "Continue →"}
             />
           </CardContent>
         </Card>
       )}
 
-      {/* STEP 11 */}
-      {step === 11 && meta && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 11 / 12 — Black sweep review
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <RetakeGrid
-              datasetName={activeName ?? ""}
-              color="black"
-              meta={meta}
-              onRetake={(sq) => retakeSquare("black", sq)}
-              busy={busy}
-            />
-            <NavRow
-              forwardDisabled={blackDoneCount < 64}
-              forwardLabel="Confirm and continue → Step 12"
-              onBack={() => setStep(10)}
-              onForward={() => setStep(12)}
-            />
-          </CardContent>
-        </Card>
-      )}
+      {/* ── STEP 6: Finish ───────────────────────────────────────────────── */}
+      {step === 6 && (
+        <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+          <CardContent className="p-6 space-y-5">
+            <div>
+              <SectionTitle>Compute stats & activate</SectionTitle>
+              <p className="text-sm font-jetbrains mt-1" style={{ color: "var(--charm-muted)" }}>
+                Builds per-square exemplars and runs a leave-one-out accuracy check.
+                Writes <code>exemplar_config.json</code> into the dataset folder.
+              </p>
+            </div>
 
-      {/* STEP 12 */}
-      {step === 12 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="font-jetbrains">
-              Step 12 / 12 — Finalize & compute stats
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm font-jetbrains">
-              Computes per-square exemplars and a leave-one-frame-out accuracy report.
-              Writes <code>exemplar_config.json</code> + <code>accuracy.json</code> into
-              the dataset directory so the runtime classifier can load it.
-            </p>
             <Button onClick={handleComputeStats} disabled={computingStats || !activeName}>
               {computingStats ? "Computing…" : "Compute & save"}
             </Button>
+
             {accuracy && (
               <>
                 <AccuracyReport accuracy={accuracy} />
-                <Separator />
-                <div className="space-y-2">
-                  <p className="text-sm font-jetbrains">
-                    Activate this dataset to make the live pipeline (Computer Vision page,
-                    Game flow) classify with these per-square exemplars instead of the
-                    threshold path. You can always deactivate from the banner above.
+
+                <div className="space-y-2 pt-2">
+                  <p className="text-sm font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                    Activate this dataset to make the live pipeline classify with these per-square exemplars.
                   </p>
-                  <div className="flex gap-2 items-center">
+                  <div className="flex gap-3 items-center flex-wrap">
                     <Button
                       onClick={handleActivate}
                       disabled={!activeName}
                       variant={activeClassifier === activeName ? "secondary" : "default"}
                     >
-                      {activeClassifier === activeName
-                        ? "Active ✓"
-                        : "Activate as live classifier"}
+                      {activeClassifier === activeName ? "Active ✓" : "Activate as live classifier"}
                     </Button>
                     {activeClassifier && activeClassifier !== activeName && (
-                      <span className="text-xs font-jetbrains text-muted-foreground">
-                        Currently active: {activeClassifier} (will be replaced)
+                      <span className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+                        Will replace: {activeClassifier}
                       </span>
                     )}
                   </div>
                 </div>
               </>
             )}
-            <NavRow
-              forwardDisabled
-              forwardLabel="Done"
-              onBack={() => setStep(11)}
-            />
+
+            <NavRow onBack={() => setStep(5)} forwardDisabled forwardLabel="Done" />
           </CardContent>
         </Card>
       )}
@@ -1619,73 +1176,59 @@ export default function LabelingWizardPage() {
   );
 }
 
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
-// ----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
-function StepIndicator({ current }: { current: StepId }) {
+function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-wrap gap-1.5 text-xs font-jetbrains">
-      {STEPS.map((s) => {
-        const active = s.id === current;
-        const done = s.id < current;
-        return (
-          <div
-            key={s.id}
-            className="rounded-md px-2 py-1 border"
-            style={{
-              borderColor: active
-                ? "var(--charm-cyan)"
-                : done
-                  ? "color-mix(in oklab, var(--charm-cyan) 30%, transparent)"
-                  : "var(--charm-border)",
-              color: active ? "var(--charm-cyan)" : "var(--charm-muted)",
-              background: active
-                ? "color-mix(in oklab, var(--charm-cyan) 10%, transparent)"
-                : "transparent",
-              fontWeight: active ? 600 : 400,
-            }}
-            title={s.label}
-          >
-            {s.id}. {s.label}
-          </div>
-        );
-      })}
-    </div>
+    <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
+      {children}
+    </h2>
   );
 }
 
-function SettingRow({
-  label,
-  hint,
-  applied,
-  onApply,
-  disabled,
-  children,
+function Breadcrumb({
+  step,
+  setStep,
+  canGoTo,
+  activeName,
 }: {
-  label: string;
-  hint?: string;
-  applied: boolean;
-  onApply: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
+  step: StepId;
+  setStep: (s: StepId) => void;
+  canGoTo: (s: StepId) => boolean;
+  activeName: string | null;
 }) {
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-3">
-        <label className="font-jetbrains text-sm min-w-[180px]">{label}</label>
-        {children}
-        <Button
-          size="sm"
-          variant={applied ? "secondary" : "default"}
-          onClick={onApply}
-          disabled={disabled}
-        >
-          {applied ? "Applied ✓" : "Apply"}
-        </Button>
+    <div className="space-y-1">
+      <div className="flex flex-wrap gap-2">
+        {STEPS.map((s) => {
+          const active = s.id === step;
+          const enabled = canGoTo(s.id);
+          return (
+            <button
+              key={s.id}
+              onClick={() => enabled && setStep(s.id)}
+              disabled={!enabled}
+              className="px-3 py-1.5 rounded-md text-xs font-jetbrains transition-all"
+              style={{
+                background: active ? "var(--charm-cyan)" : "var(--charm-card)",
+                color: active ? "oklch(0.16 0 0)" : enabled ? "var(--charm-text)" : "var(--charm-muted)",
+                border: "1px solid var(--charm-border)",
+                opacity: enabled ? 1 : 0.45,
+                cursor: enabled ? "pointer" : "not-allowed",
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {s.id}. {s.label}
+            </button>
+          );
+        })}
       </div>
-      {hint && (
-        <p className="text-xs text-muted-foreground font-jetbrains pl-[180px]">{hint}</p>
+      {activeName && (
+        <p className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+          Dataset: <strong style={{ color: "var(--charm-text)" }}>{activeName}</strong>
+        </p>
       )}
     </div>
   );
@@ -1694,125 +1237,28 @@ function SettingRow({
 function NavRow({
   onBack,
   onForward,
-  backDisabled,
   forwardDisabled,
-  forwardLabel,
+  forwardLabel = "Continue →",
 }: {
   onBack?: () => void;
   onForward?: () => void;
-  backDisabled?: boolean;
   forwardDisabled?: boolean;
-  forwardLabel: string;
+  forwardLabel?: string;
 }) {
   return (
-    <div className="flex justify-between pt-2">
-      <Button variant="outline" onClick={onBack} disabled={backDisabled || !onBack}>
-        ← Back
-      </Button>
-      <Button onClick={onForward} disabled={forwardDisabled || !onForward}>
-        {forwardLabel}
-      </Button>
+    <div className="flex justify-between pt-2 border-t border-border">
+      <Button variant="outline" onClick={onBack} disabled={!onBack}>← Back</Button>
+      <Button onClick={onForward} disabled={forwardDisabled || !onForward}>{forwardLabel}</Button>
     </div>
   );
 }
 
-function CaptureTuner({
-  meta,
-  draftFrames,
-  draftSettle,
-  appliedFrames,
-  appliedSettle,
-  onDraftFrames,
-  onDraftSettle,
-  onApplyFrames,
-  onApplySettle,
-  disabled,
-}: {
-  meta: LabelDatasetMeta;
-  draftFrames: number;
-  draftSettle: number;
-  appliedFrames: boolean;
-  appliedSettle: boolean;
-  onDraftFrames: (n: number) => void;
-  onDraftSettle: (n: number) => void;
-  onApplyFrames: () => void;
-  onApplySettle: () => void;
-  disabled?: boolean;
-}) {
-  // Estimator uses the *applied* settings (what the sweep will actually use),
-  // not the draft, so the number doesn't lie before Apply is pressed.
-  const frames = meta.settings.frames_per_square;
-  const settleSec = meta.settings.settle_ms / 1000;
-  // Rough heuristic per square: ~10s arm overhead (pickup + place + home)
-  // + frames × (delay + ~0.8s for camera grab and warp).
-  const perSquareSec = 10 + frames * (settleSec + 0.8);
-  const totalMin = (perSquareSec * 64) / 60;
-  return (
-    <div
-      className="rounded-md border p-3 space-y-2 font-jetbrains text-xs"
-      style={{
-        borderColor: "var(--charm-border)",
-        background: "color-mix(in oklab, var(--charm-cyan) 5%, transparent)",
-      }}
-    >
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="flex flex-col gap-1">
-          <span style={{ color: "var(--charm-muted)" }}>Pictures per square</span>
-          <Input
-            type="number"
-            min={1}
-            max={20}
-            value={draftFrames}
-            disabled={disabled}
-            onChange={(e) => onDraftFrames(parseInt(e.target.value || "0", 10))}
-            className="w-20"
-          />
-        </div>
-        <Button
-          size="sm"
-          variant={appliedFrames ? "outline" : "default"}
-          disabled={disabled}
-          onClick={onApplyFrames}
-        >
-          {appliedFrames ? "Applied" : "Apply"}
-        </Button>
-        <div className="flex flex-col gap-1">
-          <span style={{ color: "var(--charm-muted)" }}>Delay between pictures (ms)</span>
-          <Input
-            type="number"
-            min={0}
-            max={5000}
-            step={50}
-            value={draftSettle}
-            disabled={disabled}
-            onChange={(e) => onDraftSettle(parseInt(e.target.value || "0", 10))}
-            className="w-28"
-          />
-        </div>
-        <Button
-          size="sm"
-          variant={appliedSettle ? "outline" : "default"}
-          disabled={disabled}
-          onClick={onApplySettle}
-        >
-          {appliedSettle ? "Applied" : "Apply"}
-        </Button>
-      </div>
-      <p style={{ color: "var(--charm-muted)" }}>
-        Active: {frames} pictures × {settleSec.toFixed(2)}s delay → ~
-        {perSquareSec.toFixed(0)}s per square × 64 ≈ {totalMin.toFixed(1)} min
-        per color sweep. (Rough estimate — arm motion adds variance.)
-      </p>
-    </div>
-  );
-}
-
-const PHASE_LABEL: Record<"idle" | "moving" | "homing" | "waiting" | "capturing", string> = {
+const PHASE_LABEL: Record<SweepPhase, string> = {
   idle: "—",
-  moving: "pick + put",
-  homing: "homing",
+  moving: "moving piece",
+  homing: "arm going home",
   waiting: "settling",
-  capturing: "capturing frames",
+  capturing: "capturing photos",
 };
 
 function SweepRunner({
@@ -1830,8 +1276,8 @@ function SweepRunner({
   color: "white" | "black";
   currentSquare: string;
   idx: number;
-  state: "idle" | "running" | "paused" | "aborted" | "done";
-  phase: "idle" | "moving" | "homing" | "waiting" | "capturing";
+  state: RunState;
+  phase: SweepPhase;
   onStart: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -1840,53 +1286,41 @@ function SweepRunner({
 }) {
   const total = ALL_SQUARES.length;
   const progress = Math.min(idx, total);
-  const phaseLabel = state === "running" ? PHASE_LABEL[phase] : PHASE_LABEL.idle;
   return (
     <div className="space-y-3">
-      <p className="text-sm font-jetbrains">
-        Sweeping <strong>{color}</strong> —{" "}
-        {state === "running" || state === "paused"
-          ? `square ${progress + 1}/${total} (${currentSquare || ALL_SQUARES[progress]})`
-          : state === "done"
-            ? `complete (${done}/${total} squares captured)`
-            : state === "aborted"
-              ? `aborted at square ${progress + 1}/${total}`
-              : "idle"}
-        {state === "running" && (
-          <span style={{ color: "var(--charm-cyan)" }}> · {phaseLabel}</span>
-        )}
-      </p>
-      <div className="w-full bg-muted rounded h-2 overflow-hidden">
-        <div
-          className="h-full"
-          style={{
-            width: `${(progress / total) * 100}%`,
-            background: "var(--charm-cyan)",
-          }}
-        />
+      <div className="flex items-center gap-3 flex-wrap">
+        <p className="text-sm font-jetbrains">
+          {state === "running" || state === "paused"
+            ? `Square ${progress + 1}/${total} — ${currentSquare || ALL_SQUARES[progress]}`
+            : state === "done"
+              ? `Complete (${done}/${total} squares)`
+              : state === "aborted"
+                ? `Stopped at square ${progress + 1}/${total}`
+                : `${done}/${total} squares captured`}
+          {state === "running" && (
+            <span style={{ color: "var(--charm-cyan)" }}> · {PHASE_LABEL[phase]}</span>
+          )}
+        </p>
+      </div>
+      <div className="w-full rounded-sm overflow-hidden h-2" style={{ background: "oklch(0.3 0 0)" }}>
+        <div className="h-full rounded-sm transition-all" style={{ width: `${(progress / total) * 100}%`, background: color === "white" ? "var(--charm-cyan)" : "var(--charm-amber)" }} />
       </div>
       <div className="flex gap-2">
         {(state === "idle" || state === "done" || state === "aborted") && (
           <Button onClick={onStart}>
-            {state === "idle" ? "Start sweep" : "Restart from current square"}
+            {state === "idle" ? "Start arm sweep" : "Resume from current square"}
           </Button>
         )}
         {state === "running" && (
           <>
-            <Button variant="outline" onClick={onPause}>
-              Pause
-            </Button>
-            <Button variant="destructive" onClick={onAbort}>
-              Abort
-            </Button>
+            <Button variant="outline" onClick={onPause}>Pause</Button>
+            <Button variant="destructive" onClick={onAbort}>Stop</Button>
           </>
         )}
         {state === "paused" && (
           <>
             <Button onClick={onResume}>Resume</Button>
-            <Button variant="destructive" onClick={onAbort}>
-              Abort
-            </Button>
+            <Button variant="destructive" onClick={onAbort}>Abort</Button>
           </>
         )}
       </div>
@@ -1894,57 +1328,30 @@ function SweepRunner({
   );
 }
 
-function CapturedGallery({
-  thumbs,
-  color,
-}: {
-  thumbs: { square: string; image: string | null }[];
-  color: "white" | "black";
-}) {
+function CapturedGallery({ thumbs, color }: { thumbs: { square: string; image: string | null }[]; color: "white" | "black" }) {
   if (thumbs.length === 0) return null;
   return (
-    <div
-      className="rounded-md border p-3 space-y-2"
-      style={{ borderColor: "var(--charm-border)" }}
-    >
-      <p className="text-xs font-jetbrains uppercase tracking-widest" style={{ color: "var(--charm-muted)" }}>
-        Captured so far ({thumbs.length}) — newest first
+    <div className="rounded-md border p-3 space-y-2" style={{ borderColor: "var(--charm-border)" }}>
+      <p className="text-[10px] font-jetbrains uppercase tracking-widest" style={{ color: "var(--charm-muted)" }}>
+        Captured ({thumbs.length}) — newest first
       </p>
       <div className="flex gap-2 overflow-x-auto pb-1">
         {thumbs.map((t) => (
-          <div
-            key={t.square}
-            className="flex flex-col items-center gap-1 shrink-0"
-            style={{ width: 56 }}
-          >
+          <div key={t.square} className="flex flex-col items-center gap-1 shrink-0" style={{ width: 56 }}>
             <div
               className="rounded border overflow-hidden flex items-center justify-center"
               style={{
-                width: 56,
-                height: 56,
-                borderColor:
-                  color === "white"
-                    ? "color-mix(in oklab, var(--charm-cyan) 40%, transparent)"
-                    : "color-mix(in oklab, var(--charm-amber, #fbbf24) 40%, transparent)",
-                background: "color-mix(in oklab, var(--charm-cyan) 4%, transparent)",
+                width: 56, height: 56,
+                borderColor: color === "white" ? "oklch(from var(--charm-cyan) l c h / 0.4)" : "oklch(from var(--charm-amber) l c h / 0.4)",
+                background: "oklch(from var(--charm-cyan) l c h / 0.04)",
               }}
             >
-              {t.image ? (
+              {t.image
                 // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={imageSrc(t.image)}
-                  alt={`${color} ${t.square}`}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-              ) : (
-                <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-                  no img
-                </span>
-              )}
+                ? <img src={imageSrc(t.image)} alt={`${color} ${t.square}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>—</span>}
             </div>
-            <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-              {t.square}
-            </span>
+            <span className="text-[10px] font-jetbrains" style={{ color: "var(--charm-muted)" }}>{t.square}</span>
           </div>
         ))}
       </div>
@@ -1953,7 +1360,6 @@ function CapturedGallery({
 }
 
 function RetakeGrid({
-  datasetName,
   color,
   meta,
   onRetake,
@@ -1967,16 +1373,14 @@ function RetakeGrid({
 }) {
   const counts = color === "white" ? meta.white : meta.black;
   const bulkCounts = color === "white" ? meta.bulk_white : meta.bulk_black;
-  // "Done" = at least one frame from either bucket. Both contribute training
-  // data, so a square that's only in bulk is still complete.
   const doneSquares = new Set<string>();
   for (const [sq, n] of Object.entries(counts ?? {})) if (n > 0) doneSquares.add(sq);
   for (const [sq, n] of Object.entries(bulkCounts ?? {})) if (n > 0) doneSquares.add(sq);
+
   return (
-    <div>
-      <p className="text-sm font-jetbrains mb-2">
-        {doneSquares.size}/64 squares captured. Hover any cell to retake (retake
-        wipes the per-square sweep frames; bulk-paint cells are preserved).
+    <div className="space-y-2">
+      <p className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+        Coverage: {doneSquares.size}/64 squares captured. Click any square to retake it.
       </p>
       <div className="grid grid-cols-8 gap-1 w-fit">
         {Array.from({ length: 8 }).map((_, row) =>
@@ -1984,27 +1388,26 @@ function RetakeGrid({
             const file = "abcdefgh"[col];
             const rank = 8 - row;
             const sq = `${file}${rank}`;
-            const captured = counts[sq] ?? 0;
+            const sweep = counts?.[sq] ?? 0;
             const bulk = bulkCounts?.[sq] ?? 0;
-            const total = captured + bulk;
+            const total = sweep + bulk;
             return (
               <button
                 key={sq}
                 type="button"
                 disabled={busy}
                 onClick={() => onRetake(sq)}
+                title={`${sq}: ${sweep} sweep + ${bulk} bulk — click to retake`}
                 className="rounded text-[10px] font-jetbrains border h-10 w-10 flex flex-col items-center justify-center hover:border-cyan-400 disabled:opacity-40"
                 style={{
-                  background:
-                    total > 0
-                      ? "color-mix(in oklab, var(--charm-cyan) 12%, transparent)"
-                      : "color-mix(in oklab, var(--charm-red, #f87171) 12%, transparent)",
+                  background: total > 0
+                    ? "oklch(from var(--charm-cyan) l c h / 0.12)"
+                    : "oklch(0.4 0.12 25 / 0.2)",
                   borderColor: "var(--charm-border)",
                 }}
-                title={`${sq}: ${captured} sweep + ${bulk} bulk — click to retake (sweep only)`}
               >
                 <span>{sq}</span>
-                <span style={{ opacity: 0.7 }}>{total}</span>
+                <span style={{ opacity: 0.7 }}>{total || ""}</span>
               </button>
             );
           }),
@@ -2014,45 +1417,30 @@ function RetakeGrid({
   );
 }
 
-function ModeToggle({
-  mode,
-  onChange,
-  disabled,
-}: {
-  mode: SweepMode;
-  onChange: (m: SweepMode) => void;
-  disabled?: boolean;
-}) {
+function ModeToggle({ mode, onChange, disabled }: { mode: SweepMode; onChange: (m: SweepMode) => void; disabled?: boolean }) {
+  const modes: { id: SweepMode; label: string; desc: string }[] = [
+    { id: "arm", label: "Arm sweep", desc: "Robot moves piece square to square automatically" },
+    { id: "manual", label: "Manual", desc: "You place each piece; system captures on command" },
+    { id: "bulk", label: "Bulk paint", desc: "Set up a whole board position and capture everything at once" },
+  ];
   return (
-    <div
-      className="rounded-md border p-2 flex gap-2 items-center font-jetbrains text-xs flex-wrap"
-      style={{ borderColor: "var(--charm-border)" }}
-    >
-      <span style={{ color: "var(--charm-muted)" }} className="px-1">Sweep mode:</span>
-      <Button
-        size="sm"
-        variant={mode === "arm" ? "default" : "outline"}
-        onClick={() => onChange("arm")}
-        disabled={disabled}
-      >
-        Arm sweep
-      </Button>
-      <Button
-        size="sm"
-        variant={mode === "manual" ? "default" : "outline"}
-        onClick={() => onChange("manual")}
-        disabled={disabled}
-      >
-        Manual (one at a time)
-      </Button>
-      <Button
-        size="sm"
-        variant={mode === "bulk" ? "default" : "outline"}
-        onClick={() => onChange("bulk")}
-        disabled={disabled}
-      >
-        Bulk paint
-      </Button>
+    <div className="flex gap-2 flex-wrap">
+      {modes.map((m) => (
+        <button
+          key={m.id}
+          onClick={() => onChange(m.id)}
+          disabled={disabled}
+          title={m.desc}
+          className="px-3 py-1.5 rounded-md text-xs font-jetbrains border transition-colors disabled:opacity-50"
+          style={{
+            background: mode === m.id ? "oklch(from var(--charm-cyan) l c h / 0.15)" : "transparent",
+            color: mode === m.id ? "var(--charm-cyan)" : "var(--charm-muted)",
+            borderColor: mode === m.id ? "oklch(from var(--charm-cyan) l c h / 0.5)" : "var(--charm-border)",
+          }}
+        >
+          {m.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -2077,48 +1465,22 @@ function BulkPaintRunner({
   onCapture: () => void;
 }) {
   const painted = Object.keys(labels).length;
-  // Pull bulk per-square counts off the metadata so the board shows how much
-  // data has already been captured per square (across all bulk sessions).
-  const bulkCounts = {
-    empty: meta.bulk_empty ?? {},
-    white: meta.bulk_white ?? {},
-    black: meta.bulk_black ?? {},
-  };
+  const bulkCounts = { empty: meta.bulk_empty ?? {}, white: meta.bulk_white ?? {}, black: meta.bulk_black ?? {} };
   return (
     <div className="space-y-3">
-      <div
-        className="rounded-md border p-3 font-jetbrains text-xs"
-        style={{
-          borderColor: "var(--charm-cyan)",
-          background: "color-mix(in oklab, var(--charm-cyan) 8%, transparent)",
-        }}
-      >
-        <p>
-          Bulk paint: place any number of {color} pieces (and other colors / empty
-          squares) on the board, paint each one with the matching brush, then
-          capture. Each painted square gets its own crop saved to{" "}
-          <code>bulk/&lt;color&gt;/&lt;sq&gt;/</code>.
-        </p>
-      </div>
-      <BulkPaintBoard
-        labels={labels}
-        onChange={setLabels}
-        busy={busy}
-        counts={bulkCounts}
-      />
-      <div className="flex items-center gap-3 font-jetbrains text-xs flex-wrap">
-        <span style={{ color: "var(--charm-muted)" }}>Photos this round:</span>
+      <p className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
+        Set up the board with any mix of pieces, paint each square with the matching color, then capture. Good for adding lots of data quickly.
+      </p>
+      <BulkPaintBoard labels={labels} onChange={setLabels} busy={busy} counts={bulkCounts} />
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>Photos this round:</label>
         <Input
-          type="number"
-          min={1}
-          max={20}
-          value={frames}
+          type="number" min={1} max={20} value={frames}
           onChange={(e) => setFrames(Math.max(1, Math.min(20, parseInt(e.target.value || "1", 10))))}
-          className="w-20"
-          disabled={busy}
+          className="w-20" disabled={busy}
         />
         <Button onClick={onCapture} disabled={busy || painted === 0}>
-          {busy ? "Capturing…" : `Capture ${painted} square${painted === 1 ? "" : "s"}`}
+          {busy ? "Capturing…" : `📷 Capture ${painted} square${painted === 1 ? "" : "s"}`}
         </Button>
       </div>
     </div>
@@ -2145,51 +1507,39 @@ function ManualSweepRunner({
   const counts = color === "white" ? meta.white : meta.black;
   const done = Object.keys(counts).filter((sq) => (counts[sq] ?? 0) > 0).length;
   const idx = ALL_SQUARES.indexOf(target);
-  const targetCaptured = (counts[target] ?? 0) > 0;
   const prev = () => setTarget(ALL_SQUARES[(idx - 1 + ALL_SQUARES.length) % ALL_SQUARES.length]);
   const next = () => setTarget(ALL_SQUARES[(idx + 1) % ALL_SQUARES.length]);
+  const targetCaptured = (counts[target] ?? 0) > 0;
+
   return (
     <div className="space-y-3">
       <div
-        className="rounded-md border p-3 flex flex-wrap items-center gap-3 font-jetbrains"
-        style={{
-          borderColor: "var(--charm-cyan)",
-          background: "color-mix(in oklab, var(--charm-cyan) 8%, transparent)",
-        }}
+        className="rounded-md border p-4 flex flex-wrap items-center gap-4 font-jetbrains"
+        style={{ borderColor: "oklch(from var(--charm-cyan) l c h / 0.4)", background: "oklch(from var(--charm-cyan) l c h / 0.06)" }}
       >
-        <div className="flex flex-col">
-          <span className="text-xs" style={{ color: "var(--charm-muted)" }}>
+        <div>
+          <p className="text-xs" style={{ color: "var(--charm-muted)" }}>
             Place a {color} {meta.settings.piece_type} on
-          </span>
-          <span className="text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
+          </p>
+          <p className="text-3xl font-semibold" style={{ color: "var(--charm-cyan)" }}>
             {target.toUpperCase()}
-          </span>
-          <span className="text-[11px]" style={{ color: "var(--charm-muted)" }}>
-            {targetCaptured
-              ? `already captured (${counts[target]} frames) — validating will overwrite`
-              : "not yet captured"}
-          </span>
+          </p>
+          <p className="text-[11px]" style={{ color: "var(--charm-muted)" }}>
+            {targetCaptured ? `already captured (${counts[target]} frames) — will add` : "not yet captured"}
+          </p>
         </div>
         <div className="flex flex-col gap-2 ml-auto">
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={prev} disabled={busy}>
-              ← Prev
-            </Button>
-            <Button size="sm" variant="outline" onClick={next} disabled={busy}>
-              Next →
-            </Button>
-            <Button size="sm" variant="outline" onClick={onPark} disabled={busy}>
-              Park arm
-            </Button>
+            <Button size="sm" variant="outline" onClick={prev} disabled={busy}>← Prev</Button>
+            <Button size="sm" variant="outline" onClick={next} disabled={busy}>Next →</Button>
+            <Button size="sm" variant="outline" onClick={onPark} disabled={busy}>Park arm</Button>
           </div>
           <Button onClick={onValidate} disabled={busy}>
-            {busy ? "Capturing…" : `Validate & capture ${target.toUpperCase()}`}
+            {busy ? "Capturing…" : `📷 Capture ${target.toUpperCase()}`}
           </Button>
         </div>
       </div>
-      <p className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>
-        {done}/64 squares captured. Click any square below to jump there.
-      </p>
+      <p className="text-xs font-jetbrains" style={{ color: "var(--charm-muted)" }}>{done}/64 captured · click grid to jump</p>
       <div className="grid grid-cols-8 gap-1 w-fit">
         {Array.from({ length: 8 }).map((_, row) =>
           Array.from({ length: 8 }).map((_, col) => {
@@ -2206,18 +1556,14 @@ function ManualSweepRunner({
                 onClick={() => setTarget(sq)}
                 className="rounded text-[10px] font-jetbrains border h-10 w-10 flex flex-col items-center justify-center hover:border-cyan-400 disabled:opacity-40"
                 style={{
-                  background: isTarget
-                    ? "color-mix(in oklab, var(--charm-cyan) 35%, transparent)"
-                    : captured > 0
-                      ? "color-mix(in oklab, var(--charm-cyan) 12%, transparent)"
-                      : "color-mix(in oklab, var(--charm-red, #f87171) 12%, transparent)",
+                  background: isTarget ? "oklch(from var(--charm-cyan) l c h / 0.35)" : captured > 0 ? "oklch(from var(--charm-cyan) l c h / 0.12)" : "oklch(0.4 0.12 25 / 0.15)",
                   borderColor: isTarget ? "var(--charm-cyan)" : "var(--charm-border)",
                   borderWidth: isTarget ? 2 : 1,
                 }}
-                title={`${sq}: ${captured} frames${isTarget ? " — current target" : ""}`}
+                title={`${sq}: ${captured} frames${isTarget ? " — current" : ""}`}
               >
                 <span>{sq}</span>
-                <span style={{ opacity: 0.7 }}>{captured}</span>
+                <span style={{ opacity: 0.7 }}>{captured || ""}</span>
               </button>
             );
           }),
@@ -2229,13 +1575,15 @@ function ManualSweepRunner({
 
 function AccuracyReport({ accuracy }: { accuracy: LabelAccuracyReport }) {
   const overall = accuracy.overall;
+  const pct = (overall.accuracy * 100).toFixed(1);
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <p className="text-sm font-jetbrains">
-        Overall LOO accuracy:{" "}
-        <strong>
-          {(overall.accuracy * 100).toFixed(1)}% ({overall.correct}/{overall.total})
+        Leave-one-out accuracy:{" "}
+        <strong style={{ color: overall.accuracy >= 0.95 ? "var(--charm-cyan)" : overall.accuracy >= 0.8 ? "var(--charm-amber)" : "oklch(0.7 0.22 25)" }}>
+          {pct}%
         </strong>
+        <span style={{ color: "var(--charm-muted)" }}> ({overall.correct}/{overall.total})</span>
       </p>
       <div className="grid grid-cols-8 gap-1 w-fit">
         {Array.from({ length: 8 }).map((_, row) =>
@@ -2245,17 +1593,13 @@ function AccuracyReport({ accuracy }: { accuracy: LabelAccuracyReport }) {
             const sq = `${file}${rank}`;
             const entry = accuracy.squares[`${row},${col}`];
             const acc = entry?.accuracy ?? 0;
-            const hue = Math.round(acc * 120); // 0=red, 120=green
+            const hue = Math.round(acc * 120);
             return (
               <div
                 key={sq}
                 title={`${sq}: ${(acc * 100).toFixed(1)}% (${entry?.correct ?? 0}/${entry?.total ?? 0})`}
                 className="rounded text-[10px] font-jetbrains border h-10 w-10 flex flex-col items-center justify-center"
-                style={{
-                  background: `hsl(${hue} 50% 25%)`,
-                  borderColor: "var(--charm-border)",
-                  color: "white",
-                }}
+                style={{ background: `hsl(${hue} 50% 25%)`, borderColor: "var(--charm-border)", color: "white" }}
               >
                 <span>{sq}</span>
                 <span style={{ opacity: 0.85 }}>{(acc * 100).toFixed(0)}%</span>

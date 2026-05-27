@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
@@ -225,6 +226,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Serial activity log ────────────────────────────────────────────────────
+_SERIAL_LOG: deque = deque(maxlen=300)
+
+def _serial_log(direction: str, text: str) -> None:
+    _SERIAL_LOG.append({"ts": time.time(), "dir": direction, "text": text.strip()})
 
 class PipelineParams(BaseModel):
     auto_detect_board: bool = False
@@ -934,6 +941,11 @@ def disconnect_robot():
     return {"status": "disconnected"}
 
 
+@app.get("/api/serial/log")
+def get_serial_log(n: int = 150):
+    return {"entries": list(_SERIAL_LOG)[-n:]}
+
+
 @app.get("/api/robot/position")
 def robot_position(port: Optional[str] = None, baud: int = ROBOT_BAUD_DEFAULT):
     try:
@@ -956,6 +968,8 @@ def robot_command(payload: RobotCommandPayload):
             f"baud={payload.baud} commands={commands}",
             flush=True,
         )
+        for cmd in commands:
+            _serial_log("tx", cmd)
         stop_on = "Calibration done" if payload.command == "arm-calibrate" else None
         responses = robot_adapter.send_commands(
             commands,
@@ -966,6 +980,8 @@ def robot_command(payload: RobotCommandPayload):
             stop_on=stop_on,
         )
         print(f"[robot] responses={responses}", flush=True)
+        for r in responses:
+            _serial_log("rx", r)
         if payload.command == "arm-calibrate" and not any("Calibration done" in line for line in responses):
             raise HTTPException(
                 502,

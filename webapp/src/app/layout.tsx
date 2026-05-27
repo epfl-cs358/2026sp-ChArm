@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
+import SerialSniffer from "@/components/SerialSniffer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CalibrationProvider } from "@/lib/calibration-context";
 
@@ -16,7 +17,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <CalibrationProvider>
           <TooltipProvider delay={120}>
             <Sidebar />
-            <main className="flex-1 overflow-auto">{children}</main>
+            <main className="flex-1 overflow-auto pb-8">{children}</main>
+            <SerialSniffer />
           </TooltipProvider>
         </CalibrationProvider>
       </body>

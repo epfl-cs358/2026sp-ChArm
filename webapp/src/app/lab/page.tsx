@@ -15,6 +15,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+const OCCUPANCY_STORAGE_KEY = "charm.occupancy-threshold";
+
 const DEBUG_PANELS = [
   { key: "original", label: "Raw" },
   { key: "board_edges_debug", label: "Board Edges" },
@@ -35,6 +37,18 @@ export default function LabPage() {
   const [showArucoCalibration, setShowArucoCalibration] = useState(false);
   const [rawImages, setRawImages] = useState<{ name: string; path: string }[]>([]);
   const [selectedRawImage, setSelectedRawImage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(OCCUPANCY_STORAGE_KEY);
+    if (stored) {
+      const parsed = parseFloat(stored);
+      if (Number.isFinite(parsed)) setOccupancyThreshold(Math.max(0.5, Math.min(80, parsed)));
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(OCCUPANCY_STORAGE_KEY, String(occupancyThreshold));
+  }, [occupancyThreshold]);
 
   useEffect(() => {
     api.listImages()
@@ -139,7 +153,7 @@ export default function LabPage() {
                 : "border-border text-text-muted hover:text-text hover:border-border-bright"
             }`}
           >
-            Warp calibration
+            Set Image Warp
           </button>
           <button
             onClick={() => setShowArucoCalibration((v) => !v)}

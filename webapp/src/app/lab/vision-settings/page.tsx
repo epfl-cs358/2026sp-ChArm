@@ -2,9 +2,27 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { api, CvRouterConfig, ValidatedDatasetStats } from "@/lib/api";
+import { api, CnnActiveModel, CnnModelMeta, CvRouterConfig, ValidatedDatasetStats } from "@/lib/api";
+import { DEFAULT_PARAMS } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { HelpCircle, Loader2, Zap } from "lucide-react";
+
+const OCCUPANCY_STORAGE_KEY = "charm.occupancy-threshold";
+
+function Help({ text }: { text: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={
+        <span className="cursor-help inline-flex items-center">
+          <HelpCircle className="size-3" style={{ color: "var(--charm-muted)", opacity: 0.6 }} />
+        </span>
+      } />
+      <TooltipContent className="max-w-xs font-jetbrains text-[11px]">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function SectionLabel({
   label,
@@ -41,6 +59,48 @@ export default function VisionSettingsPage() {
   const [stats, setStats] = useState<ValidatedDatasetStats | null>(null);
   const [busy, setBusy] = useState(false);
   const [datasetDraft, setDatasetDraft] = useState<string>("");
+  const [showAdvancedVision, setShowAdvancedVision] = useState(false);
+  const [occupancyThreshold, setOccupancyThreshold] = useState(DEFAULT_PARAMS.occupancy_threshold);
+  const [cnnModels, setCnnModels] = useState<CnnModelMeta[]>([]);
+  const [activeModel, setActiveModel] = useState<CnnActiveModel | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(OCCUPANCY_STORAGE_KEY);
+    if (stored) {
+      const parsed = parseFloat(stored);
+      if (Number.isFinite(parsed)) setOccupancyThreshold(Math.max(0.5, Math.min(80, parsed)));
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(OCCUPANCY_STORAGE_KEY, String(occupancyThreshold));
+  }, [occupancyThreshold]);
+
+  const refreshModels = useCallback(async () => {
+    try {
+      const [models, active] = await Promise.all([api.cnnListModels(), api.cnnActiveModel()]);
+      setCnnModels(models.models);
+      setActiveModel(active);
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
+  const activateModel = useCallback(async (run_id: string) => {
+    setModelBusy(true);
+    try {
+      await api.cnnActivateModel(run_id);
+      await refreshModels();
+      // Sync cnn_active status in cfg
+      const updated = await api.getCvConfig();
+      setCfg(updated);
+    } catch {
+      // non-fatal
+    } finally {
+      setModelBusy(false);
+    }
+  }, [refreshModels]);
 
   const refresh = useCallback(async () => {
     try {
@@ -54,6 +114,7 @@ export default function VisionSettingsPage() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refreshModels(); }, [refreshModels]);
 
   const patch = useCallback(async (p: Partial<CvRouterConfig>) => {
     setBusy(true);
@@ -93,9 +154,12 @@ export default function VisionSettingsPage() {
 
             <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
               <CardHeader className="px-5 pt-5 pb-2">
-                <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
-                  Pipeline Router
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
+                    Pipeline Router
+                  </h2>
+                  <Help text="Chooses which vision method runs first on each scan. The other method acts as automatic fallback if the primary fails after N attempts." />
+                </div>
               </CardHeader>
               <CardContent className="p-5 space-y-5">
                 {/* Primary pipeline */}
@@ -136,7 +200,10 @@ export default function VisionSettingsPage() {
                 {/* Attempts per pipeline */}
                 <div>
                   <label className="font-jetbrains text-xs flex items-center justify-between" style={{ color: "var(--charm-text)" }}>
-                    <span>Attempts per pipeline</span>
+                    <span className="flex items-center gap-1.5">
+                      Attempts per pipeline
+                      <Help text="How many fresh-frame captures the primary pipeline gets before the fallback takes over. Higher = more retries but slower scans." />
+                    </span>
                     <span style={{ color: "var(--charm-cyan)" }}>{cfg.attempts_each}</span>
                   </label>
                   <input
@@ -166,33 +233,85 @@ export default function VisionSettingsPage() {
             />
 
             <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-              <CardContent className="p-5 space-y-3">
-                <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                  The <strong style={{ color: "var(--charm-text)" }}>occupancy threshold</strong> and warp calibration
-                  are adjusted live on the{" "}
-                  <Link
-                    href="/lab"
-                    className="underline"
-                    style={{ color: "var(--charm-cyan)" }}
-                  >
-                    Vision Pipeline page
-                  </Link>
-                  .
-                </p>
+              <CardContent className="p-5 space-y-4">
+                {/* Auto-save */}
+                <div>
+                  <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>
+                    <input
+                      type="checkbox"
+                      checked={cfg.auto_save_validated}
+                      disabled={busy}
+                      onChange={(e) => { void patch({ auto_save_validated: e.target.checked }); }}
+                    />
+                    Auto-save validated frames to dataset
+                  </label>
+                  <p className="mt-1 font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                    When the vision pipeline produces a high-confidence board read, it saves the frame to the CNN
+                    training dataset. Disable to curate captures manually.
+                  </p>
+                </div>
 
-                <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-text)" }}>
-                  <input
-                    type="checkbox"
-                    checked={cfg.auto_save_validated}
-                    disabled={busy}
-                    onChange={(e) => { void patch({ auto_save_validated: e.target.checked }); }}
-                  />
-                  Auto-save validated frames to dataset
-                </label>
-                <p className="font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
-                  When the vision pipeline produces a high-confidence board read, it saves the frame to the CNN
-                  training dataset below. Disable this if you want to curate captures manually.
-                </p>
+                {/* Advanced Vision Settings */}
+                <div className="rounded-md border" style={{ borderColor: "var(--charm-border)" }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedVision((v) => !v)}
+                    className="flex w-full items-center justify-between px-4 py-3 font-jetbrains text-xs"
+                    style={{ color: "var(--charm-text)" }}
+                  >
+                    <span className="font-semibold">Advanced Settings</span>
+                    <span style={{ color: "var(--charm-muted)" }}>{showAdvancedVision ? "▲" : "▼"}</span>
+                  </button>
+                  {showAdvancedVision && (
+                    <div className="space-y-5 border-t px-4 py-4" style={{ borderColor: "var(--charm-border)" }}>
+                      {/* Occupancy threshold */}
+                      <div>
+                        <label className="flex items-center justify-between font-jetbrains text-xs mb-2" style={{ color: "var(--charm-text)" }}>
+                          <span>Occupancy Threshold</span>
+                          <span style={{ color: "var(--charm-cyan)" }}>{occupancyThreshold.toFixed(1)}</span>
+                        </label>
+                        <input
+                          type="range"
+                          min={0.5}
+                          max={80}
+                          step={0.5}
+                          value={occupancyThreshold}
+                          onChange={(e) => setOccupancyThreshold(Number(e.target.value))}
+                          className="w-full"
+                        />
+                        <div className="mt-1 flex justify-between font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                          <span>0.5 — sensitive</span>
+                          <span>default: {DEFAULT_PARAMS.occupancy_threshold}</span>
+                          <span>80 — coarse</span>
+                        </div>
+                        <p className="mt-1 font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                          Minimum score for a square to count as occupied. Lower values detect fainter pieces.
+                          Saved automatically and shared with the Vision Pipeline page.
+                        </p>
+                      </div>
+
+                      {/* Warp calibration */}
+                      <div
+                        className="flex items-center justify-between gap-3 rounded-md border px-4 py-3"
+                        style={{ borderColor: "var(--charm-border)" }}
+                      >
+                        <div>
+                          <p className="font-jetbrains text-xs font-semibold" style={{ color: "var(--charm-text)" }}>
+                            Set Image Warp
+                          </p>
+                          <p className="mt-0.5 font-jetbrains text-[10px]" style={{ color: "var(--charm-muted)" }}>
+                            Drag board corners to fix perspective. Opens the Vision Pipeline page.
+                          </p>
+                        </div>
+                        <Link href="/lab">
+                          <Button size="sm" variant="outline" className="font-jetbrains shrink-0">
+                            Open →
+                          </Button>
+                        </Link>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </CardContent>
             </Card>
           </section>
@@ -205,24 +324,86 @@ export default function VisionSettingsPage() {
               description="Neural network model status and the dataset that grows during games for future training."
             />
 
+            {/* Active model selector */}
             <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
               <CardHeader className="px-5 pt-5 pb-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
+                      Active Model
+                    </h2>
+                    <Help text="The CNN model currently loaded for board recognition. Only one model can be active at a time. Activate a model to use it for game scans." />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={refreshModels} disabled={modelBusy} className="font-jetbrains">
+                      refresh
+                    </Button>
+                    <span
+                      className="font-jetbrains text-[10px] px-2 py-0.5 rounded"
+                      style={{
+                        color: cfg.cnn_active ? "var(--charm-cyan)" : "var(--charm-amber)",
+                        border: `1px solid ${cfg.cnn_active ? "oklch(from var(--charm-cyan) l c h / 0.4)" : "oklch(from var(--charm-amber) l c h / 0.4)"}`,
+                        background: cfg.cnn_active
+                          ? "oklch(from var(--charm-cyan) l c h / 0.08)"
+                          : "oklch(from var(--charm-amber) l c h / 0.08)",
+                      }}
+                    >
+                      {cfg.cnn_active ? "loaded" : "no model"}
+                    </span>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="px-5 pb-5 space-y-2">
+                {cnnModels.length === 0 ? (
+                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
+                    No trained models found. Train one in the{" "}
+                    <Link href="/lab/cnn" className="underline" style={{ color: "var(--charm-cyan)" }}>CNN Wizard</Link>.
+                  </p>
+                ) : (
+                  cnnModels.map((m) => {
+                    const isActive = activeModel?.run_id === m.run_id;
+                    return (
+                      <div
+                        key={m.run_id}
+                        className="flex items-center justify-between rounded-md border px-3 py-2"
+                        style={{
+                          borderColor: isActive ? "oklch(from var(--charm-cyan) l c h / 0.5)" : "var(--charm-border)",
+                          background: isActive ? "oklch(from var(--charm-cyan) l c h / 0.07)" : "transparent",
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Zap className="size-3 shrink-0" style={{ color: isActive ? "var(--charm-cyan)" : "var(--charm-muted)" }} />
+                          <div className="font-jetbrains text-xs">
+                            <span style={{ color: isActive ? "var(--charm-cyan)" : "var(--charm-text)" }}>{m.run_id}</span>
+                            <span className="ml-2" style={{ color: "var(--charm-muted)" }}>
+                              {m.dataset ?? "?"} · val {m.val_acc != null ? `${(m.val_acc * 100).toFixed(1)}%` : "?"}
+                            </span>
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant={isActive ? "outline" : "default"}
+                          disabled={modelBusy || isActive}
+                          onClick={() => void activateModel(m.run_id)}
+                          className="font-jetbrains"
+                        >
+                          {modelBusy && isActive ? <Loader2 className="size-3 animate-spin" /> : isActive ? "active" : "activate"}
+                        </Button>
+                      </div>
+                    );
+                  })
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Training dataset */}
+            <Card className="mt-3" style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
+              <CardHeader className="px-5 pt-5 pb-2">
+                <div className="flex items-center gap-2">
                   <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>
                     Training Dataset
                   </h2>
-                  <span
-                    className="font-jetbrains text-[10px] px-2 py-0.5 rounded"
-                    style={{
-                      color: cfg.cnn_active ? "var(--charm-cyan)" : "var(--charm-amber)",
-                      border: `1px solid ${cfg.cnn_active ? "oklch(from var(--charm-cyan) l c h / 0.4)" : "oklch(from var(--charm-amber) l c h / 0.4)"}`,
-                      background: cfg.cnn_active
-                        ? "oklch(from var(--charm-cyan) l c h / 0.08)"
-                        : "oklch(from var(--charm-amber) l c h / 0.08)",
-                    }}
-                  >
-                    {cfg.cnn_active ? "model loaded" : "no active model"}
-                  </span>
+                  <Help text="The dataset where validated board scans are saved automatically. Used to train new CNN models in the CNN Wizard." />
                 </div>
               </CardHeader>
               <CardContent className="p-5 space-y-4">

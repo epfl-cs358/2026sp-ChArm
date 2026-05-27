@@ -1536,7 +1536,7 @@ export default function Dashboard() {
             title="Manually calibrate the board warp / inner grid used by the CNN scan."
           >
             <Crosshair className="size-4" />
-            Manual calibration
+            Set Image Warp
           </Button>
           <Button
             onClick={handlePrimaryAction}
@@ -1551,8 +1551,6 @@ export default function Dashboard() {
           </Button>
         </div>
       </div>
-
-      <FlowRail state={turnState} armCalibrated={armCalibrated} />
 
       {error && (
         <div className="rounded-md border px-4 py-3 text-sm font-jetbrains flex items-center gap-2"
@@ -1608,64 +1606,6 @@ export default function Dashboard() {
                 />
               )}
             </svg>
-            <details className="rounded-md border border-border p-3">
-              <summary className="cursor-pointer font-jetbrains text-xs font-semibold" style={{ color: "var(--charm-text)" }}>Arm debug</summary>
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                    <input type="checkbox" checked={armDebug} onChange={(e) => setArmDebug(e.target.checked)} />
-                    target mode
-                  </label>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  {(["x", "y"] as const).map((axis) => (
-                    <label key={axis} className="space-y-1">
-                      <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>{axis} target</span>
-                      <input type="range" min={-0.5} max={8.5} step="0.1" value={armDebugTarget[axis]}
-                        onChange={(e) => setArmDebugTarget((c) => ({ ...c, [axis]: Number(e.target.value) }))} className="w-full" />
-                      <span className="font-jetbrains text-xs" style={{ color: "var(--charm-cyan)" }}>{armDebugTarget[axis].toFixed(1)}</span>
-                    </label>
-                  ))}
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1">
-                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>arm opacity</span>
-                    <input type="range" min="0.15" max="1" step="0.05" value={armOpacity} onChange={(e) => setArmOpacity(Number(e.target.value))} className="w-full" />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>expected opacity</span>
-                    <input type="range" min="0" max="0.7" step="0.05" value={expectedOpacity} onChange={(e) => setExpectedOpacity(Number(e.target.value))} className="w-full" />
-                  </label>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="flex items-center gap-2 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-                    <input type="checkbox" checked={scaraPiecesVisible} onChange={(e) => setScaraPiecesVisible(e.target.checked)} />
-                    pieces visible
-                  </label>
-                  <label className="space-y-1">
-                    <span className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>pieces opacity</span>
-                    <input type="range" min="0.05" max="1" step="0.05" value={scaraPiecesOpacity} onChange={(e) => setScaraPiecesOpacity(Number(e.target.value))} className="w-full" />
-                  </label>
-                </div>
-              </div>
-            </details>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-md border border-border p-3">
-                <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>a1</p>
-                <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{armAngles.a1.toFixed(1)} deg</p>
-              </div>
-              <div className="rounded-md border border-border p-3">
-                <p className="font-jetbrains text-[10px] uppercase" style={{ color: "var(--charm-muted)" }}>a2</p>
-                <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{armAngles.a2.toFixed(1)} deg</p>
-              </div>
-            </div>
-            <div className="rounded-md border border-border p-3">
-              <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Robot command preview</p>
-              <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-text)" }}>{robotMove ? `${robotMove.from} -> ${robotMove.to}` : "waiting for accepted human move"}</p>
-            </div>
-            <div className="max-h-28 overflow-auto rounded-md border border-border p-3 font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>
-              {moveLog.length ? moveLog.slice(-8).map((line, index) => <p key={`${line}-${index}`}>{line}</p>) : <p>No moves yet.</p>}
-            </div>
           </CardContent>
         </Card>
         </div>
@@ -1810,56 +1750,6 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          {/* Game State card */}
-          <Card style={{ background: "var(--charm-card)", borderColor: "var(--charm-border)" }}>
-            <CardHeader className="px-4 pt-4 pb-2 flex-row items-center justify-between">
-              <h2 className="font-jetbrains text-sm font-semibold" style={{ color: "var(--charm-text)" }}>Game State</h2>
-              <label className="flex items-center gap-2 font-jetbrains text-[11px]" style={{ color: "var(--charm-muted)" }}>
-                <input
-                  type="checkbox"
-                  checked={robotArmPlay}
-                  onChange={(e) => setRobotArmPlay(e.target.checked)}
-                />
-                Robot Arm Play
-              </label>
-            </CardHeader>
-            <CardContent className="px-4 pb-4 space-y-3">
-              <LogicalBoard
-                game={game}
-                lastMove={lastMove}
-                selectedSquare={selectedSquare}
-                legalTargets={legalTargets}
-                onSquareClick={handleSquareClick}
-                disabled={!gameSessionStarted || manualBusy || game.isGameOver()}
-              />
-              {!gameSessionStarted && (
-                <Button
-                  className="w-full font-jetbrains"
-                  variant="outline"
-                  onClick={() => {
-                    pendingStart.current = (color) => void startSimulationSession(color);
-                    setShowColorModal(true);
-                  }}
-                  disabled={manualBusy}
-                >
-                  {manualBusy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                  Start Game (click-to-move)
-                </Button>
-              )}
-              <div className="grid grid-cols-1 gap-2">
-                <div className="rounded-md border border-border p-2">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Turn</p>
-                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>
-                    {game.isGameOver() ? "Game over" : game.turn() === "w" ? "White to move" : "Black to move"}
-                  </p>
-                </div>
-                <div className="rounded-md border border-border p-2">
-                  <p className="font-jetbrains text-xs" style={{ color: "var(--charm-muted)" }}>Last inferred move</p>
-                  <p className="mt-1 font-jetbrains text-sm" style={{ color: "var(--charm-cyan)" }}>{stepResult?.inference.move_uci ?? lastMove ?? "none"}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
         </div>
       </div>
 
@@ -2143,7 +2033,7 @@ export default function Dashboard() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b px-4 py-2" style={{ borderColor: "var(--charm-border)" }}>
-              <span className="font-jetbrains text-sm font-semibold text-white">Manual Calibration</span>
+              <span className="font-jetbrains text-sm font-semibold text-white">Set Image Warp</span>
               <button
                 onClick={() => setShowManualCalibrationModal(false)}
                 className="font-jetbrains text-xs"

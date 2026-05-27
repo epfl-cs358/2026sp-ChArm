@@ -223,10 +223,6 @@ void handleRoot() {
 
       <button onclick="refreshImage()">Capture</button>
 
-      <div>
-        <img id="photo" src="/capture?t=0" alt="camera image">
-      </div>
-
       <div class="controls">
         <div class="row">
           <label for="brightness">Brightness</label>
@@ -268,23 +264,9 @@ void handleRoot() {
           <input id="ae_level" type="range" min="-2" max="2" step="1" value="0" oninput="applyRange(this)">
           <span class="value" id="ae_levelVal">0</span>
         </div>
-        <div class="row">
-          <label for="agc_gain">AGC Gain</label>
-          <input id="agc_gain" type="range" min="0" max="30" step="1" value="0" oninput="applyRange(this)">
-          <span class="value" id="agc_gainVal">0</span>
-        </div>
-        <div class="row">
-          <label for="special_effect">Effect</label>
-          <input id="special_effect" type="range" min="0" max="6" step="1" value="0" oninput="applyRange(this)">
-          <span class="value" id="special_effectVal">0</span>
-        </div>
         <div class="toggle">
           <input id="awb" type="checkbox" checked onchange="applyToggle(this)">
           <label for="awb">Auto White Balance</label>
-        </div>
-        <div class="toggle">
-          <input id="awb_gain" type="checkbox" checked onchange="applyToggle(this)">
-          <label for="awb_gain">AWB Gain</label>
         </div>
         <div class="toggle">
           <input id="exposure_ctrl" type="checkbox" checked onchange="applyToggle(this)">
@@ -294,19 +276,14 @@ void handleRoot() {
           <input id="gain_ctrl" type="checkbox" checked onchange="applyToggle(this)">
           <label for="gain_ctrl">Auto Gain</label>
         </div>
-        <div class="toggle">
-          <input id="hmirror" type="checkbox" onchange="applyToggle(this)">
-          <label for="hmirror">Mirror</label>
-        </div>
-        <div class="toggle">
-          <input id="vflip" type="checkbox" onchange="applyToggle(this)">
-          <label for="vflip">Flip</label>
-        </div>
+      </div>
+
+      <div>
+        <img id="photo" src="/capture?t=0" alt="camera image">
       </div>
 
       <div class="info">
         <p>Endpoint: <code>/capture</code></p>
-        <p>Options: <code>/options</code></p>
         <p>Status: <code>/status</code></p>
       </div>
 
@@ -321,6 +298,7 @@ void handleRoot() {
           if (valueEl) {
             valueEl.textContent = el.value;
           }
+
           fetch('/options?' + encodeURIComponent(el.id) + '=' + encodeURIComponent(el.value));
         }
 
@@ -566,6 +544,7 @@ void setup() {
     server.on("/options", HTTP_GET, handleOptions);
     server.on("/status", HTTP_GET, handleStatus);
     server.onNotFound(handleNotFound);
+
     server.begin();
 
     MegaSerial.print("WIFI_OK ");
