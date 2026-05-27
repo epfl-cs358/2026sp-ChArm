@@ -286,6 +286,7 @@ function Step2Build({
   preview,
   loadPreview,
   onContinue,
+  onReset,
 }: {
   source: string | null;
   outputName: string;
@@ -295,6 +296,7 @@ function Step2Build({
   preview: Record<string, string[]> | null;
   loadPreview: () => void;
   onContinue: () => void;
+  onReset: () => void;
 }) {
   const pct =
     buildStatus && buildStatus.frames_total > 0
@@ -310,9 +312,13 @@ function Step2Build({
           <span style={{ color: "var(--charm-text)" }}>cnn_{outputName}</span>
         </div>
 
-        {!buildId && (
+        {!buildId ? (
           <Button size="sm" onClick={startBuild} disabled={!source || !outputName.trim()}>
             start build
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" onClick={onReset}>
+            ↺ build new dataset
           </Button>
         )}
 
@@ -886,6 +892,13 @@ export default function CnnWizardPage() {
     };
   }, [buildId, setBuildId]);
 
+  const resetBuild = useCallback(() => {
+    setBuildId(null);
+    setBuildStatus(null);
+    setBuiltOutput(null);
+    setPreview(null);
+  }, []);
+
   const startBuild = useCallback(async () => {
     if (!pickedSource || !outputName.trim()) return;
     setPreview(null);
@@ -1066,6 +1079,7 @@ export default function CnnWizardPage() {
           preview={preview}
           loadPreview={loadPreview}
           onContinue={() => setStep(3)}
+          onReset={resetBuild}
         />
       )}
       {step === 3 && (

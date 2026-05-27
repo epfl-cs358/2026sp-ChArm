@@ -24,13 +24,13 @@ _PYTHON_CODE_DIR = Path(__file__).resolve().parents[3]
 CV_TUNING_PATH = _PYTHON_CODE_DIR / "cv_tuning.json"
 
 _CV_TUNING_DEFAULTS = {
-    "occupancy_threshold": 4.0,
+    "occupancy_threshold": 12.0,
     "occupancy_delta_threshold": 12.0,
     "canny_low": 15,
     "canny_high": 50,
     "occupancy_std_weight": 0.4,
-    "white_threshold": 80.0,
-    "black_threshold": 80.0,
+    "white_threshold": 90.0,
+    "black_threshold": 90.0,
     "white_delta_threshold": 5.0,
     "black_delta_threshold": -30.0,
 }

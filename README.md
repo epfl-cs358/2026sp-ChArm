@@ -82,51 +82,43 @@ The project is organized so that hardware control and chess/vision logic can be 
 
   ### Electronics and wiring
 
+**main arduino circuit**
   - **Arduino Mega 2560** — motion control, calibration, EEPROM persistence
   - **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
   - **ESP32-WROOM UI box** — 16×2 LCD + rotary encoder/button, TCP link to host
   - **3× STEP/DIR stepper drivers**
-  - **4× limit switches** — J1 home, 2x J2 home, Z bottom
-  - **Power supply** 
+  - **4× limit switches** — J1 home, 2x J2 home, Z bottom. Connected to a veroboard in a pull up manner that's read by the arduino.
+  - **Power supply** : 12V at 5A to power the motor (through the CNC shield). To power 5V components(camera, servo,...) it uses a buck converter.
 
-## Hardware Summary
+**UI box**
+- only needs 5V power which is split to the correct pin on a veroboard. Data pins(of the lcd and the button) are connected to an esp32 to handle the transmission.
 
-The physical system is centered around:
 
-- **Arduino Mega 2560**
-- **Two SCARA rotational joints**
-- **One Z-axis lead screw**
-- **Servo gripper**
-- **Limit switches**
-- **ESP32-CAM** for board capture
-- **ESP32D** for the player-facing LCD/button interface
-- **16×2 LCD + rotary encoder/button**
+<img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit" width=30%/>
 
-### Fabrication Tools
+   ### Fabrication Tools
 
-- **metal lathe and drill press** used to machine the flanges at the base
-- **3D printer** used for a lot of parts around the arm.
-- **laser cutter** for structural parts that would not print well.
-- **soldering equipment** for wiring and connectors
+   - **metal lathe and drill press** used to machine the flanges at the base
+   - **3D printer** used for a lot of parts around the arm.
+   - **laser cutter** for structural parts that would not print well.
+   - **soldering equipment** for wiring and connectors
 
 ### CAD Overview
-// TODO
-// Add CAD files
-// Add Building instruction
 
-### Electronics and Wiring
+The CAD files for the printed and laser-cut parts live in [docs/CAD/](docs/CAD/).
 
-<img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit"/>
+**Build order (high level)**
 
-**Power**
-- A 12V Power supply gives power to the motors through the CNC shield and, through a 12V to 5V buck converter, powers the camera, limit switches, UI ESP32 and gripper servo.
+1. Machine the base flanges on the lathe/drill press and mount the base stepper and the J1 pulley.
+2. Assemble the SCARA linkage: print the two 250 mm links, fit the J1/J2 belts and pulleys at the documented tooth ratios, and join the forearm to the elbow joint.
+3. Build the Z stage: mount the lead screw, its stepper, and the carriage that carries the gripper.
+4. Mount the servo gripper on the Z carriage.
+5. Fit the limit switches at the J1, J2, and Z-bottom home positions.
+6. Mount the ESP32-CAM above the board with a clear top-down view.
+7. Assemble the UI box (LCD + rotary encoder) and the electronics enclosure around the Arduino/CNC shield.
+8. Wire everything per the circuit diagram, then run homing and calibration before the first game.
 
-**Sub-circuits**
-- **UI Box** : the box receives 5V and the veroboard handles powering the LCD 1602A and Rotary Encoder. All signals are coming from the ESP-32D and sent via Wi-Fi to the computer. 
-   - The LCD needs a potentiometer to the VO pin for the display contrast and the LCD LED+ pin needs 3.3V so we have 5V going through a 220 ohm resistor.
--  **Limit Switches** : A stripboard handles the current going through the switches. When the switch is pressed, the current is diverted and signals the CNC shield. We use small resistors to avoid short circuits. 
-
-The main production firmware pin assignments are defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h).
+<!-- TODO: add CAD renders, exported STLs, and per-part print settings -->
 
 **Bill of Materials**
 
@@ -148,43 +140,53 @@ The main production firmware pin assignments are defined in [arduino_code/src/ha
 | 3 | A4988 Motor Drivers |
 | 2 | Wago 221-415 |
 
-**Steppers (STEP / DIR / shared ENABLE)**
+### Configuration Files
 
-| Signal | Pin | Signal | Pin |
-|---|---:|---|---:|
-| X / J1 STEP | 2 | X / J1 DIR | 5 |
-| Y / J2 STEP | 3 | Y / J2 DIR | 6 |
-| Z STEP | 4 | Z DIR | 7 |
-| ENABLE | 8 |  |  |
+Two firmware headers hold the values worth checking whenever the robot is rebuilt or re-tuned:
 
-**Limit switches**
-
-| Switch | Pin |
-|---|---:|
-| J1 home | 9 |
-| J2 home | 10 |
-| Z bottom | 11 |
-
-**Other I/O**
-
-- Gripper servo: pin `46`
-
-### Motion Constants
-
-The motion and geometry constants live in [arduino_code/src/hardware/src/config.h](arduino_code/src/hardware/src/config.h). These values should be checked whenever the robot is rebuilt or recalibrated.
-
-Important examples:
-
-- motor steps/rev and microstepping
-- SCARA gear ratios
-- link lengths
-- lead screw conversion to `STEPS_PER_MM`
-- gripper open/close angles
-- pick/place Z presets
+- [config.h](arduino_code/src/hardware/src/config.h) — motion and geometry constants (gear ratios, link lengths, steps/mm, gripper angles, pick/place heights).
+- [pins.h](arduino_code/src/hardware/src/pins.h) — the microcontroller pin assignments.
 
 ## Software Architecture
 
-### Arduino Side
+ChArm is a distributed system. A Python backend orchestrates the game and talks
+to a web/embedded frontend, three microcontrollers, and a chess engine. The
+backend — `webapp_backend/api_server.py`, a FastAPI service on port `8765` — is
+the single source of truth: both the webapp and the on-robot LCD drive the
+**same** game session through it.
+
+```mermaid
+flowchart LR
+    WEB["Webapp<br/>(Next.js :3000)"]
+    UI["On-robot UI<br/>ESP32 UI box"]
+    CAM["ESP32-CAM"]
+    ARM["Arduino Mega<br/>SCARA arm"]
+
+    subgraph HOST["Python host — FastAPI backend (:8765)"]
+        GAME["game/<br/>state tracker + controller"]
+        VIS["vision/<br/>CV router → classical / CNN"]
+        ENG["chess_engine/<br/>Stockfish + evaluation"]
+        ADP["arduino/ + robot_adapter"]
+    end
+
+    WEB <-->|HTTP / REST| HOST
+    UI <-->|TCP| HOST
+    CAM -->|JPEG over Wi-Fi| VIS
+    GAME --> VIS
+    GAME --> ENG
+    GAME --> ADP
+    ADP -->|USB serial| ARM
+```
+
+The rest of this section documents each layer, bottom-up: the **embedded
+firmware** on the microcontrollers, then the **Python host** modules.
+
+### Embedded Firmware
+
+Three microcontrollers each run their own firmware: the Arduino Mega for motion,
+the ESP32-CAM for board capture, and the ESP32 UI box for the player interface.
+
+#### Arduino Mega — motion control
 
 The main Arduino entry point is [arduino_code/src/main.cpp](arduino_code/src/main.cpp).
 
@@ -207,7 +209,7 @@ Key hardware abstractions are in `arduino_code/src/hardware/src/`:
 
 The PlatformIO environments are defined in [arduino_code/platformio.ini](arduino_code/platformio.ini).
 
-### ESP32-Cam Side
+#### ESP32-CAM — board capture
 
 The ESP32-CAM firmware is in [arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino](arduino_code/esp32_cam_mega_bridge/esp32_cam_code_mit.ino).
 
@@ -228,7 +230,7 @@ The Mega bridge uses these serial commands:
 | `IP` | `IP <address>` |
 | `CAPTURE` | `CAPTURE_OK` or `CAPTURE_FAIL` |
 
-### ESP32D Side
+#### ESP32 UI box — player interface
 
 The ESP32D firmware for the player-facing UI box is in
 [arduino_code/esp32_ui_box/](arduino_code/esp32_ui_box/).
@@ -246,7 +248,7 @@ pio run -e esp32_ui_box -t upload
 pio device monitor -e esp32_ui_box
 ```
 
-The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; pass that address to the Python host with `--esp32-host`.
+The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp (or backend connect request) so the host can reach the UI box.
 
 Wire the rotary encoder/button and LCD to the ESP32D pins defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h):
 
@@ -264,52 +266,41 @@ Wire the rotary encoder/button and LCD to the ESP32D pins defined in [arduino_co
 
 The UI box exchanges newline-terminated TCP commands with Python. The main ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
 
-### Python Side
+### Python Host
 
-The Python package lives in `python_code/src/charm/`.
-The Python side is the central control layer of ChArm. It connects the camera, board-recognition pipeline, chess-state tracker, Stockfish engine, player UI, and Arduino Mega motion controller.
+At runtime the FastAPI backend wires together four packages under
+`python_code/src/charm/`:
 
-#### `vision/`
+| Package | Responsibility |
+|---|---|
+| `vision/` | Capture → rectify → classify into two 8×8 occupancy/colour bitmaps |
+| `game/` | Track board state, reconstruct the human's move, orchestrate turns |
+| `chess_engine/` | Stockfish move selection and position evaluation |
+| `arduino/` | Serial/TCP bridges to the SCARA arm and the UI box |
 
-The vision pipeline performs:
+#### Computer Vision (`vision/`)
 
-- board corner calibration
-- perspective rectification
-- splitting the image into 64 cells
-- occupancy detection
-- piece-colour detection
-- construction of white/black bitmaps
+The vision stack turns a single raw ESP32-CAM frame into two 8×8 bitmaps (white
+pieces and black pieces) for the move tracker. It runs **two interchangeable
+pipelines** — a classical CV algorithm and a trained CNN — that share the same
+pre-processing and the same bitmap output format, selected at runtime by a
+router (`cv_router.py`).
 
-Important files:
+Key files: `pipeline.py`, `board_detector.py`, `grid_splitter.py`,
+`occupancy_detector.py`, `piece_color_detector.py`, `cnn_classifier.py`,
+`cv_router.py`, `four_point_calibration.py`, `calibrated_pipeline.py`.
 
-- `pipeline.py`
-- `board_detector.py`
-- `grid_splitter.py`
-- `occupancy_detector.py`
-- `piece_color_detector.py`
-- `four_point_calibration.py`
-- `calibrated_pipeline.py`
+##### Geometric pre-processing (shared)
 
-### Vision & CNN Architecture
+Both pipelines start from the same stage, which transforms a raw,
+perspective-distorted camera image into a normalized 8×8 board representation.
 
-This section describes the technical structure of the board-recognition stack, including both the geometric preprocessing pipeline and the planned CNN-based classifier architecture.
+**Two-stage perspective warping** — two sequential homographies align the board:
 
-#### Geometric Vision Pipeline
-
-The geometric pipeline transforms a raw, perspective-distorted camera image into a normalized 8×8 board representation.
-
-**Two-stage perspective warping**
-
-To align the board as accurately as possible, the system applies two sequential homography transformations:
-
-1. **Global warp**  
-   The four outer corners of the board, obtained through calibration, are
-   mapped to an initial 800×800 square image.
-
-2. **Inner refinement**  
-   Internal grid intersections are then used to refine the first warp. This
-   compensates for lens distortion or small geometric imperfections, producing a
-   final board image where each square is aligned consistently.
+1. **Global warp** — the four calibrated outer corners map to an 800×800 square.
+2. **Inner refinement** — internal grid intersections refine that warp,
+   correcting lens distortion and small geometric error so every square lands
+   consistently.
 
 **Grid splitting**
 
@@ -318,9 +309,24 @@ The refined image is divided into 64 `SquareCell` objects. Each cell contains:
 - an RGB crop of one board square
 - its row and column indices within the 8×8 grid
 
-#### CNN Classification
+##### Classical pipeline — the vision algorithm
 
-The CNN classifier is intended to replace or complement the classical occupancy/brightness heuristics with a learned model trained specifically on the ChArm board and piece set.
+The original, training-free path (`pipeline.py`) classifies each of the 64 cells
+with handcrafted heuristics:
+
+- **occupancy detection** — decides whether a square holds a piece
+- **piece-colour detection** — classifies an occupied square as white or black
+- the per-cell results are assembled into the white/black 8×8 bitmaps
+
+This pipeline needs no model and serves as the fallback when the CNN is
+unavailable or fails to produce a valid board.
+
+##### CNN classifier
+
+The CNN classifier (`cnn_classifier.py`) replaces step 4 of the classical
+pipeline (occupancy + colour thresholds) with a single learned model trained on
+the ChArm board and piece set by `train_cnn.py`. `CnnBoardClassifier` wraps a
+trained **Keras / TensorFlow** model, loaded once and reused across requests.
 
 **Model objective**
 
@@ -332,7 +338,7 @@ The classifier predicts one of three classes for each square:
 
 **Model structure**
 
-A lightweight Keras CNN is planned for efficient inference on CPU:
+A lightweight Keras CNN runs efficiently on CPU:
 
 - input: normalized RGB square image
 - three convolutional blocks with increasing filter counts
@@ -344,17 +350,14 @@ A lightweight Keras CNN is planned for efficient inference on CPU:
 
 Instead of processing cells individually, all 64 board squares can be stacked into a single tensor and passed through the model in one forward pass. This allows the whole board to be evaluated efficiently and consistently.
 
-#### Retry and Fallback Mechanism
+##### Primary / fallback routing (`cv_router.py`)
 
-To improve robustness in difficult conditions such as shadows, blur, or unclear piece placement, the vision system is designed around a retry-and-fallback strategy.
+To stay robust under shadows, blur, or unclear piece placement, the router
+attempts multiple captures and evaluates them in sequence:
 
-**Primary / fallback routing**
-
-A routing layer can attempt multiple captures and evaluate them in sequence:
-
-1. first attempts use the CNN-based pipeline
-2. if repeated captures still fail to produce a valid board update, the system
-   falls back to the classical pipeline
+1. first attempts use the primary pipeline (typically the CNN)
+2. if repeated fresh captures still fail to produce a valid board update, the
+   system falls back to the other pipeline (the classical algorithm)
 3. only observations that can be matched to a valid board-state transition are
    accepted
 
@@ -363,74 +366,54 @@ A routing layer can attempt multiple captures and evaluate them in sequence:
 An observation is only accepted if the `BoardStateTracker` can interpret it as:
 
 - a unique legal move
-- or a valid unchanged board state
 
 If the result is invalid or ambiguous, the frame is rejected and a new capture
 is requested.
 
-#### Living Dataset and Continuous Improvement
+##### Living dataset and continuous improvement
 
-A major long-term advantage of the CNN approach is that the model can improve over time using data collected during real operation.
+The CNN improves from real operation through a correction loop: when a square is
+misclassified, the user relabels it, the cell crop is added to the dataset, and
+the next training run includes it. Over time the model specializes to the actual
+board texture, lighting, pieces, and camera noise — reducing reliance on
+hand-tuned thresholds.
 
-**Correction loop**
+#### Move Understanding (`game/`)
 
-When a square is misclassified:
+Reconstructs chess state from vision output and orchestrates the turn loop:
 
-1. the user corrects the label through the interface
-2. the corresponding cell image is stored in the dataset
-3. the next training cycle includes this new example
+- `state_tracker.py` — `BoardStateTracker` holds the `python-chess` position and infers the played move from the observed bitmaps
+- `vision_integration.py` — adapts vision output into the tracker
+- `game_session.py` — `GameSession` handles initialization, player-move detection, and robot-move verification
+- `game_controller.py` — `GameController` coordinates UI events, capture, Stockfish, and arm motion
 
-**Environmental specialization**
+#### Chess Engine (`chess_engine/`)
 
-Over time, the model becomes more specialized to:
+- `best_move.py` — wraps Stockfish and returns the engine move for a position at the selected skill level
+- `evaluation.py` — position evaluation, move ratings, and win-probability used for player feedback
 
-- the exact ChArm board texture
-- the real lighting conditions
-- the specific physical pieces
-- real camera noise and shadows
+#### Hardware Bridges (`arduino/`)
 
-This creates a system that becomes more robust with use, instead of relying only on fixed handcrafted thresholds.
+- `arduino_bridge.py` — sends Cartesian pick-and-place commands to the Arduino Mega over USB serial
+- `uiController_bridge.py` — `ArduinoUIControllerLink`, the TCP link to the ESP32 UI box
 
-#### `game/`
-
-This module handles chess-state reconstruction and game orchestration.
-The key idea is that the system does not directly identify the exact type of every chess piece. Instead, it uses the known previous board state and all legal moves generated by `python-chess` to infer which move the player made from the observed white/black occupancy bitmaps.
-
-Important files:
-
-- `state_tracker.py`
-- `vision_integration.py`
-- `game_session.py`
-- `game_controller.py`
-
-What they do:
-
-- `BoardStateTracker` keeps the current `python-chess` board state
-- `state_tracker.py` infers the best matching legal move from observed occupancy bitmaps
-- `vision_integration.py` connects the vision output to the tracker
-- `GameSession` manages initialization, player move detection, and robot move verification
-- `GameController` coordinates UI events, image capture, Stockfish, and robot motion
-
-#### `chess_engine/`
-
-- `best_move.py` wraps Stockfish and returns the engine move for a given board
-
-#### `arduino/`
-
-- `arduino_bridge.py` sends movement commands to the Arduino Mega
-- `uiController_bridge.py` communicates with the ESP32-based UI
+The backend's `webapp_backend/robot_adapter.py` owns the serial connection and a
+lock, so the LCD and the webapp can both drive the arm without colliding.
 
 ## How the Game Flow Works
 
 At a high level:
 
-1. `play_game.py` starts the Python host process.
-2. The host connects to:
-   - the **ESP32 UI box** over TCP
-   - the **Arduino Mega** over USB serial
-3. The user starts the game from the UI.
-4. The host validates the initial board from a calibrated image.
-5. After each player move, the host:
+1. `./start.sh` launches the host backend (`webapp_backend/api_server.py`) and the webapp.
+2. The backend connects to:
+   - the **ESP32 UI box** over TCP (`ArduinoUIControllerLink`)
+   - the **Arduino Mega** over USB serial (`robot_adapter`)
+   - the **ESP32-CAM** over Wi-Fi for board capture
+
+   The LCD and the webapp share this one backend, so either can drive the game.
+3. The user starts the game from the UI (or webapp) and picks colour and difficulty.
+4. The backend validates the initial board from a calibrated image.
+5. After each player move, the backend:
    - captures a new board image,
    - runs the vision pipeline,
    - reconstructs the move with `python-chess`,
@@ -523,93 +506,90 @@ The typical workflow is:
 
 ## Common Workflows
 
-### 1. Run the vision pipeline on a test image
+### Play a game
+
+This is the normal way to run ChArm. From the repo root:
+
+```bash
+./start.sh
+```
+
+`start.sh` runs `npm run dev`, which launches **both** the Python vision/game
+backend (`webapp_backend/api_server.py`, port `8765`) and the Next.js frontend
+(port `3000`). Then either:
+
+- open the webapp at <http://localhost:3000>, **or**
+- use the on-robot LCD + rotary encoder.
+
+From there: calibrate the arm, start a game, pick colour and difficulty, make
+your move on the physical board, and confirm it. The backend captures the board,
+runs the vision pipeline, validates your move, asks Stockfish for the reply, and
+drives the arm.
+
+### Calibrate the board (vision)
+
+The board calibration is done from the webapp:
+
+1. Click **Manual calibration**.
+2. Capture a new picture.
+3. Adjust the outer corners, then the inner warp — click **Save** and
+   **Calibrate** between each step.
+
+This writes `board_calibration.json` and `inner_warp_calibration.json`, which the
+game pipeline then loads automatically.
+
+### Debug the classical vision pipeline on one image
+
+Useful when tuning the geometric warp / occupancy / colour stages (this path is
+the **classical** pipeline, not the CNN):
 
 ```bash
 source venv/bin/activate
+# default input is latest_raw.jpg; or pass --image <path> / --camera
 python python_code/main.py
 ```
 
-This:
+It writes step-by-step debug images to `python_code/`:
 
-- loads a test image,
-- runs the board pipeline,
-- prints occupancy and bitmaps,
-- saves debug images such as:
-  - `output_black_mask_debug.jpg`
-  - `output_grid_debug.jpg`
-  - `output_piece_color_debug.jpg`
+- `output_first_warp.jpg`, `output_refined_warp.jpg`, `output_warped_board.jpg`
+- `output_grid_debug.jpg`, `output_occupancy_debug.jpg`, `output_piece_color_debug.jpg`
 
-### 2. Run the full host-side game application
+Pass `--before-moves e2e4 e7e5 ...` to also have it reconstruct the move shown in
+the image from the prior position.
 
-```bash
-source venv/bin/activate
-python python_code/play_game.py \
-  --esp32-host 172.21.71.52 \
-  --engine-path stockfish
-```
+### Improve the CNN (living-dataset loop)
 
-Useful arguments:
+Training data accumulates in `python_code/labeled_datasets/`. There are two ways
+to grow it.
 
-| Argument | Description |
-|---|---|
-| `--esp32-host` | IP address of the ESP32 UI box |
-| `--esp32-port` | TCP port for the UI box |
-| `--arm-port` | Serial port of the Arduino Mega |
-| `--player-color` | Initial fallback player colour |
-| `--difficulty` | `0=easy`, `1=medium`, `2=hard` |
-| `--board-calibration` | Outer board calibration JSON |
-| `--inner-calibration` | Inner warp calibration JSON |
-| `--engine-path` | Stockfish binary path |
-| `--think-time` | Stockfish think time in seconds |
+**During play (passive)** — every validated board frame is sliced into 64
+labeled cell crops and saved automatically, so the dataset grows just by playing.
 
-### 3. Capture a sequence of raw board photos
+**With the labeling wizard (webapp)** — the webapp has a dedicated labeling page
+for building datasets quickly and consistently. It supports two capture modes:
+
+- **Autonomous (arm-driven) capture** — the robot picks pieces from a source
+  square and places them across the board on its own, homing out of frame before
+  each shot. This produces large, correctly-labeled datasets with no manual
+  effort, since the label is whatever the arm just placed.
+- **Bulk painting** — the "painted-board" mode: set up many pieces at once, paint
+  each square's label (empty / white / black) on the on-screen grid, then hit
+  capture. One photo yields a labeled crop for every painted square.
+
+<!-- TODO: add screenshots / video of the labeling page, autonomous capture, and bulk painting -->
+
+**Train and deploy** — once a dataset looks good (the wizard can also compute
+per-square accuracy stats), build and train:
 
 ```bash
 source venv/bin/activate
-python python_code/capture_game_session.py --game game_2
+# optional: review crops one-by-one and drop bad ones
+python python_code/validate_labels.py
+# train on a prepared dataset folder
+python python_code/train_cnn.py --dataset cnn_<name> --epochs 20
 ```
 
-This is useful for collecting images to debug or improve the vision pipeline.
-
-### 4. Test the state tracker without camera input
-
-```bash
-source venv/bin/activate
-python python_code/tests/demo_state_tracker.py --moves e2e4 e7e5 g1f3
-```
-
-This demo:
-
-- builds a known chess position,
-- converts it into white/black bitmaps,
-- asks the tracker to infer the last move,
-- prints the resulting tracker status and board state.
-
-You can also demonstrate noisy or invalid observations:
-
-```bash
-python python_code/tests/demo_state_tracker.py --moves e2e4 --inject-noise --max-mismatches 1
-python python_code/tests/demo_state_tracker.py --moves e2e4 --show-invalid-example
-```
-
-## Testing
-
-Run the Python test suite:
-
-```bash
-source venv/bin/activate
-python -m unittest discover -s python_code/tests -v
-```
-
-The current tests cover:
-
-- board-to-bitmap conversion
-- move reconstruction from observed bitmaps
-- captures, castling, en passant, and promotion behaviour
-- sequential board updates
-- noisy accepted observations
-- invalid rejected observations
+The resulting model is then used by the CNN classifier for the next session.
 
 ## Current Limitations
 
