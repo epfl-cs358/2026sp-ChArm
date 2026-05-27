@@ -559,18 +559,37 @@ the image from the prior position.
 
 ### Improve the CNN (living-dataset loop)
 
-Validated board captures are saved to `python_code/labeled_datasets/` during
-play. To fold them into a better model:
+Training data accumulates in `python_code/labeled_datasets/`. There are two ways
+to grow it.
+
+**During play (passive)** — every validated board frame is sliced into 64
+labeled cell crops and saved automatically, so the dataset grows just by playing.
+
+**With the labeling wizard (webapp)** — the webapp has a dedicated labeling page
+for building datasets quickly and consistently. It supports two capture modes:
+
+- **Autonomous (arm-driven) capture** — the robot picks pieces from a source
+  square and places them across the board on its own, homing out of frame before
+  each shot. This produces large, correctly-labeled datasets with no manual
+  effort, since the label is whatever the arm just placed.
+- **Bulk painting** — the "painted-board" mode: set up many pieces at once, paint
+  each square's label (empty / white / black) on the on-screen grid, then hit
+  capture. One photo yields a labeled crop for every painted square.
+
+<!-- TODO: add screenshots / video of the labeling page, autonomous capture, and bulk painting -->
+
+**Train and deploy** — once a dataset looks good (the wizard can also compute
+per-square accuracy stats), build and train:
 
 ```bash
 source venv/bin/activate
-# 1. review the collected cell crops, dropping bad ones
+# optional: review crops one-by-one and drop bad ones
 python python_code/validate_labels.py
-# 2. retrain on a cleaned dataset folder
+# train on a prepared dataset folder
 python python_code/train_cnn.py --dataset cnn_<name> --epochs 20
 ```
 
-The new model can then be pointed at by the CNN classifier for the next session.
+The resulting model is then used by the CNN classifier for the next session.
 
 ## Current Limitations
 
