@@ -345,17 +345,186 @@ hand-tuned thresholds.
 
 #### Move Understanding (`game/`)
 
-Reconstructs chess state from vision output and orchestrates the turn loop:
+The `game/` package is the reasoning layer between camera perception and chess
+rules. Vision tells the system what the physical board appears to contain;
+`game/` decides whether that observation makes sense as a legal chess position
+and updates the internal `python-chess` board accordingly.
 
-- `state_tracker.py` — `BoardStateTracker` holds the `python-chess` position and infers the played move from the observed bitmaps
-- `vision_integration.py` — adapts vision output into the tracker
-- `game_session.py` — `GameSession` handles initialization, player-move detection, and robot-move verification
-- `game_controller.py` — `GameController` coordinates UI events, capture, Stockfish, and arm motion
+A key design decision is to keep the camera's job simple. ChArm does **not** try
+to visually identify whether a piece is a queen, bishop, knight, and so on.
+Instead, the vision stack outputs two 8×8 occupancy maps:
+
+- white-occupied squares
+- black-occupied squares
+
+The missing piece identity is recovered from context. Since the software already
+knows the previous legal chess position, `BoardStateTracker` can simulate every
+legal move from that position, convert each candidate board into the same
+white/black occupancy format, and compare it against the observed bitmaps. If
+only one legal move explains the new board, the move is accepted. This avoids the
+fragile problem of recognizing six piece types from a noisy camera image and
+turns move detection into a rules-based consistency check.
+
+Each scan is classified into one of four tracker states:
+
+| Status | Meaning |
+|---|---|
+| `accepted_legal_move` | One legal move uniquely explains the observed board. The move is pushed to the internal board. |
+| `unchanged_position` | The observed board still matches the previous position, so no move has been made yet. |
+| `invalid_observation` | No legal move explains the observation. The frame is rejected and the user is asked to correct the board or scan again. |
+| `ambiguous_observation` | Multiple legal moves produce the same occupancy result. The frame is rejected because the move is not uniquely recoverable. |
+
+Key files and main ideas:
+
+##### `state_tracker.py`
+
+This is the core of move understanding. It keeps the current `python-chess`
+board and tries to explain a new camera observation using legal chess moves.
+
+The main idea is simple: instead of asking the camera "which exact piece is on
+each square?", we ask the chess engine "which legal move would make the board
+look like this?" For each legal move, the tracker simulates the move, turns the
+candidate board into white/black occupancy bitmaps, and compares those bitmaps
+with the camera result.
+
+If one move matches, the tracker accepts it and updates the board. If nothing
+matches, the scan is rejected. If several moves look the same from occupancy
+alone, the scan is marked ambiguous. This file is intentionally independent from
+the camera, webapp, LCD, and robot arm, which makes the logic much easier to
+test and reuse.
+
+One special case is promotion: the camera cannot tell whether a pawn promoted to
+a queen, rook, bishop, or knight because all of those look like "one piece on
+the promotion square" in the bitmap. The tracker uses queen promotion as the
+default during inference, and the UI can correct the final piece choice later.
+
+##### `vision_integration.py`
+
+This file is the bridge between image processing and the tracker. It runs the
+board-vision pipeline on an image, takes the resulting white/black bitmaps, fixes
+orientation if needed, and passes the bitmaps into `BoardStateTracker`.
+
+The reason for this small adapter is cleanliness. The tracker should not care
+where the bitmaps came from, and the vision code should not need to know the
+details of chess move inference. If the camera calibration or vision pipeline
+changes later, this is the main place where the two sides reconnect.
+
+##### `game_session.py`
+
+`GameSession` manages one full logical game. It sits one level above the tracker:
+the tracker answers "what move happened?", while the session keeps track of
+"has the game started?", "which color is the player?", "whose turn is next?",
+and "what should the system tell the user?"
+
+It validates the initial board, stores the player and robot colors, processes
+the player's move, asks Stockfish for the robot's move, records the move history,
+and commits the robot move after the arm has executed it. It also converts low
+level tracker results into clearer messages, such as unchanged board, illegal
+move, ambiguous scan, or the player still being in check.
+
+The useful design choice is that `GameSession` still does not directly control
+the camera or motors. It receives an image or bitmap, updates the logical chess
+state, and returns a structured result. That means the game logic can be tested
+without plugging in the real hardware.
+
+A normal session looks like:
+
+```text
+validate initial board
+    ↓
+choose player color
+    ↓
+detect player move
+    ↓
+compute robot move
+    ↓
+arm executes robot move
+    ↓
+commit or verify robot move
+```
+
+##### `game_controller.py`
+
+`GameController` connects the clean game logic to the actual running system. It
+listens to events from the ESP32 LCD box, calls the CV router when a board scan
+is needed, talks to `GameSession`, sends robot moves to the Arduino layer, and
+keeps the webapp updated.
+
+This is where the real-world flow is coordinated: checking the initial board,
+handling "player done", retrying CNN/classical vision scans, showing errors,
+displaying check/game-over states, applying difficulty settings, handling
+promotion choices, and starting the robot move without freezing the UI.
+
+The main idea is separation: if someone wanted to rebuild ChArm with a different
+screen, camera trigger, or robot controller, they could keep the tracker and
+session logic mostly unchanged and rewrite this controller layer for their own
+hardware.
+
+A typical player-move update follows this path:
+
+```text
+player presses done
+    ↓
+CV router captures board image
+    ↓
+CNN or classical vision pipeline
+    ↓
+white/black occupancy bitmaps
+    ↓
+BoardStateTracker
+    ↓
+accepted / unchanged / invalid / ambiguous result
+    ↓
+GameSession and GameController update the game flow
+```
+
+This separation is useful for debugging. Vision can be inspected as bitmaps and
+debug overlays, while the move tracker can be tested without a camera by feeding
+synthetic bitmaps generated from known chess moves.
 
 #### Chess Engine (`chess_engine/`)
 
-- `best_move.py` — wraps Stockfish and returns the engine move for a position at the selected skill level
-- `evaluation.py` — position evaluation, move ratings, and win-probability used for player feedback
+The `chess_engine/` package is the robot's chess-decision layer. It receives the
+current `python-chess` board from the session, asks Stockfish to search that
+position, and returns the move the robot should play.
+
+Key files:
+
+- `best_move.py` — opens a Stockfish UCI process, applies the selected strength
+  settings, searches for a move under the configured think time, and returns a
+  `python-chess` move object. Difficulty can be controlled through Stockfish
+  skill level or through the `UCI_LimitStrength`/`UCI_Elo` options.
+- `evaluation.py` — runs evaluation probes for the webapp and LCD feedback. It
+  reports centipawn or mate scores, best-move suggestions, winning side,
+  approximate win percentage, and player move ratings such as `Excellent`,
+  `Mistake`, or `Blunder`.
+
+The engine layer is intentionally separated from the rest of the game logic. The
+tracker decides what the human physically did; Stockfish decides what the robot
+should do next. Because those responsibilities are separate, the team can tune
+difficulty, change think time, replace the engine, or adjust evaluation feedback
+without touching the vision or move-reconstruction code.
+
+A normal engine call looks like this:
+
+```text
+current python-chess board
+    ↓
+best_move.py
+    ↓
+Stockfish search at selected difficulty
+    ↓
+robot move in UCI format, e.g. e7e5
+    ↓
+GameController sends the move to the robot-motion layer
+    ↓
+GameSession commits the robot move to the internal board
+```
+
+After Stockfish returns a move, the game controller converts it into the robot's
+physical pick-and-place sequence using the pre-move board state, so captures,
+castling, en passant, and promotions can be handled consistently at the boundary
+between chess logic and robot motion.
 
 #### Hardware Bridges (`arduino/`)
 
@@ -479,25 +648,48 @@ the Arduino arm (TX) and its responses (RX) for live debugging.
 <img src ="">
 ## Calibration
 
-The Python vision stack expects calibration JSON files:
+The camera image contains a lot more than the chessboard: table texture, shadows,
+robot parts, board borders, lens perspective, and sometimes pieces near the edge
+of a square. Instead of trying to detect the 8×8 grid directly from that noisy
+full image, ChArm uses a two-step crop-and-warp calibration.
+
+The idea is:
+
+1. first find the outer board area and warp it into a square top-down view,
+2. then select the cleaner inner playing area used for the 8×8 grid.
+
+This makes the vision pipeline more stable because the later CNN/classical
+detectors only see the board region they actually need, not the surrounding
+background noise.
+
+The Python vision stack saves this setup in two JSON files:
 
 - `python_code/board_calibration.json`
 - `python_code/inner_warp_calibration.json`
 
-Calibration-related scripts live in:
+The related vision code lives in:
 
-- `python_code/src/charm/vision/calibrate_board_corners.py`
-- `python_code/src/charm/vision/calibrate_inner_warp_corners.py`
-- `python_code/src/charm/vision/run_two_step_calibration.py`
-- `python_code/manual_calibration_interactive.py`
+- `python_code/src/charm/vision/four_point_calibration.py` — stores and applies
+  the outer-board and inner-warp perspective transforms.
+- `python_code/src/charm/vision/calibration_config.py` — defines the default
+  calibration file locations.
+- `python_code/calibrate_aruco.py` — can generate the calibration files from
+  ArUco markers.
+- the webapp manual calibration flow — lets the user adjust and save the two
+  calibration steps visually.
 
 The typical workflow is:
 
-1. capture or load a board image,
-2. calibrate the outer board corners,
-3. calibrate the inner warp / refined board area,
-4. save both calibration files,
-5. use those files when running the game pipeline.
+1. capture a clear image of the board,
+2. mark the four outer board corners,
+3. warp the image into a first top-down board view,
+4. mark the inner playable area more precisely,
+5. save both calibration JSON files,
+6. run the game pipeline using the refined board crop.
+
+After calibration, every live image follows the same path: raw camera photo →
+outer board warp → inner refined warp → 64 square crops. This is the main reason
+the rest of the vision system can stay simple and consistent.
 
 ## Common Workflows
 
