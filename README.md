@@ -1,46 +1,64 @@
 # ChArm
 
-ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical lead-screw Z axis, a servo gripper, an Arduino-controlled UI, and a Python host that handles computer vision and chess logic.
+> A chess-playing robot that sees the board, thinks with Stockfish, and moves the pieces itself.
 
-//TODO Add picture/Video
+ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
 
-The intended workflow is:
-1. The player starts by initiating arm calibration
-2. The player clicks start game and picks a difficulty and the color he wants to play all from the LCD/encoder UI or the webapp.
-3. The player makes his move on the physical board and presses the rotary encoder or the "player done" button on the webapp.
-4. An ESP32-CAM captures a picture of the board.
-5. From the image a computer vision algorithm and / or a CNN algorithm creates two bitmaps from chesspiece placement.
-6. Stockfish computes the best move at the selected skill level.
-7. The arm physically moves the chess piece on the board
-8. Turn passes back to the human; repeat from 3.
+<!-- TODO: add a photo / demo video of the robot in action -->
 
-This README is the top-level guide for understanding, rebuilding, and running the project.
+### Gameplay loop
+
+1. The player initiates arm calibration.
+2. The player starts a game and selects a difficulty and a colour to play — from either the on-robot LCD/encoder UI or the webapp.
+3. The player makes a move on the physical board and confirms it with the rotary encoder (or the **Player done** button in the webapp).
+4. The ESP32-CAM captures an image of the board.
+5. A computer-vision algorithm and/or a CNN turns that image into two bitmaps describing piece placement.
+6. Stockfish computes the best response at the selected skill level.
+7. The arm physically moves the chess piece on the board.
+8. The turn passes back to the human; repeat from step 3.
+
+This README is the top-level guide to understanding, rebuilding, and running the project.
+
+## Table of Contents
+
+- [Main Features](#main-features)
+- [Repository Layout](#repository-layout)
+- [Hardware](#hardware)
+- [Software Architecture](#software-architecture)
+- [How the Game Flow Works](#how-the-game-flow-works)
+- [Setup & Installation](#setup--installation)
+- [Calibration](#calibration)
+- [Common Workflows](#common-workflows)
+- [Current Limitations](#current-limitations)
+- [Future Improvements](#future-improvements)
+- [License](#license)
 
 ## Project Overview
-The project is organized so that hardware control and chess/vision logic can be developed and tested independently.
+
+The project is organized so that hardware control and chess/vision logic can be developed and tested independently, then integrated through a single Python host.
 
 ## Main Features
 
-   **Gameplay**
-   - Plays a full game of physical chess against a human, end to end
-   - Selectable difficulty (easy / medium / hard) powered by Stockfish
-   - Handles normal moves, captures, and castling
-   - On-robot LCD + rotary-encoder UI — no computer interaction needed to play
+**Gameplay**
+- Plays a full game of physical chess against a human, end to end
+- Selectable difficulty (easy / medium / hard) powered by Stockfish
+- Handles normal moves, captures, and castling
+- On-robot LCD + rotary-encoder UI — no computer needed to play
 
-   **Robot / motion**
-   - Two-link SCARA arm with a Z lead-screw and servo gripper
-   - Automatic homing via limit switches and EEPROM-persisted calibration
-   - Cartesian pick-and-place driven over serial from the Python host
+**Robot / motion**
+- Two-link SCARA arm with a Z lead-screw and servo gripper
+- Automatic homing via limit switches and EEPROM-persisted calibration
+- Cartesian pick-and-place driven over serial from the Python host
 
-  **Computer vision**
-   - Wi-Fi board capture via ESP32-CAM
-   - Two-stage perspective rectification + 8×8 grid splitting
-   - CNN square classifier (empty / white / black) with a classical fallback pipeline
-   - Self-improving "living dataset" — corrected squares feed the next training cycle
+**Computer vision**
+- Wi-Fi board capture via ESP32-CAM
+- Two-stage perspective rectification and 8×8 grid splitting
+- CNN square classifier (empty / white / black) with a classical fallback pipeline
+- Self-improving "living dataset" — corrected squares feed the next training cycle
 
-  **Move understanding**
-   - Reconstructs the human's move by matching the observed board against all legal moves
-   - Validates each observation (legal / unchanged / invalid / ambiguous) and re-captures bad frames
+**Move understanding**
+- Reconstructs the human's move by matching the observed board against all legal moves
+- Validates each observation (legal / unchanged / invalid / ambiguous) and re-captures bad frames
 
 ## Repository Layout
 
@@ -69,39 +87,38 @@ The project is organized so that hardware control and chess/vision logic can be 
 ```
 ## Hardware
 
-  ### Mechanical
+### Mechanical
 
-  - **SCARA arm** — two 250 mm links (~500 mm reach), belt-reduced rotational
-  joints
-    - J1 (base): 20 → 160 tooth reduction
-    - J2 (elbow): 18 → 105 tooth reduction
-  - **Z axis** — 290 mm-travel vertical lead screw (4-start, 2 mm pitch → 8
-  mm/rev)
-  - **Gripper** — servo-driven, 0°–65° open/close span
-  - **Motors** — 3× 1.8° / 200-step steppers, driven at 16× microstepping (except the lead screw that is driven at 2x microstepping)
+- **SCARA arm** — two 250 mm links (~500 mm reach), belt-reduced rotational joints
+  - J1 (base): 20 → 160 tooth reduction
+  - J2 (elbow): 18 → 105 tooth reduction
+- **Z axis** — 290 mm-travel vertical lead screw (4-start, 2 mm pitch → 8 mm/rev)
+- **Gripper** — servo-driven, 0°–65° open/close span
+- **Motors** — 3× 1.8° / 200-step steppers at 16× microstepping (the lead screw runs at 2× microstepping)
 
-  ### Electronics and wiring
+### Electronics and Wiring
 
-**main arduino circuit**
-  - **Arduino Mega 2560** — motion control, calibration, EEPROM persistence
-  - **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
-  - **ESP32-WROOM UI box** — 16×2 LCD + rotary encoder/button, TCP link to host
-  - **3× STEP/DIR stepper drivers**
-  - **4× limit switches** — J1 home, 2x J2 home, Z bottom. Connected to a veroboard in a pull up manner that's read by the arduino.
-  - **Power supply** : 12V at 5A to power the motor (through the CNC shield). To power 5V components(camera, servo,...) it uses a buck converter.
+**Main Arduino circuit**
+
+- **Arduino Mega 2560** — motion control, calibration, EEPROM persistence
+- **ESP32-CAM** (AI-Thinker) — Wi-Fi board capture, HTTP `/capture` endpoint
+- **ESP32 UI box** — 16×2 LCD + rotary encoder/button, TCP link to host
+- **3× STEP/DIR stepper drivers**
+- **4× limit switches** — J1 home, 2× J2 home, Z bottom; wired to a veroboard in a pull-up configuration and read by the Arduino
+- **Power supply** — 12 V at 5 A for the motors (through the CNC shield); a buck converter supplies the 5 V components (camera, servo, etc.)
 
 **UI box**
-- only needs 5V power which is split to the correct pin on a veroboard. Data pins(of the lcd and the button) are connected to an esp32 to handle the transmission.
 
+- Needs only 5 V power, distributed to the correct pins on a veroboard. The data pins of the LCD and the button connect to an ESP32 that handles transmission to the host.
 
 <img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit" width=30%/>
 
-   ### Fabrication Tools
+### Fabrication Tools
 
-   - **metal lathe and drill press** used to machine the flanges at the base
-   - **3D printer** used for a lot of parts around the arm.
-   - **laser cutter** for structural parts that would not print well.
-   - **soldering equipment** for wiring and connectors
+- **Metal lathe and drill press** — machining the flanges at the base
+- **3D printer** — most of the parts around the arm
+- **Laser cutter** — structural parts that would not print well
+- **Soldering equipment** — wiring and connectors
 
 ### CAD Overview
 
@@ -119,26 +136,6 @@ The CAD files for the printed and laser-cut parts live in [docs/CAD/](docs/CAD/)
 8. Wire everything per the circuit diagram, then run homing and calibration before the first game.
 
 <!-- TODO: add CAD renders, exported STLs, and per-part print settings -->
-
-**Bill of Materials**
-
-| Amount | Part Type |
-|---|---:|
-| 1 | 2.1mm DC Barrel Jack |
-| 4 | 220Ω Resistor |
-| 1 | Arduino Mega |
-| 1 | Arduino CNC V3 |
-| 1 | DG Servo 9g |
-| 1 | ESP32 - CAM |
-| 1 | ESP32 - D |
-| 4 | Micro Lever Limit Switch |
-| 1 | KY-040 Rotary encoder |
-| 1 | 16x2 1602A LCD Display |
-| 1 | Potentiometer |
-| 1 | LM2596 Buck Converter |
-| 3 | 17HS4401 Stepper motors |
-| 3 | A4988 Motor Drivers |
-| 2 | Wago 221-415 |
 
 ### Configuration Files
 
@@ -220,51 +217,18 @@ At runtime, the board:
 - connects to Wi-Fi and starts an HTTP server on port `80`
 - exposes `/capture` as a JPEG image endpoint for browser or Python capture
 - exposes `/status` as a small JSON health endpoint
-- listens to the Arduino Mega over UART at `9600` baud
-
-The Mega bridge uses these serial commands:
-
-| Command | Response |
-|---|---|
-| `STATUS` | `ESP32_OK` |
-| `IP` | `IP <address>` |
-| `CAPTURE` | `CAPTURE_OK` or `CAPTURE_FAIL` |
+- exposes `/` as a camera settings endpoint
 
 #### ESP32 UI box — player interface
 
-The ESP32D firmware for the player-facing UI box is in
+The ESP32 firmware for the UI box is in
 [arduino_code/esp32_ui_box/](arduino_code/esp32_ui_box/).
 
-Before flashing, edit `WIFI_CREDENTIALS` in [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp) so the ESP32 can join the same Wi-Fi network as the Python host. If no configured network is reachable, the firmware starts a fallback access point:
+Before flashing it, edit `WIFI_CREDENTIALS` in [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp). The UI box and the Python host must be on the same Wi-Fi network. If no configured network is reachable, the firmware starts a fallback access point.
 
-- SSID: `ChArm-UI`
-- password: `charm1234`
+The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp (or backend connect request) so the host can reach the UI box.
 
-Build and upload with PlatformIO:
-
-```bash
-cd arduino_code/esp32_ui_box
-pio run -e esp32_ui_box -t upload
-pio device monitor -e esp32_ui_box
-```
-
-The firmware starts a TCP server on port `8765`. The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp (or backend connect request) so the host can reach the UI box.
-
-Wire the rotary encoder/button and LCD to the ESP32D pins defined in [arduino_code/src/hardware/src/pins.h](arduino_code/src/hardware/src/pins.h):
-
-| UI signal | ESP32D pin |
-|---|---:|
-| Encoder SW | 5 |
-| Encoder DT | 17 |
-| Encoder CLK | 16 |
-| LCD RS | 14 |
-| LCD E | 27 |
-| LCD D4 | 26 |
-| LCD D5 | 25 |
-| LCD D6 | 33 |
-| LCD D7 | 32 |
-
-The UI box exchanges newline-terminated TCP commands with Python. The main ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
+The UI box exchanges newline-terminated TCP commands with the Python host. The main ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
 
 ### Python Host
 
@@ -597,7 +561,8 @@ The resulting model is then used by the CNN classifier for the next session.
 - Because of that, the system relies on a **known previous chess position** and infers the move by iterating over legal moves.
 - Promotion cannot be uniquely identified from occupancy/colour alone if multiple promotion pieces would produce the same bitmap pattern.
 - Real-world robustness still depends on lighting, calibration quality, and board visibility.
-- //TODO review as a team
+
+<!-- TODO: review limitations as a team -->
 
 ## Future Improvements
 
