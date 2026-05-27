@@ -27,6 +27,7 @@ This README is the top-level guide to understanding, rebuilding, and running the
 - [Software Architecture](#software-architecture)
 - [How the Game Flow Works](#how-the-game-flow-works)
 - [Setup & Installation](#setup--installation)
+- [Web Interface](#web-interface)
 - [Calibration](#calibration)
 - [Common Workflows](#common-workflows)
 - [Current Limitations](#current-limitations)
@@ -126,16 +127,16 @@ The CAD files for the printed and laser-cut parts live in [docs/CAD/](docs/CAD/)
 
 **Build order (high level)**
 
-1. Machine the base flanges on the lathe/drill press and mount the base stepper and the J1 pulley.
-2. Assemble the SCARA linkage: print the two 250 mm links, fit the J1/J2 belts and pulleys at the documented tooth ratios, and join the forearm to the elbow joint.
-3. Build the Z stage: mount the lead screw, its stepper, and the carriage that carries the gripper.
-4. Mount the servo gripper on the Z carriage.
-5. Fit the limit switches at the J1, J2, and Z-bottom home positions.
-6. Mount the ESP32-CAM above the board with a clear top-down view.
-7. Assemble the UI box (LCD + rotary encoder) and the electronics enclosure around the Arduino/CNC shield.
-8. Wire everything per the circuit diagram, then run homing and calibration before the first game.
-
-<!-- TODO: add CAD renders, exported STLs, and per-part print settings -->
+1. Machine the base flanges, on the lathe/drill.
+2. Print the 3D printed parts available in the CAD files
+3. Laser cut the DXF files in the CAD files
+3. Cut 3 320 size 8mm metal rods
+4. There are a lot of heat inserts needed so make sure you put them nicely.
+5. Once the heat inserts are you can start building the 6 main modules to assemble (box, base, arm, lcd, display, camera arm, chessboard)
+6. Next step is to solder and add jst connectors to the 4 main electronical componeents (one camera power veroboard, 1 ui box veroboard, the limist switch themsevles and its pull up resistor veroboard)
+7. Now that everything is assembled just wire up the electronics as in the diagram
+8. flash the firmware using the ./install.sh utility
+9. start playing
 
 ### Configuration Files
 
@@ -446,6 +447,36 @@ Once setup is complete, you can launch both backend and frontend servers with a 
 
 This will automatically load the virtual environment and start the FastAPI webserver and React dashboard concurrently.
 
+## Web Interface
+
+Once the app is running, open the webapp at <http://localhost:3000>. It is the
+control center for the whole robot: you can play a game, configure the vision
+pipeline, train and activate a CNN, label training data, and calibrate the arm —
+all without touching a terminal.
+
+### Built-in Guide page
+
+The webapp ships with its own **Guide** page that walks through every screen,
+explains what each control does, and ends with a "Starting a Game" checklist. It
+lives at <http://localhost:3000/guide> and is the most up-to-date, canonical
+reference for using the interface — start there rather than memorizing the
+sections below.
+
+### Pages at a glance
+
+| Page | Route | What it's for |
+|---|---|---|
+| Dashboard | `/` | Play a game, live board view, arm calibration, **Run LCD** sync |
+| Vision Pipeline | `/lab` | Debug the classical CV output stage-by-stage; tune the occupancy threshold and warp |
+| Vision Settings | `/lab/vision-settings` | CV router (classical vs. CNN), auto-save of training frames, active CNN model |
+| Labeling Wizard | `/lab/labeling` | Build labeled datasets via arm-driven capture or bulk painting |
+| CNN Wizard | `/lab/cnn` | Train a model on a dataset and activate it for live play |
+| SCARA Calibration | `/robot` | Teach the arm the board corners (a1, h1, h8) |
+| Guide | `/guide` | In-app walkthrough of all of the above |
+
+The Serial Monitor bar at the bottom of every page streams the commands sent to
+the Arduino arm (TX) and its responses (RX) for live debugging.
+<img src ="">
 ## Calibration
 
 The Python vision stack expects calibration JSON files:
@@ -482,10 +513,9 @@ This is the normal way to run ChArm. From the repo root:
 backend (`webapp_backend/api_server.py`, port `8765`) and the Next.js frontend
 (port `3000`). Then either:
 
-- open the webapp at <http://localhost:3000>, **or**
-- use the on-robot LCD + rotary encoder.
+- open the webapp at <http://localhost:3000>
 
-From there: calibrate the arm, start a game, pick colour and difficulty, make
+From there: calibrate the arm (mandatory), start a game, pick colour and difficulty, make
 your move on the physical board, and confirm it. The backend captures the board,
 runs the vision pipeline, validates your move, asks Stockfish for the reply, and
 drives the arm.
@@ -501,25 +531,6 @@ The board calibration is done from the webapp:
 
 This writes `board_calibration.json` and `inner_warp_calibration.json`, which the
 game pipeline then loads automatically.
-
-### Debug the classical vision pipeline on one image
-
-Useful when tuning the geometric warp / occupancy / colour stages (this path is
-the **classical** pipeline, not the CNN):
-
-```bash
-source venv/bin/activate
-# default input is latest_raw.jpg; or pass --image <path> / --camera
-python python_code/main.py
-```
-
-It writes step-by-step debug images to `python_code/`:
-
-- `output_first_warp.jpg`, `output_refined_warp.jpg`, `output_warped_board.jpg`
-- `output_grid_debug.jpg`, `output_occupancy_debug.jpg`, `output_piece_color_debug.jpg`
-
-Pass `--before-moves e2e4 e7e5 ...` to also have it reconstruct the move shown in
-the image from the prior position.
 
 ### Improve the CNN (living-dataset loop)
 
