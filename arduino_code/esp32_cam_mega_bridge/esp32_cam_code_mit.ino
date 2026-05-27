@@ -221,14 +221,22 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  config.frame_size = FRAMESIZE_QVGA;   // 320x240
+  framesize_t frameSize = FRAMESIZE_UXGA;
+  config.frame_size = frameSize;
   config.jpeg_quality = 12;
   config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
 
   if (err != ESP_OK) {
-    return false;
+    // Fallback to a lower resolution if UXGA is not supported.
+    frameSize = FRAMESIZE_SVGA;
+    config.frame_size = frameSize;
+    err = esp_camera_init(&config);
+
+    if (err != ESP_OK) {
+      return false;
+    }
   }
 
   sensor_t *s = esp_camera_sensor_get();
@@ -236,7 +244,10 @@ bool initCamera() {
   if (s) {
     s->set_brightness(s, 1);
     s->set_saturation(s, 0);
-    s->set_framesize(s, FRAMESIZE_QVGA);
+    s->set_contrast(s, 1);
+    s->set_denoise(s, 1);
+    s->set_gainceiling(s, GAINCEILING_4X);
+    s->set_framesize(s, frameSize);
   }
 
   return true;
