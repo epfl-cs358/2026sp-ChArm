@@ -1,8 +1,8 @@
 # ChArm
 
-> A chess-playing robot that sees the board, thinks with Stockfish, and moves the pieces itself.
+> A chess-playing robot arm that sees the board, thinks with Stockfish, and moves the pieces itself.
 
-ChArm is a chess-playing robot built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
+ChArm is a chess-playing robot arm built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
 
 <!-- TODO: add a photo / demo video of the robot in action -->
 
@@ -42,8 +42,8 @@ The project is organized so that hardware control and chess/vision logic can be 
 
 **Gameplay**
 - Plays a full game of physical chess against a human, end to end
-- Selectable difficulty (easy / medium / hard) powered by Stockfish
-- Handles normal moves, captures, and castling
+- Selectable difficulty (1-20) powered by Stockfish
+- Handles normal moves, captures, castling and promotion
 - On-robot LCD + rotary-encoder UI — no computer needed to play
 
 **Robot / motion**
@@ -149,7 +149,7 @@ Two firmware headers hold the values worth checking whenever the robot is rebuil
 
 ChArm is a distributed system. A Python backend orchestrates the game and talks
 to a web/embedded frontend, three microcontrollers, and a chess engine. The
-backend — `webapp_backend/api_server.py`, a FastAPI service on port `8765` — is
+backend (`webapp_backend/api_server.py`, a FastAPI service on port `8765`) is
 the single source of truth: both the webapp and the on-robot LCD drive the
 **same** game session through it.
 
@@ -190,20 +190,22 @@ The main Arduino entry point is [arduino_code/src/main.cpp](arduino_code/src/mai
 
 It is responsible for:
 
-- setting up steppers, joints, gripper, lead screw, and limit switches
-- handling calibration and EEPROM persistence
-- receiving serial commands
-- translating high-level movement requests into robot motion
+- initialising steppers, joints, gripper, lead screw, and limit switches on boot
+- homing all axes via limit switches before any motion
+- running a guided 3-corner board calibration wizard (`cal` command) and saving the result to EEPROM
+- receiving serial commands from the Python host and executing them
+- translating high-level commands like `pick <piece> <square>` and `put <piece> <square|trash>` into Cartesian pick-and-place sequences
+- supporting direct movement commands
 
-Key hardware abstractions are in `arduino_code/src/hardware/src/`:
+Key hardware abstractions are in [arduino_code/src/hardware/src/](arduino_code/src/hardware/src/):
 
-- `StepperXYZ`
-- `ScaraJoint`
-- `LeadScrew`
-- `ScaraKinematics`
-- `ScaraArm`
-- `Gripper`
-- `LimitSwitch`
+- `ScaraArm`: top-level arm controller; exposes `pickAt`, `placeAt`, `moveXY`, `moveXYZ`, `goHome`
+- `ScaraKinematics`: inverse/forward kinematics for the two-link SCARA geometry
+- `ScaraJoint`: per-joint stepper with gear-ratio scaling and angle tracking
+- `LeadScrew`: Z-axis stepper with mm-to-step conversion
+- `StepperXYZ`: low-level STEP/DIR stepper driver
+- `Gripper`: servo-driven gripper with open/close angles
+- `LimitSwitch`: debounced limit switch reader used during calibration
 
 The PlatformIO environments are defined in [arduino_code/platformio.ini](arduino_code/platformio.ini).
 
@@ -222,14 +224,37 @@ At runtime, the board:
 
 #### ESP32 UI box — player interface
 
-The ESP32 firmware for the UI box is in
-[arduino_code/esp32_ui_box/](arduino_code/esp32_ui_box/).
+The main ESP32 entry point is [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp).
 
-Before flashing it, edit `WIFI_CREDENTIALS` in [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp). The UI box and the Python host must be on the same Wi-Fi network. If no configured network is reachable, the firmware starts a fallback access point.
+It is responsible for:
 
-The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp (or backend connect request) so the host can reach the UI box.
+- connecting to Wi-Fi
+- hosting a TCP server on port 8765 for bidirectional communication with the Python host
+- driving the 16×2 LCD display
+- reading the rotary encoder and push button and converting them to `INPUT_NEXT`, `INPUT_PREV`, and `INPUT_SELECT` events
+- running the `UIState` mode state machine and forwarding commands to Python
 
-The UI box exchanges newline-terminated TCP commands with the Python host. The main ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, and `CALIBRATION`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVING`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, and `GAME_OVER <reason>`.
+Key abstractions are in [arduino_code/src/hardware/src/](arduino_code/src/hardware/src/):
+
+- `UIState`: 11-mode state machine holding the current screen, game status, turn, and selected values
+- `UIControllerESP32`: ties it all together: reads encoder events and TCP messages, drives `UIState` transitions
+- `LCDDisplay`: 16×2 display driver
+- `ButtonInput`: rotary encoder decoder, emits `INPUT_NEXT`, `INPUT_PREV`, `INPUT_SELECT`
+
+From the player's perspective the flow is:
+
+1. The LCD shows `Main Menu`; scroll with the encoder to `> Start Game`, `> Calibration` or `> Manual Control`, and press whichever to select.
+2. After selecting `> Start Game`, The LCD shows `Difficulty` / `<n>`; scroll to adjust and press to confirm difficulty level.
+3. The LCD shows `Play as...` / `> White` or `> Black`; scroll and press to confirm.
+4. During the game the top line shows the turn (`White Turn` / `Black Turn`, prefixed with `CHECK` if in check); the bottom line reflects the bot's activity (`BOT thinking...` and `Bot moving` / `<uci.move>`). When it is your turn, the bottom line shows `If done press OK`; make your move on the board and press the button to confirm.
+5. When the game ends the LCD shows `White Wins!`, `Black Wins!`, `Stalemate`, or `Draw`.
+6. If something goes wrong at any point (illegal move, board detection failure, etc.) the top line shows `Illegal move !` or `Set up ERROR` and the bottom line shows the error detail; press the button to clear it and retry.
+
+Before flashing, edit `WIFI_CREDENTIALS` in [arduino_code/esp32_ui_box/esp32_ui_box.cpp](arduino_code/esp32_ui_box/esp32_ui_box.cpp). The LCD shows the ESP32 IP address after Wi-Fi connects; enter that address in the webapp so the host can reach the UI box.
+
+The UI box exchanges TCP commands with the Python host. The ESP32-to-Python commands are `CHECK_BOARD`, `PLAYER_DONE`, `SET_COLOR <n>`, `SET_DIFFICULTY <n>`, `CALIBRATION`, `PROMOTION_CHOICE <piece>` (user's pawn-promotion selection: q/r/b/n), `BOARD_OK_ACK`, `BOARD_FAIL_ACK`, and `BOARD_TIMEOUT`. In manual-control mode the ESP32 also sends `MANUAL_JOINT1_FWD`, `MANUAL_JOINT1_BWD`, `MANUAL_JOINT2_FWD`, `MANUAL_JOINT2_BWD`, `MANUAL_Z_FWD`, `MANUAL_Z_BWD`, `MANUAL_GRIPPER_OPEN`, and `MANUAL_GRIPPER_CLOSE`. Python replies with status updates such as `BOARD_OK`, `BOARD_FAIL`, `BOT_THINKING`, `BOT_MOVE <uci>`, `BOT_MOVING`, `BOT_PROMOTING <piece>`, `PLAYER_TURN_WHITE`, `PLAYER_TURN_BLACK`, `MOVE_DONE`, `CHECK`, `PROMOTION_NEEDED`, `GAME_OVER <reason>`, `ERROR_MSG <message>`, and `SET_MODE <n>`.
+
+The PlatformIO environment is defined in [arduino_code/esp32_ui_box/platformio.ini](arduino_code/esp32_ui_box/platformio.ini).
 
 ### Python Host
 
@@ -247,7 +272,7 @@ At runtime the FastAPI backend wires together four packages under
 
 The vision stack turns a single raw ESP32-CAM frame into two 8×8 bitmaps (white
 pieces and black pieces) for the move tracker. It runs **two interchangeable
-pipelines** — a classical CV algorithm and a trained CNN — that share the same
+pipelines**, a classical CV algorithm and a trained CNN, that share the same
 pre-processing and the same bitmap output format, selected at runtime by a
 router (`cv_router.py`).
 
@@ -262,8 +287,8 @@ perspective-distorted camera image into a normalized 8×8 board representation.
 
 **Two-stage perspective warping** — two sequential homographies align the board:
 
-1. **Global warp** — the four calibrated outer corners map to an 800×800 square.
-2. **Inner refinement** — internal grid intersections refine that warp,
+1. **Global warp**: the four calibrated outer corners map to an 800×800 square.
+2. **Inner refinement**: internal grid intersections refine that warp,
    correcting lens distortion and small geometric error so every square lands
    consistently.
 
@@ -528,8 +553,8 @@ between chess logic and robot motion.
 
 #### Hardware Bridges (`arduino/`)
 
-- `arduino_bridge.py` — sends Cartesian pick-and-place commands to the Arduino Mega over USB serial
-- `uiController_bridge.py` — `ArduinoUIControllerLink`, the TCP link to the ESP32 UI box
+- `arduino_bridge.py`: sends Cartesian pick-and-place commands to the Arduino Mega over USB serial
+- `uiController_bridge.py`: `ArduinoUIControllerLink`, the TCP link to the ESP32 UI box
 
 The backend's `webapp_backend/robot_adapter.py` owns the serial connection and a
 lock, so the LCD and the webapp can both drive the arm without colliding.
