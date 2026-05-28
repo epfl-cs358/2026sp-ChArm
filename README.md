@@ -1,6 +1,19 @@
 # ChArm
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Next.js-React-000000?logo=nextdotjs&logoColor=white" alt="Next.js">
+  <img src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/TensorFlow-Keras_CNN-FF6F00?logo=tensorflow&logoColor=white" alt="TensorFlow">
+  <img src="https://img.shields.io/badge/Arduino-PlatformIO-00979D?logo=arduino&logoColor=white" alt="Arduino">
+  <img src="https://img.shields.io/badge/ESP32-Wi--Fi-E7352C?logo=espressif&logoColor=white" alt="ESP32">
+  <img src="https://img.shields.io/badge/Stockfish-chess_engine-769656?logo=lichess&logoColor=white" alt="Stockfish">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
+  <img src="https://img.shields.io/badge/hardware-CC--BY--4.0-lightgrey" alt="CC-BY-4.0">
+  <img src="https://img.shields.io/badge/EPFL-CS--358-FF0000" alt="EPFL CS-358">
+</p>
+
+<p align="center">
   <img src="docs/final_arm_assembly.png" alt="Final arm assembly" width="45%">
   <img src="docs/final_arm_assembly_with_explosion.png" alt="Exploded final arm assembly" width="45%">
 </p>
