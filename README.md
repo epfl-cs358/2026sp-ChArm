@@ -341,7 +341,7 @@ setup, `90` separates white pieces around `200` from black pieces around `40`.
 
 <img src="/docs/color1.png" alt="color1"/>
 
-<img src="/docs/color2.png" alt="color2"/>
+<img src="/docs/color2.png" alt="color2" width=30%/>
 
 ##### CNN classifier
 
