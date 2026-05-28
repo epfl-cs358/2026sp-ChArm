@@ -95,6 +95,8 @@ The project is organized so that hardware control and chess/vision logic can be 
   - J2 (elbow): 18 → 105 tooth reduction
 - **Z axis** — 290 mm-travel vertical lead screw (4-start, 2 mm pitch → 8 mm/rev)
 - **Gripper** — servo-driven, 0°–65° open/close span
+- **Camera arm** — fixed to the chessboard with a 3D-printed support screwed
+  into the board, and a camera mount holds the ESP32-CAM at a stable viewing angle
 - **Motors** — 3× 1.8° / 200-step steppers at 16× microstepping (the lead screw runs at 2× microstepping)
 
 ### Electronics and Wiring
@@ -301,15 +303,45 @@ The refined image is divided into 64 `SquareCell` objects. Each cell contains:
 
 ##### Classical pipeline — the vision algorithm
 
-The original, training-free path (`pipeline.py`) classifies each of the 64 cells
-with handcrafted heuristics:
+The high-level flow of the classical CV pipeline is:
 
-- **occupancy detection** — decides whether a square holds a piece
-- **piece-color detection** — classifies an occupied square as white or black
-- the per-cell results are assembled into the white/black 8×8 bitmaps
+1. Run occupancy detection on each cell to decide whether it contains any piece.
+2. Run color detection only on occupied cells to classify them as white or
+   black.
+3. Assemble the final white/black 8×8 bitmaps and save debug overlays for
+   inspection.
 
-This pipeline needs no model and serves as the fallback when the CNN is
-unavailable or fails to produce a valid board.
+**Occupancy detection**
+
+For each square, the detector looks at a central region of interest instead of
+the whole cell. The ROI is converted to grayscale, broad lighting gradients are suppressed by subtracting a heavily blurred version of the image, and then CLAHE is applied before scoring with the edge density with Canny .
+
+The final occupancy score combines local contrast and Canny edge density.
+
+For occupancy, `occupancy_threshold` decides whether a square is occupied.
+Raising it reduces false positives, lowering it helps detect weaker pieces. In our setup, empty squares are usually around `0-5`, occupied squares around `20+`, and the active threshold is `12.0`.
+
+
+<img src="/docs/occupancy1.png" alt="occupancy1"/>
+<img src="/docs/occupancy2.png" alt="occupancy2" width=30%/>
+
+
+**Piece-color detection**
+
+Only cells already marked as occupied are classified by color. For each occupied
+cell, the detector inspects a smaller central ROI where the body of the chess
+piece is most likely to appear. It converts that ROI to grayscale and uses the
+75th percentile brightness as the color score.
+
+For piece color, raising the threshold makes the detector more conservative
+about white pieces, so borderline pieces are more likely to be classified as
+black. Lowering the threshold makes pieces easier to classify as white. In our
+setup, `90` separates white pieces around `200` from black pieces around `40`.
+
+
+<img src="/docs/color1.png" alt="color1"/>
+
+<img src="/docs/color2.png" alt="color2"/>
 
 ##### CNN classifier
 
