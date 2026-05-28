@@ -1,6 +1,11 @@
 #ifndef PINS_H
 #define PINS_H
 
+/**
+ * pins.h defines the pins used on our microprocessors
+ */
+
+// ==== Arduino Mega 2560 ====
 // stepper axis
 const int X_STEP_IN1 = 2;
 const int Y_STEP_IN1 = 3;

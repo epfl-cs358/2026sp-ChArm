@@ -1,5 +1,11 @@
 #ifndef CONFIG_H
 #define CONFIG_H
+/**
+ * config.h defines mechanical variables to drive the movement of the arm
+ * 
+ * The values are measured on the physical arm
+ */
+
 
 const unsigned int DEFAULT_STEP_DELAY_US = 300;
 
