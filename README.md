@@ -870,10 +870,14 @@ Some realistic next steps are:
 - Add automated retraining workflows for the continuously growing dataset.
 - Strengthen end-to-end robustness across different lighting conditions and camera positions.
 
+### LCD / Embedded UI
+
+- Add an in-game pause menu during the player's turn with forfeit and mid-game calibration options.
+- Show a processing indicator while the vision pipeline runs after the player confirms a move, so the LCD does not appear stuck on "If done press OK".
+
 ### System Integration
 
 - Add clearer player feedback when invalid or ambiguous board states are detected.
-- Extend the UI to expose more debugging and calibration information.
 - Improve synchronization between board verification, move planning, and robot execution.
 
 ## License
