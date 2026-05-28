@@ -114,7 +114,7 @@ The project is organized so that hardware control and chess/vision logic can be 
 
 - Needs only 5 V power, distributed to the correct pins on a stripboard. The data pins of the LCD and the button connect to an ESP32 that handles transmission to the host.
 
-<img src="docs/ChArm Electrical Circuit.png" alt="Electrical Circuit" width=30%/>
+<img src="docs/chArm-electrical-circuit.png" alt="Electrical Circuit" width=50%/>
 
 ### Fabrication Tools
 
@@ -322,8 +322,8 @@ For occupancy, `occupancy_threshold` decides whether a square is occupied.
 Raising it reduces false positives, lowering it helps detect weaker pieces. In our setup, empty squares are usually around `0-5`, occupied squares around `20+`, and the active threshold is `12.0`.
 
 
-<img src="/docs/occupancy1.png" alt="occupancy1"/>
-<img src="/docs/occupancy2.png" alt="occupancy2" width=30%/>
+<img src="/docs/occupancy1.png" alt="Occupancy Pipeline : from raw picture to processed."/>
+<img src="/docs/occupancy2.png" alt="Final processed image with occupied tiles flagged" width=30%/>
 
 
 **Piece-color detection**
@@ -339,9 +339,9 @@ black. Lowering the threshold makes pieces easier to classify as white. In our
 setup, `90` separates white pieces around `200` from black pieces around `40`.
 
 
-<img src="/docs/color1.png" alt="color1"/>
+<img src="/docs/color1.png" alt="Color detection pipeline, from raw picture to colors detected"/>
 
-<img src="/docs/color2.png" alt="color2" width=30%/>
+<img src="/docs/color2.png" alt="Final color detected image with black and white pieces flagged" width=30%/>
 
 ##### CNN classifier
 
