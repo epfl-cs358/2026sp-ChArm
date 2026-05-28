@@ -704,7 +704,6 @@ sections below.
 
 The Serial Monitor bar at the bottom of every page streams the commands sent to
 the Arduino arm (TX) and its responses (RX) for live debugging.
-<img src ="">
 ## Calibration
 
 The camera image contains a lot more than the chessboard: table texture, shadows,
