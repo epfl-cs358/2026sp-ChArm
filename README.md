@@ -1,8 +1,8 @@
 # ChArm
 
 <p align="center">
-  <img src="final_arm_assembly.png" alt="Final arm assembly" width="45%">
-  <img src="final_arm_assembly_with_explosion.png" alt="Exploded final arm assembly" width="45%">
+  <img src="docs/final_arm_assembly.png" alt="Final arm assembly" width="45%">
+  <img src="docs/final_arm_assembly_with_explosion.png" alt="Exploded final arm assembly" width="45%">
 </p>
 
 > A chess-playing robot arm that sees the board, thinks with Stockfish, and moves the pieces itself.
@@ -104,7 +104,7 @@ The project is organized so that hardware control and chess/vision logic can be 
   into the board, and a camera mount holds the ESP32-CAM at a stable viewing angle
 - **Motors** — 3× 1.8° / 200-step steppers at 16× microstepping (the lead screw runs at 2× microstepping)
 
-<img src="docs/final_arm_assembly_transparent.png" alt="CAD image of the final build">
+<img src="docs/final_arm_assembly_lower_angle.png" alt="CAD image of the final build">
 
 ### Electronics and Wiring
 
