@@ -10,7 +10,7 @@
   <a href="https://stockfishchess.org"><img src="https://img.shields.io/badge/Stockfish-chess_engine-769656?logo=lichess&logoColor=white" alt="Stockfish"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
   <a href="LICENSE-CC-BY-4.0"><img src="https://img.shields.io/badge/hardware-CC--BY--4.0-lightgrey" alt="CC-BY-4.0"></a>
-  <a href="https://edu.epfl.ch/coursebook/en/computer-system-design-CS-358"><img src="https://img.shields.io/badge/EPFL-CS--358-FF0000" alt="EPFL CS-358"></a>
+  <a href="https://edu.epfl.ch/coursebook/en/making-intelligent-things-b-CS-358-B"><img src="https://img.shields.io/badge/EPFL-CS--358-FF0000" alt="EPFL CS-358"></a>
 </p>
 
 <p align="center">
