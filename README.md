@@ -4,7 +4,7 @@
 
 ChArm is a chess-playing robot arm built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
 
-<video src="docs/ChArm trailer.mp4" controls width="640"></video>
+<video src="https://github.com/user-attachments/assets/e374c072-53ec-447c-b2c5-00aa87391602" controls width="640"></video>
 
 ### Gameplay loop
 
