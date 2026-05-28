@@ -99,7 +99,7 @@ The project is organized so that hardware control and chess/vision logic can be 
   into the board, and a camera mount holds the ESP32-CAM at a stable viewing angle
 - **Motors** — 3× 1.8° / 200-step steppers at 16× microstepping (the lead screw runs at 2× microstepping)
 
-<!-- TODO: add a CAD overview picture -->
+<img src="docs/final_arm_assembly_transparent.png" alt="CAD image of the final build">
 
 ### Electronics and Wiring
 
