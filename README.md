@@ -1,5 +1,10 @@
 # ChArm
 
+<p align="center">
+  <img src="final_arm_assembly.png" alt="Final arm assembly" width="45%">
+  <img src="final_arm_assembly_with_explosion.png" alt="Exploded final arm assembly" width="45%">
+</p>
+
 > A chess-playing robot arm that sees the board, thinks with Stockfish, and moves the pieces itself.
 
 ChArm is a chess-playing robot arm built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
