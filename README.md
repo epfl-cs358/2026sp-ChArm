@@ -1,16 +1,16 @@
 # ChArm
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Next.js-React-000000?logo=nextdotjs&logoColor=white" alt="Next.js">
-  <img src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/TensorFlow-Keras_CNN-FF6F00?logo=tensorflow&logoColor=white" alt="TensorFlow">
-  <img src="https://img.shields.io/badge/Arduino-PlatformIO-00979D?logo=arduino&logoColor=white" alt="Arduino">
-  <img src="https://img.shields.io/badge/ESP32-Wi--Fi-E7352C?logo=espressif&logoColor=white" alt="ESP32">
-  <img src="https://img.shields.io/badge/Stockfish-chess_engine-769656?logo=lichess&logoColor=white" alt="Stockfish">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
-  <img src="https://img.shields.io/badge/hardware-CC--BY--4.0-lightgrey" alt="CC-BY-4.0">
-  <img src="https://img.shields.io/badge/EPFL-CS--358-FF0000" alt="EPFL CS-358">
+  <a href="https://www.python.org"><img src="https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white" alt="Python"></a>
+  <a href="https://nextjs.org"><img src="https://img.shields.io/badge/Next.js-React-000000?logo=nextdotjs&logoColor=white" alt="Next.js"></a>
+  <a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white" alt="FastAPI"></a>
+  <a href="https://www.tensorflow.org"><img src="https://img.shields.io/badge/TensorFlow-Keras_CNN-FF6F00?logo=tensorflow&logoColor=white" alt="TensorFlow"></a>
+  <a href="https://platformio.org"><img src="https://img.shields.io/badge/Arduino-PlatformIO-00979D?logo=arduino&logoColor=white" alt="Arduino"></a>
+  <a href="https://www.espressif.com/en/products/socs/esp32"><img src="https://img.shields.io/badge/ESP32-Wi--Fi-E7352C?logo=espressif&logoColor=white" alt="ESP32"></a>
+  <a href="https://stockfishchess.org"><img src="https://img.shields.io/badge/Stockfish-chess_engine-769656?logo=lichess&logoColor=white" alt="Stockfish"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+  <a href="LICENSE-CC-BY-4.0"><img src="https://img.shields.io/badge/hardware-CC--BY--4.0-lightgrey" alt="CC-BY-4.0"></a>
+  <a href="https://edu.epfl.ch/coursebook/en/computer-system-design-CS-358"><img src="https://img.shields.io/badge/EPFL-CS--358-FF0000" alt="EPFL CS-358"></a>
 </p>
 
 <p align="center">
