@@ -99,6 +99,8 @@ The project is organized so that hardware control and chess/vision logic can be 
   into the board, and a camera mount holds the ESP32-CAM at a stable viewing angle
 - **Motors** — 3× 1.8° / 200-step steppers at 16× microstepping (the lead screw runs at 2× microstepping)
 
+<!-- TODO: add a CAD overview picture -->
+
 ### Electronics and Wiring
 
 **Main Arduino circuit**
@@ -821,8 +823,6 @@ The resulting model is then used by the CNN classifier for the next session.
 - Because of that, the system relies on a **known previous chess position** and infers the move by iterating over legal moves.
 - Promotion cannot be uniquely identified from occupancy/color alone if multiple promotion pieces would produce the same bitmap pattern.
 - Real-world robustness still depends on lighting, calibration quality, and board visibility.
-
-<!-- TODO: review limitations as a team -->
 
 ## Future Improvements
 
