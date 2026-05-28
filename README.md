@@ -4,7 +4,9 @@
 
 ChArm is a chess-playing robot arm built around a two-link SCARA arm with a vertical lead-screw Z axis and a servo gripper. An Arduino Mega handles motion, an ESP32-CAM captures the board, an ESP32 UI box drives an on-robot LCD/encoder interface, and a Python host runs the computer vision and chess logic that tie everything together.
 
-<!-- TODO: add a photo / demo video of the robot in action -->
+<video width="640" height="480" controls>
+  <source src="docs/ChArm trailer.mp4" type="video/mp4">
+</video>
 
 ### Gameplay loop
 
@@ -801,7 +803,19 @@ for building datasets quickly and consistently. It supports two capture modes:
   each square's label (empty / white / black) on the on-screen grid, then hit
   capture. One photo yields a labeled crop for every painted square.
 
-<!-- TODO: add screenshots / video of the labeling page, autonomous capture, and bulk painting -->
+<table>
+  <tr>
+    <td align="center"><img src="docs/webapp-labeling-wizard.jpg" width="320"><br><sub>Labeling Wizard</sub></td>
+    <td align="center"><img src="docs/webapp-cnn-training.jpg" width="320"><br><sub>CNN Wizard — training</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/webapp-vision-settings.jpg" width="320"><br><sub>Vision Settings</sub></td>
+    <td align="center"><img src="docs/webapp-cv-mode.jpg" width="320"><br><sub>Vision Pipeline</sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/webapp-game-eval.jpg" width="320"><br><sub>Dashboard — game &amp; evaluation</sub></td>
+  </tr>
+</table>
 
 **Train and deploy** — once a dataset looks good (the wizard can also compute
 per-square accuracy stats), build and train:
