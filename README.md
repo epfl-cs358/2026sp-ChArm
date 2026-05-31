@@ -862,7 +862,7 @@ Some realistic next steps are:
 - Increase arm speed while preserving repeatability and positional accuracy.
 - Design a better enclosure/box for cleaner integration of electronics and mechanics.
 - Improve stepper-driver heat management to reduce overheating risks during longer runs.
-- Machine critical joint components, especially the axle section linking the forearm to the joint pulley, to improve rigidity and reduce play.
+- Machine out of aluminium critical joint components, especially the axle section linking the forearm to the joint pulley, to improve rigidity and reduce play.
 - Reduce backlash and improve overall structural stiffness in the SCARA linkage.
 
 ### Vision and Software
